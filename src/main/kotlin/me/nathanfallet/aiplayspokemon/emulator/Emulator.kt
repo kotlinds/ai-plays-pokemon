@@ -3,7 +3,7 @@ package me.nathanfallet.aiplayspokemon.emulator
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * What the rest of the app (UI, Jev agent) knows about an emulator.
+ * What the rest of the app (UI, AI agent) knows about an emulator.
  *
  * This is the seam between "an emulated console" and "everything that uses it": the libretro
  * implementation ([me.nathanfallet.aiplayspokemon.emulator.libretro.LibretroEmulator]) is one way

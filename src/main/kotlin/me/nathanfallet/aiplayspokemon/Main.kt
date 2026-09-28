@@ -22,7 +22,7 @@ import java.nio.file.Path
  *
  *   emulator (libretro core)  →  game (reads RAM into an Observation)
  *        ↑ buttons                     ↓
- *   agent (PokemonPlayer)  ←  decision model (Jev, or a local LLM)
+ *   agent (PokemonPlayer)  ←  decision model (the AI: Jev, or an LLM through Koog)
  *
  * and shows everything in a Compose window.
  */

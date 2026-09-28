@@ -37,5 +37,6 @@ object KeyboardMapping {
         "F" to "Fast forward",
         "M" to "Mute",
         "F1-F4" to "Load state (⇧ to save)",
+        "F12" to "Save a RAM snapshot",
     )
 }

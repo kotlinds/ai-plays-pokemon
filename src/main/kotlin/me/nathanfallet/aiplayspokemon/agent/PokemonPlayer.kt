@@ -10,20 +10,20 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
 import me.nathanfallet.aiplayspokemon.decision.DecisionModel
-import me.nathanfallet.aiplayspokemon.decision.jev.JevException
+import me.nathanfallet.aiplayspokemon.decision.DecisionException
 import me.nathanfallet.aiplayspokemon.emulator.Emulator
 import me.nathanfallet.aiplayspokemon.emulator.InputSource
 import me.nathanfallet.aiplayspokemon.game.Observation
 import me.nathanfallet.aiplayspokemon.game.PokemonGame
 import me.nathanfallet.aiplayspokemon.game.RamMemory
-import java.io.IOException
 
 /**
  * The autonomous player: an observe → decide → act loop.
  *
  * 1. **Observe**: snapshot the RAM and let the [game] reader describe the situation.
- * 2. **Decide**: ask the decision [model] (Jev) which [ButtonPress] to make: any button, like a human.
+ * 2. **Decide**: ask the AI ([model]) which [ButtonPress] to make: any button, like a human.
  * 3. **Act**: hold that button on the emulator, release it, then wait for the game to react.
  * 4. **Remember**: record which button was pressed and what changed ([AgentMemory]).
  *
@@ -55,11 +55,13 @@ class PokemonPlayer(
                     try {
                         step()
                         _state.update { it.copy(error = null) }
-                    } catch (error: IOException) {
-                        // Network hiccup, rate limit, server overloaded...: show it, wait, retry.
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (error: Exception) {
+                        // Network hiccup, rate limit, an answer that couldn't be parsed...: show it, wait, retry.
                         // Errors that won't fix themselves (bad API key, invalid request) stop the loop.
-                        if (error is JevException && error.status in setOf(401, 403, 422)) throw error
-                        _state.update { it.copy(error = error.message) }
+                        if (error is DecisionException && !error.retryable) throw error
+                        _state.update { it.copy(error = error.message ?: error.toString()) }
                         delay(2_000)
                     }
                 }
@@ -93,6 +95,7 @@ class PokemonPlayer(
 
         val before = observe()
         val request = DecisionPrompt.build(objective, before, memory)
+        _state.update { it.copy(lastRequestState = request.state) }
 
         val startedAt = System.nanoTime()
         val result = model.choose(request)
@@ -101,7 +104,7 @@ class PokemonPlayer(
 
         perform(press)
         val after = observe()
-        memory.record(press, before, after)
+        memory.record(press, before, after, result.thought)
 
         val decision = Decision(
             number = state.value.decisions + 1,
@@ -140,6 +143,8 @@ class PokemonPlayer(
 /** Everything the UI shows about the player. */
 data class PlayerState(
     val playing: Boolean = false,
+    /** The full state sent with the last request (screen + memory), exactly as the model received it. */
+    val lastRequestState: JsonObject? = null,
     val lastDecision: Decision? = null,
     /** Most recent decisions first. */
     val history: List<Decision> = emptyList(),

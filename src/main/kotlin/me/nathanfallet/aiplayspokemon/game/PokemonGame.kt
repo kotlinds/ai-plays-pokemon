@@ -10,8 +10,8 @@ import kotlinx.serialization.json.JsonObject
  * battle... with one implementation per game), next to the kotlinds libraries. They stay local
  * until this project is further along.
  *
- * Jev can't look at the screen: it only reads text/JSON. Each supported game therefore provides a
- * reader turning raw RAM into an [Observation] (what's going on + a JSON description for Jev).
+ * The AI doesn't look at the screen: it reads text/JSON. Each supported game therefore provides a
+ * reader turning raw RAM into an [Observation] (what's going on + a JSON description for the AI).
  * Supporting another game (SoulSilver, Platinum, Emerald...) means implementing this interface.
  */
 interface PokemonGame {
@@ -26,8 +26,8 @@ interface PokemonGame {
  * What the agent knows about the game at one instant.
  *
  * [state] is the game-specific description sent to the model as is (what a player would see on
- * screen). [mode] and [location] are coarse facts used by our own code: the UI summary and the short
- * history of what changed after each button press.
+ * screen). [mode], [location] and [dialogue] are coarse facts used by our own code: the UI summary
+ * and the agent's memory of what happened.
  */
 data class Observation(
     val mode: GameMode,
@@ -35,6 +35,8 @@ data class Observation(
     /** One line for the UI, e.g. "Overworld · New Bark Town (12, 8)". */
     val summary: String,
     val state: JsonObject,
+    /** Text of the message box on screen, if any (remembered by the agent). */
+    val dialogue: String? = null,
 )
 
 /** The broad situation the player is in. */

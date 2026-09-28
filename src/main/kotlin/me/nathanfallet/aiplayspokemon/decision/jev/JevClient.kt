@@ -3,7 +3,7 @@ package me.nathanfallet.aiplayspokemon.decision.jev
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.future.await
 import kotlinx.serialization.json.Json
-import java.io.IOException
+import me.nathanfallet.aiplayspokemon.decision.DecisionException
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -68,4 +68,5 @@ class JevClient(
     }
 }
 
-class JevException(val status: Int, body: String) : IOException("Jev API error $status: $body")
+class JevException(val status: Int, body: String) :
+    DecisionException("Jev API error $status: $body", retryable = status !in setOf(400, 401, 403, 404, 422))

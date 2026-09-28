@@ -101,7 +101,8 @@ fun ControlPanel(controller: AppController, modifier: Modifier = Modifier) {
         }
 
         HorizontalDivider()
-        ObservationSection(observation)
+        val playerState = player?.state?.collectAsState()?.value
+        ObservationSection(observation, playerState?.lastRequestState)
         HorizontalDivider()
         KeyboardHelp()
     }
@@ -134,6 +135,11 @@ private fun LlmSelector(controller: AppController) {
             Text("Use")
         }
     }
+    if (llm.provider == LlmProvider.OLLAMA) FilterChip(
+        selected = llm.thinking,
+        onClick = { controller.setLlmThinking(!llm.thinking) },
+        label = { Text("Think before each press (slower)") },
+    )
 }
 
 @Composable
@@ -208,8 +214,8 @@ private fun Stat(label: String, value: String) {
 }
 
 /**
- * The last decision: Jev's probability for every button (what makes it "explainable"), or the
- * LLM's short thought.
+ * The last decision: the model's probability for every button when it gives them (Jev does, which
+ * makes its decisions "explainable"), or its short thought (LLMs).
  */
 @Composable
 private fun DecisionCard(decision: Decision) {
@@ -260,19 +266,23 @@ private fun DecisionHistory(history: List<Decision>, modifier: Modifier = Modifi
     }
 }
 
-/** What the RAM reader currently understands of the game, i.e. exactly what the AI receives. */
+/**
+ * What the AI receives: the full state of the last request (screen + memory) while it plays,
+ * otherwise what the RAM reader currently understands of the screen.
+ */
 @Composable
-private fun ObservationSection(observation: Observation?) {
+private fun ObservationSection(observation: Observation?, lastRequestState: JsonObject?) {
     var showJson by remember { mutableStateOf(false) }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text("What the AI sees", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
         TextButton(onClick = { showJson = !showJson }) { Text(if (showJson) "Hide JSON" else "Show JSON") }
     }
     Text(observation?.summary ?: "Nothing yet", style = MaterialTheme.typography.bodySmall)
-    if (showJson && observation != null) {
+    val json = lastRequestState ?: observation?.state
+    if (showJson && json != null) {
         SelectionContainer {
             Text(
-                prettyJson.encodeToString(JsonObject.serializer(), observation.state),
+                prettyJson.encodeToString(JsonObject.serializer(), json),
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp,

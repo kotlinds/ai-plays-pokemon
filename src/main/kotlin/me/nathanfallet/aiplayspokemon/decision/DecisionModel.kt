@@ -1,6 +1,7 @@
 package me.nathanfallet.aiplayspokemon.decision
 
 import kotlinx.serialization.json.JsonObject
+import java.io.IOException
 
 /**
  * A decision model: given a situation, picks one option from a closed set, with a probability for
@@ -39,6 +40,12 @@ data class ChoiceResult(
     /** A short explanation of the choice, for models that give one (LLMs); shown in the UI. */
     val thought: String? = null,
 )
+
+/**
+ * A failed decision. [retryable] is false when trying again can't help (bad API key, invalid
+ * request...), which stops the player instead of retrying forever.
+ */
+open class DecisionException(message: String, val retryable: Boolean, cause: Throwable? = null) : IOException(message, cause)
 
 /** The decision models the app can use, selectable in the UI. */
 enum class DecisionBackend(val label: String) {

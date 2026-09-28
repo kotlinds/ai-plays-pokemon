@@ -55,7 +55,7 @@ object HgssAddresses {
         64 to "hall_of_fame", 68 to "move_relearner", 69 to "geonet_globe", 71 to "trade", 76 to "credits",
         78 to "certificates", 87 to "scratch_off_cards", 95 to "hatch_egg", 96 to "pokeathlon", 100 to "pokegear",
         101 to "town_map", 102 to "easy_chat", 106 to "legendary_cinematic", 109 to "photo_album", 110 to "alph_puzzle",
-        111 to "bug_contest_swap", 113 to "unown_report", 122 to "voltorb_flip",
+        103 to "mailbox", 111 to "bug_contest_swap", 113 to "unown_report", 122 to "voltorb_flip",
     )
 
     // ------------------------------------------------------------------------------------------------

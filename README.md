@@ -18,7 +18,7 @@ What every AI gets:
 ## Running it
 
 Requirements: JDK 21 and a Pokémon HeartGold (USA) ROM that you dumped yourself. Then an API key for the AI you want
-to try (or [Ollama](https://ollama.com) for a local model, e.g. `ollama pull gemma3:4b`).
+to try (or [Ollama](https://ollama.com) for a local model, e.g. `ollama pull gemma4:26b`: a mixture-of-experts model, 4B parameters active, so fast enough on a laptop; small local models play poorly, cloud models play much better).
 
 ```bash
 ./gradlew run --args="/path/to/Pokemon - HeartGold Version (USA).nds"
@@ -38,7 +38,7 @@ if needed, and **▶ Let … play** starts the autonomous loop. You can see exac
 | S / A       | X / Y                      | F      | Fast forward                   |
 | Q / W       | L / R                      | M      | Mute                           |
 | Enter / ⌫   | Start / Select             | F1–F4  | Load state (Shift+F1–F4: save) |
-| Mouse       | Touch screen               |        |                                |
+| Mouse       | Touch screen               | F12    | Save a RAM snapshot (debug)    |
 
 You can play at the same time as the AI: the emulator merges both inputs.
 
@@ -56,6 +56,7 @@ core, in-game saves and save states). Environment variables take precedence:
 | `JEV_ENDPOINT`                                              | `typesafe.endpoint`     | `https://api.typesafe.ai/v1/systemone` |
 | `LLM_PROVIDER` (`openai`, `anthropic`, `openrouter`, `ollama`) | `llm.provider`       | `ollama`                               |
 | `LLM_MODEL`                                                 | `llm.<provider>.model`  | a default per provider                 |
+| `LLM_THINKING` (Ollama reasoning models think first)        | `llm.thinking`          | `false`                                |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | `llm.<provider>.apiKey` | entered in the app                     |
 | `AI_PLAYS_POKEMON_DATA_DIR`                                 | —                       | `~/.ai-plays-pokemon`                  |
 

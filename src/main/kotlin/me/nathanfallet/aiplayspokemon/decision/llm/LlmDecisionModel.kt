@@ -13,7 +13,7 @@ import me.nathanfallet.aiplayspokemon.decision.DecisionModel
  * [DecisionModel] backed by a generative LLM (OpenAI, Anthropic, Gemini through OpenRouter, a local
  * Ollama model...), called through Koog.
  *
- * The LLM gets the same state, instructions and options as Jev. Since it generates text instead of
+ * The LLM gets the same state, instructions and options as any other decision model. Since it generates text instead of
  * picking an option, we ask for a tiny JSON object `{"thought": "...", "choice": "<option id>"}`:
  * the thought is shown in the UI (it's fun to compare how models reason), the choice is validated
  * against the options. An LLM gives no calibrated probability: the choice gets 1, confidence is null.
@@ -22,16 +22,17 @@ class LlmDecisionModel(
     private val provider: LlmProvider,
     private val modelId: String,
     apiKey: String?,
+    private val thinking: Boolean = false,
 ) : DecisionModel {
 
-    override val name = "${provider.label} · $modelId"
+    override val name = "${provider.label} · $modelId${if (thinking) " (thinking)" else ""}"
 
     private val executor: PromptExecutor = provider.executor(apiKey)
     private val model = provider.model(modelId)
 
     override suspend fun choose(request: ChoiceRequest): ChoiceResult {
         val options = request.options.entries.joinToString("\n") { (id, description) -> "- $id: $description" }
-        val decisionPrompt = prompt("decision") {
+        val decisionPrompt = prompt("decision", params = provider.params(thinking)) {
             system(
                 """
                 |${request.instructions}

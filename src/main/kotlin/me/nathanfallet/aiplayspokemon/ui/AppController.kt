@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import me.nathanfallet.aiplayspokemon.agent.PokemonPlayer
 import me.nathanfallet.aiplayspokemon.config.AppConfig
 import me.nathanfallet.aiplayspokemon.emulator.Button
@@ -21,6 +23,9 @@ import me.nathanfallet.aiplayspokemon.emulator.InputSource
 import me.nathanfallet.aiplayspokemon.game.Observation
 import me.nathanfallet.aiplayspokemon.game.PokemonGame
 import me.nathanfallet.aiplayspokemon.game.RamMemory
+import java.nio.file.Files
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import me.nathanfallet.aiplayspokemon.decision.DecisionBackend
 import me.nathanfallet.aiplayspokemon.decision.DecisionModel
 import me.nathanfallet.aiplayspokemon.decision.jev.JevClient
@@ -45,7 +50,7 @@ class AppController(
     /** Which kind of AI drives the player: Jev, or an LLM. */
     val backend: StateFlow<DecisionBackend> = _backend.asStateFlow()
 
-    private val _llm = MutableStateFlow(LlmSettings(config.llmProvider, config.llmModel(config.llmProvider)))
+    private val _llm = MutableStateFlow(LlmSettings(config.llmProvider, config.llmModel(config.llmProvider), config.llmThinking))
 
     /** The LLM used when [backend] is [DecisionBackend.LLM]. */
     val llm: StateFlow<LlmSettings> = _llm.asStateFlow()
@@ -77,7 +82,7 @@ class AppController(
     /** Switches the LLM provider (and loads the model last used with it). */
     fun selectLlmProvider(provider: LlmProvider) {
         config.llmProvider = provider
-        _llm.value = LlmSettings(provider, config.llmModel(provider))
+        _llm.value = _llm.value.copy(provider = provider, model = config.llmModel(provider))
         createPlayer()
     }
 
@@ -85,6 +90,13 @@ class AppController(
         if (model.isBlank()) return
         config.saveLlmModel(_llm.value.provider, model.trim())
         _llm.value = _llm.value.copy(model = model.trim())
+        createPlayer()
+    }
+
+    /** Lets reasoning models think before each press (smarter, slower). */
+    fun setLlmThinking(thinking: Boolean) {
+        config.llmThinking = thinking
+        _llm.value = _llm.value.copy(thinking = thinking)
         createPlayer()
     }
 
@@ -120,9 +132,9 @@ class AppController(
         }
 
         DecisionBackend.LLM -> {
-            val (provider, model) = _llm.value
+            val (provider, model, thinking) = _llm.value
             val apiKey = config.llmApiKey(provider)
-            if (provider.needsApiKey && apiKey == null) null else LlmDecisionModel(provider, model, apiKey)
+            if (provider.needsApiKey && apiKey == null) null else LlmDecisionModel(provider, model, apiKey, thinking)
         }
     }
 
@@ -133,6 +145,21 @@ class AppController(
             _observation.value = runCatching { game.observe(RamMemory(emulator.readMainRam())) }.getOrNull()
             delay(250)
         }
+    }
+
+    /**
+     * Saves the current RAM and what the AI sees into `<data>/snapshots/`, to debug or extend the
+     * game reader on a precise situation (the RAM can be loaded back with `RamMemory`).
+     */
+    private suspend fun saveSnapshot() {
+        val ram = emulator.readMainRam()
+        val directory = Files.createDirectories(config.dataDirectory.resolve("snapshots"))
+        val name = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
+        Files.write(directory.resolve("$name.ram"), ram)
+        game?.observe(RamMemory(ram))?.let { observation ->
+            Files.writeString(directory.resolve("$name.json"), prettyJson.encodeToString(JsonObject.serializer(), observation.state))
+        }
+        println("Snapshot saved: ${directory.resolve(name)}")
     }
 
     /** Handles a window key event. Returns true when the key was used. */
@@ -153,6 +180,7 @@ class AppController(
             Key.P -> togglePause()
             Key.F -> emulator.setFastForward(!emulator.status.value.fastForward)
             Key.M -> emulator.setMuted(!emulator.status.value.muted)
+            Key.F12 -> scope.launch { saveSnapshot() }
             else -> return false
         }
         return true
@@ -161,5 +189,7 @@ class AppController(
     fun togglePause() = if (emulator.status.value.running) emulator.pause() else emulator.resume()
 }
 
-/** Which LLM to use: a provider and one of its model ids. */
-data class LlmSettings(val provider: LlmProvider, val model: String)
+/** Which LLM to use: a provider, one of its model ids, and whether it thinks before answering. */
+data class LlmSettings(val provider: LlmProvider, val model: String, val thinking: Boolean)
+
+private val prettyJson = Json { prettyPrint = true }

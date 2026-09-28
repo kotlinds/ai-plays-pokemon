@@ -24,6 +24,7 @@ import kotlin.io.path.outputStream
  * | Jev endpoint          | `JEV_ENDPOINT`                          | `typesafe.endpoint`     |
  * | LLM provider          | `LLM_PROVIDER` (`openai`, `anthropic`, `openrouter`, `ollama`) | `llm.provider` |
  * | LLM model             | `LLM_MODEL`                             | `llm.<provider>.model`  |
+ * | LLM thinks first      | `LLM_THINKING` (`true` / `false`)       | `llm.thinking`          |
  * | LLM API key           | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | `llm.<provider>.apiKey` |
  *
  * Everything the app writes (config, downloaded cores, in-game saves, save states) lives in
@@ -66,6 +67,10 @@ class AppConfig(
         setting("LLM_MODEL".takeIf { provider == llmProvider }, "llm.${provider.key}.model") ?: provider.defaultModel
 
     fun saveLlmModel(provider: LlmProvider, model: String) = save("llm.${provider.key}.model", model)
+
+    var llmThinking: Boolean
+        get() = setting("LLM_THINKING", "llm.thinking")?.toBooleanStrictOrNull() ?: false
+        set(value) = save("llm.thinking", value.toString())
 
     fun llmApiKey(provider: LlmProvider): String? = setting(provider.apiKeyVariable, "llm.${provider.key}.apiKey")
 
