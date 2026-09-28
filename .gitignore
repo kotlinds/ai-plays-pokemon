@@ -1,0 +1,14 @@
+.gradle/
+build/
+.kotlin/
+.idea/
+*.iml
+.DS_Store
+local.properties
+# Runtime data (downloaded cores, saves, logs) lives in ~/.jev-plays-pokemon, but never commit ROMs or keys
+*.nds
+*.sav
+.env
+
+# Local test ROMs
+roms/
