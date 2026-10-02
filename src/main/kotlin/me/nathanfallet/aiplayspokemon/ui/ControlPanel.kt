@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -44,7 +46,10 @@ import androidx.compose.ui.unit.sp
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import me.nathanfallet.aiplayspokemon.agent.Decision
+import me.nathanfallet.aiplayspokemon.agent.ControlMode
+import me.nathanfallet.aiplayspokemon.agent.PlayerSettings
 import me.nathanfallet.aiplayspokemon.agent.PlayerState
+import me.nathanfallet.aiplayspokemon.agent.RunStats
 import me.nathanfallet.aiplayspokemon.agent.PokemonPlayer
 import me.nathanfallet.aiplayspokemon.decision.DecisionBackend
 import me.nathanfallet.aiplayspokemon.decision.llm.LlmProvider
@@ -92,6 +97,8 @@ fun ControlPanel(controller: AppController, modifier: Modifier = Modifier) {
             }
         }
         if (backend == DecisionBackend.LLM) LlmSelector(controller)
+        ExperimentSettings(controller)
+        McpSection(controller)
 
         val currentPlayer = player
         when {
@@ -135,11 +142,61 @@ private fun LlmSelector(controller: AppController) {
             Text("Use")
         }
     }
-    if (llm.provider == LlmProvider.OLLAMA) FilterChip(
+    if (llm.provider == LlmProvider.OLLAMA || llm.provider == LlmProvider.CLAUDE_CODE) FilterChip(
         selected = llm.thinking,
         onClick = { controller.setLlmThinking(!llm.thinking) },
-        label = { Text("Think before each press (slower)") },
+        label = { Text(if (llm.provider == LlmProvider.OLLAMA) "Think before answering (slower)" else "High effort (slower)") },
     )
+    if (llm.provider == LlmProvider.CLAUDE_CODE) Text(
+        "Uses the Claude account Claude Code is logged in with (no API key); counts towards its usage limits.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/**
+ * The experiment knobs: control mode (pure / assisted / hybrid) and the options to compare.
+ * In hybrid mode, the model selected above decides and the LLM settings define the planner.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ExperimentSettings(controller: AppController) {
+    val settings by controller.settings.collectAsState()
+    Text("Mode", fontWeight = FontWeight.Bold)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        ControlMode.entries.forEach { mode ->
+            FilterChip(
+                selected = settings.mode == mode,
+                onClick = { controller.updateSettings { it.copy(mode = mode) } },
+                label = { Text(mode.label) },
+            )
+        }
+    }
+    Text(settings.mode.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    if (settings.mode == ControlMode.HYBRID) Text(
+        "Planner: the LLM configured in the LLM tab.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    val toggles = listOf(
+        Triple("Pause while thinking", settings.pauseWhileThinking) { s: PlayerSettings, v: Boolean -> s.copy(pauseWhileThinking = v) },
+        Triple("Wait for the game to react", settings.waitForReaction) { s: PlayerSettings, v: Boolean -> s.copy(waitForReaction = v) },
+        Triple("Sequences (LLM)", settings.allowSequences) { s: PlayerSettings, v: Boolean -> s.copy(allowSequences = v) },
+        Triple("Reasoning (LLM)", settings.reasoning) { s: PlayerSettings, v: Boolean -> s.copy(reasoning = v) },
+        Triple("Notes (LLM)", settings.modelNotes) { s: PlayerSettings, v: Boolean -> s.copy(modelNotes = v) },
+        Triple("Explored map", settings.exploredMap) { s: PlayerSettings, v: Boolean -> s.copy(exploredMap = v) },
+        Triple("Story goal (assist)", settings.storyGoal) { s: PlayerSettings, v: Boolean -> s.copy(storyGoal = v) },
+        Triple("Sample probabilities", settings.sampleProbabilities) { s: PlayerSettings, v: Boolean -> s.copy(sampleProbabilities = v) },
+    )
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        toggles.forEach { (label, value, update) ->
+            FilterChip(
+                selected = value,
+                onClick = { controller.updateSettings { update(it, !value) } },
+                label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+            )
+        }
+    }
 }
 
 @Composable
@@ -177,6 +234,7 @@ private fun PlayerSection(player: PokemonPlayer) {
     ) {
         Text(if (state.playing) "⏸  Take back control" else "▶  Let ${player.model.name} play", fontSize = 16.sp)
     }
+    if (state.thinking) Text("Thinking…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
     state.error?.let { Text("Stopped: $it", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 
     OutlinedTextField(
@@ -192,6 +250,9 @@ private fun PlayerSection(player: PokemonPlayer) {
     )
 
     Stats(state)
+    state.note?.let { Text("Note: $it", style = MaterialTheme.typography.bodySmall) }
+    state.plannerGoal?.let { Text("Planner goal: $it", style = MaterialTheme.typography.bodySmall) }
+    Milestones(state.milestones)
     state.lastDecision?.let { DecisionCard(it) }
     DecisionHistory(state.history, Modifier.height(180.dp))
 }
@@ -200,8 +261,51 @@ private fun PlayerSection(player: PokemonPlayer) {
 private fun Stats(state: PlayerState) {
     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
         Stat("Decisions", state.decisions.toString())
+        Stat("Presses", state.presses.toString())
         Stat("Avg latency", "${state.averageLatencyMillis} ms")
-        Stat("Input tokens", state.inputTokens.toString())
+        Stat("Tokens", state.inputTokens.toString())
+        if (state.costUsd > 0) Stat("Cost", "$" + "%.2f".format(state.costUsd))
+    }
+}
+
+/** Lets an external agent (Claude Code...) play through MCP instead of our own loop. */
+@Composable
+private fun McpSection(controller: AppController) {
+    val server by controller.mcp.collectAsState()
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = server != null,
+            onClick = controller::toggleMcp,
+            label = { Text(if (server != null) "MCP server on" else "MCP server (external agent)") },
+        )
+    }
+    server?.let { running ->
+        val activity by running.activity.collectAsState()
+        SelectionContainer {
+            Text(
+                "Connect an agent, e.g.: claude mcp add --transport http pokemon ${running.url}\n" +
+                    "Then ask it to play. Calls: ${activity.calls}" +
+                    (activity.lastAction?.let { "\nLast: $it" } ?: "") +
+                    (activity.lastReasoning?.let { "\n“$it”" } ?: ""),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+    }
+}
+
+/** Milestones reached during this run (also saved in ~/.ai-plays-pokemon/runs/ to compare configurations). */
+@Composable
+private fun Milestones(milestones: List<RunStats.Milestone>) {
+    if (milestones.isEmpty()) return
+    Column {
+        Text("Milestones", fontWeight = FontWeight.Bold)
+        milestones.forEach {
+            Text(
+                "${it.name} · ${it.decisions} decisions · ${it.presses} presses · ${it.seconds}s",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
     }
 }
 
@@ -222,7 +326,7 @@ private fun DecisionCard(decision: Decision) {
     Card {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                "#${decision.number} → ${decision.press.id}",
+                "#${decision.number} → ${decision.actions.joinToString(" → ") { it.id }}${if (decision.byPlanner) "  (planner)" else ""}",
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace,
             )
@@ -231,6 +335,7 @@ private fun DecisionCard(decision: Decision) {
                 style = MaterialTheme.typography.bodySmall,
             )
             decision.thought?.let { Text("“$it”", style = MaterialTheme.typography.bodySmall) }
+            decision.problem?.let { Text("Stopped: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
             if (decision.confidence != null) decision.probabilities.forEach { (option, probability) ->
                 ProbabilityBar(option, probability)
             }
@@ -257,7 +362,7 @@ private fun DecisionHistory(history: List<Decision>, modifier: Modifier = Modifi
     LazyColumn(modifier) {
         items(history, key = { it.number }) { decision ->
             Text(
-                "#${decision.number}  ${decision.press.id.padEnd(7)} ${(decision.confidence?.let(::percent) ?: "").padStart(4)}  ${decision.observation.summary}",
+                "#${decision.number}  ${decision.actions.joinToString(",") { it.id }.padEnd(10)} ${(decision.confidence?.let(::percent) ?: "").padStart(4)}  ${decision.observation.summary}",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 maxLines = 1,

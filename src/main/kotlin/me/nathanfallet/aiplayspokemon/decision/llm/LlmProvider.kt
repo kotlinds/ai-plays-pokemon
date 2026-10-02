@@ -28,6 +28,13 @@ enum class LlmProvider(
     ANTHROPIC("Anthropic", "claude-haiku-4-5", "ANTHROPIC_API_KEY"),
     OPENROUTER("OpenRouter", "google/gemini-2.5-flash", "OPENROUTER_API_KEY"),
     OLLAMA("Ollama (local)", "gemma4:26b", null),
+
+    /**
+     * Claude through the Claude Code CLI (`claude -p`), using the account it is logged in with (e.g. a
+     * Claude subscription) instead of an API key. Not a Koog provider: see ClaudeCodeDecisionModel.
+     * Model ids are Claude Code aliases ("sonnet", "opus", "haiku") or full ids.
+     */
+    CLAUDE_CODE("Claude (Claude Code login)", "sonnet", null),
     ;
 
     val needsApiKey: Boolean get() = apiKeyVariable != null
@@ -40,6 +47,7 @@ enum class LlmProvider(
             ANTHROPIC -> MultiLLMPromptExecutor(LLMProvider.Anthropic to AnthropicLLMClient(key()))
             OPENROUTER -> MultiLLMPromptExecutor(LLMProvider.OpenRouter to OpenRouterLLMClient(key()))
             OLLAMA -> MultiLLMPromptExecutor(LLMProvider.Ollama to OllamaClient())
+            CLAUDE_CODE -> error("Claude Code is not called through Koog")
         }
     }
 
@@ -55,8 +63,8 @@ enum class LlmProvider(
     /** Describes a model of this provider for Koog: we only need plain text completion. */
     fun model(id: String): LLModel = when (this) {
         OPENAI -> LLModel(LLMProvider.OpenAI, id, listOf(LLMCapability.Completion, LLMCapability.OpenAIEndpoint.Completions))
-        ANTHROPIC -> LLModel(LLMProvider.Anthropic, id, listOf(LLMCapability.Completion), maxOutputTokens = 1024)
+        ANTHROPIC -> LLModel(LLMProvider.Anthropic, id, listOf(LLMCapability.Completion), maxOutputTokens = 4096)
         OPENROUTER -> LLModel(LLMProvider.OpenRouter, id, listOf(LLMCapability.Completion))
-        OLLAMA -> LLModel(LLMProvider.Ollama, id, listOf(LLMCapability.Completion))
+        OLLAMA, CLAUDE_CODE -> LLModel(LLMProvider.Ollama, id, listOf(LLMCapability.Completion))
     }
 }

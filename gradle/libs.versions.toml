@@ -8,6 +8,8 @@ jna = "5.17.0"
 koog = "1.3.0"
 kotlinds = "1.2.1"
 slf4j = "2.0.17"
+mcp = "0.15.0"
+ktor = "3.5.1"
 
 [libraries]
 compose-runtime = { module = "org.jetbrains.compose.runtime:runtime", version.ref = "composeMultiplatform" }
@@ -20,6 +22,8 @@ kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serializa
 jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
 kotlinds-rom = { module = "dev.kotlinds:nds-rom", version.ref = "kotlinds" }
 slf4j-nop = { module = "org.slf4j:slf4j-nop", version.ref = "slf4j" }
+mcp-server = { module = "io.modelcontextprotocol:kotlin-sdk-server", version.ref = "mcp" }
+ktor-server-cio = { module = "io.ktor:ktor-server-cio", version.ref = "ktor" }
 koog-agents = { module = "ai.koog:koog-agents", version.ref = "koog" }
 koog-openrouter = { module = "ai.koog:prompt-executor-openrouter-client", version.ref = "koog" }
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }

@@ -30,6 +30,10 @@ import me.nathanfallet.aiplayspokemon.decision.DecisionBackend
 import me.nathanfallet.aiplayspokemon.decision.DecisionModel
 import me.nathanfallet.aiplayspokemon.decision.jev.JevClient
 import me.nathanfallet.aiplayspokemon.decision.jev.JevDecisionModel
+import me.nathanfallet.aiplayspokemon.agent.AgentSession
+import me.nathanfallet.aiplayspokemon.agent.PlayerSettings
+import me.nathanfallet.aiplayspokemon.mcp.GameMcpServer
+import me.nathanfallet.aiplayspokemon.decision.claudecode.ClaudeCodeDecisionModel
 import me.nathanfallet.aiplayspokemon.decision.llm.LlmDecisionModel
 import me.nathanfallet.aiplayspokemon.decision.llm.LlmProvider
 
@@ -55,6 +59,11 @@ class AppController(
     /** The LLM used when [backend] is [DecisionBackend.LLM]. */
     val llm: StateFlow<LlmSettings> = _llm.asStateFlow()
 
+    private val _settings = MutableStateFlow(config.playerSettings)
+
+    /** The experiment options of the player; changes apply from the next decision. */
+    val settings: StateFlow<PlayerSettings> = _settings.asStateFlow()
+
     private val _player = MutableStateFlow<PokemonPlayer?>(null)
 
     /**
@@ -63,12 +72,38 @@ class AppController(
      */
     val player: StateFlow<PokemonPlayer?> = _player.asStateFlow()
 
+    private val _mcp = MutableStateFlow<GameMcpServer?>(null)
+
+    /** The MCP server when enabled: an external agent plays through it instead of our own loop. */
+    val mcp: StateFlow<GameMcpServer?> = _mcp.asStateFlow()
+
     private val _observation = MutableStateFlow<Observation?>(null)
     val observation: StateFlow<Observation?> = _observation.asStateFlow()
 
     init {
         createPlayer()
         scope.launch { refreshObservation() }
+    }
+
+    fun updateSettings(transform: (PlayerSettings) -> PlayerSettings) {
+        val updated = transform(_settings.value)
+        _settings.value = updated
+        config.playerSettings = updated
+    }
+
+    /** Starts or stops the MCP server. While it runs, our own player is paused (one player at a time). */
+    fun toggleMcp() {
+        val game = game ?: return
+        val running = _mcp.value
+        if (running != null) {
+            running.stop()
+            _mcp.value = null
+            return
+        }
+        _player.value?.pause()
+        val server = GameMcpServer(AgentSession(emulator, game) { _settings.value }, emulator, config.mcpPort)
+        server.start()
+        _mcp.value = server
     }
 
     /** Switches the decision model: the current player is stopped and replaced. */
@@ -120,11 +155,20 @@ class AppController(
     private fun createPlayer() {
         _player.value?.pause()
         val game = game
-        val model = createModel()
-        _player.value = if (game != null && model != null) PokemonPlayer(emulator, game, model, scope) else null
+        val model = createModel(_backend.value)
+        _player.value = if (game != null && model != null) {
+            // In hybrid mode, the LLM settings define the planner (it may be the same as the decider).
+            PokemonPlayer(
+                emulator, game, model,
+                planner = createModel(DecisionBackend.LLM),
+                scope = scope,
+                settings = { _settings.value },
+                runsDirectory = config.dataDirectory.resolve("runs"),
+            )
+        } else null
     }
 
-    private fun createModel(): DecisionModel? = when (_backend.value) {
+    private fun createModel(backend: DecisionBackend): DecisionModel? = when (backend) {
         DecisionBackend.JEV -> {
             // TypeSafe's cloud needs a key; a custom (e.g. local) endpoint may not.
             if (config.jevApiKey == null && config.jevEndpoint == JevClient.DEFAULT_ENDPOINT) null
@@ -134,7 +178,11 @@ class AppController(
         DecisionBackend.LLM -> {
             val (provider, model, thinking) = _llm.value
             val apiKey = config.llmApiKey(provider)
-            if (provider.needsApiKey && apiKey == null) null else LlmDecisionModel(provider, model, apiKey, thinking)
+            when {
+                provider == LlmProvider.CLAUDE_CODE -> ClaudeCodeDecisionModel(model, effort = if (thinking) "high" else "low")
+                provider.needsApiKey && apiKey == null -> null
+                else -> LlmDecisionModel(provider, model, apiKey, thinking)
+            }
         }
     }
 

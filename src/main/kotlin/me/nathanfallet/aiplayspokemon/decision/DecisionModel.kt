@@ -17,6 +17,12 @@ interface DecisionModel {
     /** Shown in the UI, e.g. "Jev (jev-latest)". */
     val name: String
 
+    /**
+     * True for models that generate text (LLMs): they can reason, keep a note and answer with a
+     * sequence. False for pure decision models like Jev, which only pick an option.
+     */
+    val generative: Boolean get() = true
+
     suspend fun choose(request: ChoiceRequest): ChoiceResult
 }
 
@@ -25,6 +31,15 @@ data class ChoiceRequest(
     val state: JsonObject,
     val instructions: String,
     val options: Map<String, String>,
+    /**
+     * Generative models only: they may also return a short sequence of further option ids to execute
+     * after [ChoiceResult.choice] (like a player holding a direction for a few tiles).
+     */
+    val allowSequence: Boolean = false,
+    /** Generative models only: think step by step before answering (slower, usually smarter). */
+    val reasoning: Boolean = true,
+    /** Generative models only: they may rewrite a persistent note (their goal/plan), sent back next time. */
+    val allowNote: Boolean = false,
 )
 
 data class ChoiceResult(
@@ -39,6 +54,12 @@ data class ChoiceResult(
     val inputTokens: Int,
     /** A short explanation of the choice, for models that give one (LLMs); shown in the UI. */
     val thought: String? = null,
+    /** Further option ids to execute after [choice], when [ChoiceRequest.allowSequence] was set. */
+    val then: List<String> = emptyList(),
+    /** The model's updated note, when [ChoiceRequest.allowNote] was set. */
+    val note: String? = null,
+    /** Cost of the decision in USD when the backend reports it (equivalent API price for subscriptions). */
+    val costUsd: Double? = null,
 )
 
 /**

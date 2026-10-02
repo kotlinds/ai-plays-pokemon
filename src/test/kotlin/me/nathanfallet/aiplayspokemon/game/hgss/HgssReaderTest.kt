@@ -60,10 +60,15 @@ class HgssReaderTest {
         val warp = state.surroundings?.warps?.single()
         assertEquals(63, warp?.destMapId) // stairs to 1F
         assertEquals(3 to 4, warp?.let { it.x to it.z })
+        assertEquals("stairs", warp?.kind)
+        assertEquals("west", warp?.pressDirection)
+        // Terrain only, cropped to the room: the void beyond the walls is '-'.
         val grid = assertNotNull(state.surroundings?.grid)
-        assertEquals('@', grid.rows[grid.height / 2][grid.width / 2])
-        assertEquals('W', grid.rows[4 - grid.originZ][3 - grid.originX]) // stairs
-        assertEquals('#', grid.rows[3 - grid.originZ][9 - grid.originX]) // TV (collision)
+        assertEquals('.', grid.at(6, 6))
+        assertEquals('#', grid.at(9, 4)) // TV (collision)
+        assertEquals('#', grid.at(11, 6)) // east wall
+        assertEquals('-', grid.at(13, 6)) // outside the room
+        assertEquals("INTERIOR", state.surroundings?.mapType)
     }
 
     @Test

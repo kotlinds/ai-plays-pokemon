@@ -2,15 +2,16 @@ package me.nathanfallet.aiplayspokemon.agent
 
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import me.nathanfallet.aiplayspokemon.agent.actions.AgentAction
 import me.nathanfallet.aiplayspokemon.decision.ChoiceRequest
 import me.nathanfallet.aiplayspokemon.game.Observation
 
 /**
- * Turns "what the player can perceive" into a decision request: which button to press next.
+ * Turns "what the player can perceive and remember" into a decision request.
  *
- * The state is what a human would get from the screen (read from RAM: the text-rendered map, the
- * dialogue text, the party, the battle...) plus what they remember ([AgentMemory]). The options
- * are always all the buttons: the model is never told which one is "right".
+ * The state is what a human would get from the screen (read from RAM) plus their memory, and the
+ * general knowledge any player of the series has (how the controls behave). It never says which
+ * option is right: with the story goal assist off, the AI has to work out where to go by itself.
  */
 object DecisionPrompt {
 
@@ -18,20 +19,56 @@ object DecisionPrompt {
         "Play Pokémon HeartGold like a good player: follow the story, talk to people to learn where to go, " +
             "explore new places, win battles, catch Pokémon and keep the team healthy."
 
-    private const val INSTRUCTIONS =
-        "You are playing a Pokémon game on a Nintendo DS, holding the controller. " +
-            "`game` describes what is on screen right now (the map around you as text when in the overworld, " +
-            "the current dialogue, menus, battle, your team). `memory` is what you remember: the buttons you " +
-            "just pressed and what changed after each one, the places you went through, the dialogues you read " +
-            "and your own recent thoughts. Choose the next button to press to make progress towards `objective`."
+    /** What any player of the series knows about the controls; not specific to the situation. */
+    private const val CONVENTIONS =
+        "How the game works: a D-pad press turns you to face that direction if you weren't already, " +
+            "otherwise it walks one tile. A talks to or examines what you are facing and advances text; " +
+            "a message box must be advanced with A until it closes. B cancels and backs out of menus and screens. " +
+            "Walking onto stairs, doors and ladders (exits) takes you to another place; for exit mats at the edge " +
+            "of a room, stand on them and press towards the edge. People walk around and block the way. " +
+            "PCs, TVs and bookshelves are optional; the story moves forward by talking to people and going to new places."
 
-    fun build(objective: String, observation: Observation, memory: AgentMemory) = ChoiceRequest(
+    private fun instructions(settings: PlayerSettings, planner: Boolean): String = buildString {
+        append("You are playing Pokémon HeartGold on a Nintendo DS. ")
+        append(
+            when (settings.mode) {
+                ControlMode.PURE -> "You hold the controller: each option is a button to press (or waiting). "
+                else -> "Each option is either an action your hands carry out for you (walking to a place, talking " +
+                    "to someone, choosing a menu option, exploring in a direction) or a single button press. "
+            }
+        )
+        append("`game` describes what is on screen right now, and `memory` is what you remember: your recent ")
+        append("actions and exactly what changed after each one, where you have been, what you read")
+        if (settings.exploredMap) append(", the map of what you have explored")
+        append(". ")
+        append(CONVENTIONS)
+        append(" Choose the next option that makes the most progress towards `objective`")
+        if (settings.storyGoal) append(" and `story_goal`")
+        append(". If your recent actions changed nothing, do something different.")
+        if (planner) append(" You are the planner: also write in `note` the goal and plan the fast decision model should follow next.")
+    }
+
+    fun build(
+        objective: String,
+        observation: Observation,
+        memory: AgentMemory,
+        actions: List<AgentAction>,
+        settings: PlayerSettings,
+        generative: Boolean,
+        plannerGoal: String? = null,
+        planner: Boolean = false,
+    ) = ChoiceRequest(
         state = buildJsonObject {
             put("objective", objective)
+            if (settings.storyGoal) observation.storyGoal?.let { put("story_goal", it) }
+            plannerGoal?.let { put("goal_from_planner", it) }
             put("game", observation.state)
-            put("memory", memory.describe())
+            put("memory", memory.describe(settings.exploredMap, observation))
         },
-        instructions = INSTRUCTIONS,
-        options = ButtonPress.entries.associate { it.id to it.description },
+        instructions = instructions(settings, planner),
+        options = actions.associate { it.id to it.description },
+        allowSequence = generative && settings.allowSequences,
+        reasoning = settings.reasoning,
+        allowNote = generative && (settings.modelNotes || planner),
     )
 }

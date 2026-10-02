@@ -10,6 +10,8 @@ class JevDecisionModel(private val client: JevClient) : DecisionModel {
 
     override val name = "Jev (${client.model})"
 
+    override val generative = false
+
     override suspend fun choose(request: ChoiceRequest): ChoiceResult {
         val response = client.ask(
             SystemOneRequest(

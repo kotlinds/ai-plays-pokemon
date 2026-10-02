@@ -48,10 +48,22 @@ data class HgssState(
     val modeDetail: String? = null,
     /** True when the player can walk (FieldSystem_IsPlayerMovementAllowed && no sub-application). */
     val playerControllable: Boolean = false,
+    /** True when the game waits for the player (see [HgssReader] awaitingInput rules). */
+    val awaitingInput: Boolean = false,
+    /** A palette fade / screen wipe / brightness transition is running. */
+    val fading: Boolean = false,
+    /** A map scene script is about to start (its "on frame" condition matches). */
+    val scenePending: Boolean = false,
     val player: PlayerInfo? = null,
     val location: LocationInfo? = null,
     val dialogue: DialogueInfo? = null,
     val startMenu: StartMenuInfo? = null,
+    /** A script menu waiting for a choice (yes/no, multichoice), on either screen. */
+    val menu: MenuInfo? = null,
+    /** The full-screen application in front of the map (bag, Pokégear, starter selection, mailbox...). */
+    val app: AppInfo? = null,
+    /** Story flags and vars (see [HgssProgress]). */
+    val story: StoryInfo? = null,
     val party: List<PartyMon> = emptyList(),
     val battle: BattleInfo? = null,
     val surroundings: Surroundings? = null,
@@ -99,6 +111,10 @@ data class LocationInfo(
 data class DialogueInfo(
     /** Full expanded text of the current message (all pages; lines separated by \n). */
     val text: String? = null,
+    /** What the message box shows now: the (up to 2) lines of the current page printed so far. */
+    val visibleText: String? = null,
+    /** The text printer is still printing (or scrolling) this message. */
+    val printing: Boolean = false,
     val messageBoxOpen: Boolean,
     /** printing / waiting_button / yes_no / multichoice / waiting_movement / waiting_app / running / pause */
     val waitingFor: String,
@@ -106,11 +122,62 @@ data class DialogueInfo(
 )
 
 @Serializable
-data class StartMenuInfo(
-    /** Menu entries top to bottom (POKEDEX, POKEMON, BAG, POKEGEAR, TRAINER_CARD, SAVE, OPTIONS...). */
-    val items: List<String>,
-    /** Cursor index into [items] (FieldSystem.unkD3, medium confidence). */
+data class MenuInfo(
+    /** yes_no, multichoice */
+    val kind: String,
+    val options: List<String>,
     val cursor: Int? = null,
+    /** Columns of the grid; options are listed row by row (index = row * columns + column). */
+    val columns: Int = 1,
+    /** "touch" (bottom screen, also works with the D-pad) or "top". */
+    val screen: String = "touch",
+    /** True while the menu accepts input (not opening / closing). */
+    val waiting: Boolean = true,
+)
+
+@Serializable
+data class AppInfo(
+    /** party_menu, bag, pokegear, choose_starter, mailbox... */
+    val name: String,
+    /** Human-readable title, e.g. "Starter selection". */
+    val title: String,
+    /** Entries the player chooses from, when they could be read (in D-pad order). */
+    val entries: List<String> = emptyList(),
+    val cursor: Int? = null,
+    /** "vertical", "horizontal" or "grid2" (2 columns, row by row). */
+    val layout: String = "vertical",
+    /** What the screen says / asks now and how to answer, when known. */
+    val prompt: String? = null,
+    /** The app is in its input state (not opening, closing or animating). */
+    val waiting: Boolean = false,
+)
+
+@Serializable
+data class StoryInfo(
+    /** Flags of interest that are set (ids, see [HgssProgress]). */
+    val flags: Set<Int> = emptySet(),
+    /** Vars of interest (id -> value). */
+    val vars: Map<Int, Int> = emptyMap(),
+    val hasRunningShoes: Boolean = false,
+    val hasPokedex: Boolean = false,
+)
+
+/**
+ * The start menu (X): icons on the touch screen in a fixed grid of 2 columns x 4 rows (src/start_menu.c
+ * sActionToIconIndex: left column POKéDEX, POKéMON, BAG, POKéGEAR; right column TRAINER CARD, SAVE, OPTIONS).
+ * The D-pad skips the icons that are not unlocked yet.
+ */
+@Serializable
+data class StartMenuInfo(
+    /** Visible icons row by row (left, right), "-" for an empty slot; rows without any icon are dropped. */
+    val items: List<String>,
+    /** Index into [items] of the highlighted icon. */
+    val cursor: Int? = null,
+    /** StartMenuTaskData.state == HANDLE_INPUT (3). */
+    val waiting: Boolean = true,
+    /** Visible icons per column, top to bottom (for the AI). */
+    val leftColumn: List<String> = emptyList(),
+    val rightColumn: List<String> = emptyList(),
 )
 
 @Serializable
@@ -187,7 +254,10 @@ data class BattleInfo(
     val trainers: List<TrainerInfo> = emptyList(),
     /** Battle menu on the touch screen (MAIN, FIGHT, TARGET, YES_NO, ...; medium confidence). */
     val menu: String? = null,
+    /** [y, x] of the D-pad cursor, null while it is hidden (touch mode: the first key press only shows it). */
     val menuCursor: List<Int>? = null,
+    /** The battle waits for the player's choice (command, move, target, yes/no). */
+    val awaitingInput: Boolean = false,
     /** Last battle message put in the message buffer (may be stale once printed). */
     val message: String? = null,
     val safariBalls: Int? = null,
@@ -208,8 +278,10 @@ data class MapObjectInfo(
     val type: Int,
     val scriptId: Int,
     val hidden: Boolean,
-    /** npc, follower, item_ball, other */
+    /** npc, follower, item_ball, obstacle (Cut tree, rock...) */
     val kind: String,
+    /** What a player would call it: "Mom", "woman", "item ball", "Marill (Pokémon)"... */
+    val label: String = kind,
 )
 
 @Serializable
@@ -223,6 +295,13 @@ data class WarpInfo(
     val destMapName: String,
     val destLocationName: String? = null,
     val destWarpId: Int,
+    /** door, stairs, exit mat, entrance, ladder, escalator, warp panel, exit (from the tile behavior). */
+    val kind: String = "exit",
+    /**
+     * Direction to press while standing on the warp tile (stairs, exit mats, ladders); null when walking onto the
+     * tile (or into the door) is enough (src/field/field_control.c FieldSystem_CheckMapTransition).
+     */
+    val pressDirection: String? = null,
 )
 
 @Serializable
@@ -234,6 +313,10 @@ data class BgEventInfo(
     /** normal, sign, hidden_item */
     val type: String,
     val scriptId: Int,
+    /** "sign", "PC", "TV", "bookshelf"... or "something to examine". */
+    val label: String = type,
+    /** Tile has the collision bit (objects on walls/furniture) */
+    val blocked: Boolean = true,
 )
 
 @Serializable
@@ -247,6 +330,12 @@ data class TriggerInfo(
     val active: Boolean?,
 )
 
+/**
+ * Terrain around the player (without people/exits), cropped to what is real: tiles outside the matrix, not loaded,
+ * or (indoors) outside the room walls are '-'. One char per tile:
+ * '.' walkable, '"' tall grass, '~' water, '#' blocked, '_' '=' '{' '}' ledges (jump south / north / west / east),
+ * '-' nothing (outside the map / room).
+ */
 @Serializable
 data class LocalGrid(
     /** Global coordinates of the top-left cell. */
@@ -256,18 +345,33 @@ data class LocalGrid(
     val height: Int,
     /** One string per row (north first), one char per tile. */
     val rows: List<String>,
-    val legend: Map<String, String>,
+) {
+    fun at(x: Int, z: Int): Char = rows.getOrNull(z - originZ)?.getOrNull(x - originX) ?: '-'
+}
+
+/** A map next to the current one in the same matrix (walk past the edge to get there). */
+@Serializable
+data class NeighborArea(
+    /** north, south, west, east */
+    val direction: String,
+    val mapId: Int,
+    val name: String,
+    /** First global coordinate (x for west/east, z for north/south) that belongs to it. */
+    val boundary: Int,
 )
 
 @Serializable
 data class Surroundings(
     val matrixWidth: Int? = null,
     val matrixHeight: Int? = null,
+    /** Map header type: CITY_TOWN, ROUTE, INTERIOR, CAVE... */
+    val mapType: String? = null,
     val grid: LocalGrid? = null,
     val objects: List<MapObjectInfo> = emptyList(),
     val warps: List<WarpInfo> = emptyList(),
     val bgEvents: List<BgEventInfo> = emptyList(),
     val triggers: List<TriggerInfo> = emptyList(),
+    val neighbors: List<NeighborArea> = emptyList(),
 )
 
 @Serializable

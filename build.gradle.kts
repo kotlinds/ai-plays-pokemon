@@ -32,6 +32,10 @@ dependencies {
     // Emulator: loads a libretro core (melonDS) as a native library
     implementation(libs.jna)
 
+    // MCP server: lets an external agent (e.g. Claude Code) play through tools
+    implementation(libs.mcp.server)
+    implementation(libs.ktor.server.cio)
+
     // Nintendo DS ROM parsing (game code...), from the kotlinds organization
     implementation(libs.kotlinds.rom)
 
@@ -53,4 +57,12 @@ compose.desktop {
 
 tasks.test {
     useJUnitPlatform()
+}
+
+// Development helper: runs any main class of the project, e.g.
+// ./gradlew devRun -PdevMain=me.nathanfallet.aiplayspokemon.dev.SomeToolKt -PdevArgs="a|b|c"
+tasks.register<JavaExec>("devRun") {
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = providers.gradleProperty("devMain")
+    args = providers.gradleProperty("devArgs").map { it.split("|") }.getOrElse(emptyList())
 }

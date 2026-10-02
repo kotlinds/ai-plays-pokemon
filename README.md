@@ -6,14 +6,25 @@ you want). The same game, the same "eyes" and the same controller for every AI, 
 - **[Jev](https://docs.typesafe.ai)**, TypeSafe's "System One" decision model: it doesn't generate text, it picks one
   option from a closed list and returns a calibrated **probability for every option**, in ~150 ms;
 - **LLMs** through [Koog](https://github.com/JetBrains/koog): OpenAI, Anthropic, OpenRouter (Gemini, Mistral,
-  DeepSeek, Llama...) or a local model with Ollama. They explain each choice in one short sentence.
+  DeepSeek, Llama...) or a local model with Ollama. They reason before each choice and can keep notes;
+- **Claude with your Claude Code login** (e.g. a Claude subscription, no API key), through `claude -p`;
+- **any external agent through MCP**: the app runs an MCP server and the agent (e.g. Claude Code) plays with tools.
 
 What every AI gets:
 
-- **eyes**: we read the game's RAM (map around the player as text, position, dialogue, party, battle...) and describe
-  it as JSON: no AI sees pixels;
-- **hands**: the controller, nothing more: every decision is "which button do I press?" among the 12 DS buttons,
-  exactly like a human player.
+- **eyes**: we read the game's RAM (map around the player as text, position, dialogue, menus, party, battle...) and
+  describe it as JSON: no AI sees pixels;
+- **memory**: what each of its actions changed, where it has been, what it read, the map it explored, its own notes;
+- **hands**, depending on the mode you pick:
+  - **Pure**: the controller, nothing more: "which button do I press?" among the 12 DS buttons (+ wait);
+  - **Assisted**: the buttons plus actions carried out by code ("walk to the stairs and take them", "talk to Mom",
+    "choose YES", "explore north"): the AI still decides what to do, code does the walking;
+  - **Hybrid**: assisted actions picked by a fast decision model (Jev), with an LLM planner called when it hesitates,
+    loops, or periodically, whose goal the fast model then follows.
+
+Every variant is an option in the app (mode, timing, sequences, reasoning, notes, explored map, story goal assist...),
+and each run records milestones (new places, story progress) with decisions, presses, time, tokens and cost in
+`~/.ai-plays-pokemon/runs/`, so configurations can be compared.
 
 ## Running it
 
@@ -28,8 +39,17 @@ Without an argument, the app asks for the ROM with a file picker and remembers i
 melonDS libretro core for your platform from the libretro buildbot.
 
 In the window: the game on the left; on the right, choose the AI (Jev, or an LLM provider + model id), paste its API key
-if needed, and **▶ Let … play** starts the autonomous loop. You can see exactly what the AI receives ("What the AI sees"
-→ Show JSON), and for each decision Jev's probability for every button, or the LLM's short thought.
+if needed, pick the mode and options, and **▶ Let … play** starts the autonomous loop. You can see exactly what the AI
+receives ("What the AI sees" → Show JSON), and for each decision Jev's probability for every option, or the LLM's
+reasoning and note.
+
+**Claude without an API key**: choose LLM → *Claude (Claude Code login)* with a model like `sonnet` or `opus`. Each
+decision runs `claude -p` (a few seconds of overhead) and counts towards your Claude plan's usage.
+
+**An external agent through MCP**: turn on *MCP server* in the app, then connect the agent, e.g.
+`claude mcp add --transport http pokemon http://localhost:3333/mcp`, and ask it to play. It gets two tools: `get_state`
+(screen, memory, options of the current mode) and `act` (carry out an option, optionally a short sequence). The agent
+keeps its own context between calls, and the game is frozen while it thinks.
 
 | Keys        | Action                     | Keys   | Action                         |
 |-------------|----------------------------|--------|--------------------------------|
@@ -54,9 +74,10 @@ core, in-game saves and save states). Environment variables take precedence:
 | `TYPESAFE_API_KEY`                                          | `typesafe.apiKey`       | entered in the app                     |
 | `JEV_MODEL`                                                 | `typesafe.model`        | `jev-latest`                           |
 | `JEV_ENDPOINT`                                              | `typesafe.endpoint`     | `https://api.typesafe.ai/v1/systemone` |
-| `LLM_PROVIDER` (`openai`, `anthropic`, `openrouter`, `ollama`) | `llm.provider`       | `ollama`                               |
+| `LLM_PROVIDER` (`openai`, `anthropic`, `openrouter`, `ollama`, `claude_code`) | `llm.provider` | `ollama`                  |
 | `LLM_MODEL`                                                 | `llm.<provider>.model`  | a default per provider                 |
 | `LLM_THINKING` (Ollama reasoning models think first)        | `llm.thinking`          | `false`                                |
+| `MCP_PORT`                                                  | `mcp.port`              | `3333`                                 |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | `llm.<provider>.apiKey` | entered in the app                     |
 | `AI_PLAYS_POKEMON_DATA_DIR`                                 | —                       | `~/.ai-plays-pokemon`                  |
 
@@ -70,17 +91,18 @@ server implementing the same `POST /v1/systemone` protocol, e.g. an open-weight 
                  │  EmulatorScreen · ControlPanel · keyboard → buttons │
                  └───────┬──────────────────────────────────┬──────────┘
                          │ frames, status                   │ play / pause, state
-  ┌──── emulator ────────▼─────┐                  ┌─────────▼──── agent ─────────────┐
-  │ Emulator (interface)       │   main RAM       │ PokemonPlayer: observe → decide  │
-  │  └ LibretroEmulator        │ ───────────────► │   → act → remember               │
-  │     └ LibretroCore (JNA)   │                  │ ButtonPress · AgentMemory        │
-  │        └ melonDS core      │ ◄─────────────── │ DecisionPrompt                   │
+  ┌──── emulator ────────▼─────┐                  ┌─────────▼──── agent ─────────────┐   ┌──── mcp ─────────┐
+  │ Emulator (interface)       │   main RAM       │ AgentSession: prepare → act      │◄──│ GameMcpServer    │
+  │  └ LibretroEmulator        │ ───────────────► │  GameController · AgentMemory    │   │ (external agent) │
+  │     └ LibretroCore (JNA)   │                  │  actions: AgentAction (sealed)   │   └──────────────────┘
+  │        └ melonDS core      │ ◄─────────────── │ PokemonPlayer: the decision loop │
   └────────────────────────────┘   buttons        └───┬───────────────────────┬──────┘
                                                       │ RAM → Observation     │ ChoiceRequest → ChoiceResult
                                              ┌────────▼─────── game ───┐  ┌───▼──────── decision ───────────┐
                                              │ PokemonGame (interface) │  │ DecisionModel (interface)       │
                                              │  └ hgss: HeartGold      │  │  ├ jev: Jev (TypeSafe API)      │
-                                             │    RAM reader           │  │  └ llm: LLMs through Koog       │
+                                             │    RAM reader           │  │  ├ llm: LLMs through Koog       │
+                                             │                         │  │  └ claudecode: `claude -p`      │
                                              └─────────────────────────┘  └─────────────────────────────────┘
 ```
 
@@ -100,20 +122,26 @@ Each package has one job and depends only on the interfaces of the others:
   standalone library later (a common interface to read Pokémon games' RAM, one implementation per game).
 - **`decision`** — the brain, behind `DecisionModel.choose(ChoiceRequest): ChoiceResult`. `jev/` is the TypeSafe API
   client (`JevClient`, request/response models) and its adapter; `llm/` plays with any LLM through Koog
-  (`LlmProvider` lists the providers, `LlmDecisionModel` asks for `{"thought", "choice"}` and validates the choice).
-- **`agent`** — plays. `PokemonPlayer` loops: snapshot RAM → `Observation` → `DecisionPrompt` (objective + observation
-  + recent presses, with all 12 `ButtonPress` options) → the model's choice → hold that button for 16 frames → record in
-  `AgentMemory` what changed (position, map, mode), which is sent back next time since models are stateless.
+  (`LlmProvider` lists the providers; `LlmAnswerFormat` is the shared answer format: reasoning, note, sequence and a
+  strictly validated choice); `claudecode/` runs Claude through the Claude Code CLI.
+- **`agent`** — plays. `AgentSession` is the game as seen by any AI: `prepare()` waits until the game expects input,
+  observes it and lists the options of the current mode (`ActionCatalog`: buttons, plus in assisted modes typed
+  actions like `TakeExit`, `Interact`, `Explore`, `ChooseOption`, carried out with `Pathfinder`/`Navigation`), and
+  `act()` carries a choice (and sequence) out through the `GameController` (presses held until the game reacts) and
+  records in `AgentMemory` exactly what changed. `PokemonPlayer` is our decision loop on top of it (with the hybrid
+  planner and `RunStats` milestones); `PlayerSettings` holds every experiment option.
+- **`mcp`** — `GameMcpServer` exposes the same `AgentSession` as MCP tools for external agents.
 - **`ui`** — Compose Desktop window. `AppController` owns the player and translates keyboard/mouse into emulator input.
 - **`config`** — `AppConfig`, settings resolution.
 
-### Why raw buttons?
+### Pure, assisted, hybrid: why several modes?
 
-The point of the project is to see what the model does when it faces the game, not what our code does. So we give it
-what a human has: the screen (as text, read from RAM: the map around the player, dialogue, menus, battle, team) and a
-controller. No pathfinding, no "talk to this person" macros, no filtering of "useless" buttons: exploring, understanding
-menus and finding the way is the model's job. The only help is a short, factual history of its own presses (models are
-stateless between requests, while a human remembers what they just did).
+The point of the project is to see what an AI does when it faces the game. Pure mode gives it exactly what a human
+has: the screen (as text) and a controller, no pathfinding, no macros. But every project that finished a Pokémon
+game with an LLM (Claude/Gemini/GPT Plays Pokémon, the PokéAgent challenge) gave it navigation tools, and a decision
+model like Jev needs options that already carry meaning. Assisted mode is that: code does the walking and the cursor
+moves, the AI still decides where to go and what to do. Hybrid mode adds a slower planner for when the fast model is
+unsure. Having the three side by side, with milestones recorded for each run, is what lets us measure the difference.
 
 ## Extending
 

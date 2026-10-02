@@ -87,6 +87,10 @@ object HgssAddresses {
     const val FS_MAP_LOAD_TYPE = 0x70L       // int unk70 (0 = normal, 1 safari gate, 2 union room, 3 colosseum, 4 battle tower)
     const val FS_START_MENU_CURSOR = 0xD3L   // u8 unkD3: start menu cursor position (src/start_menu.c:590) [medium confidence]
     const val FS_LAST_START_MENU_ACTION = 0xE0L
+    const val FS_FOLLOW_INTERACT = 0x120L    // work of Task_FollowMonInteract: +0x10 String* message, +0x869 u8 state
+    const val FOLLOW_INTERACT_STRING = 0x10L
+    const val FOLLOW_INTERACT_STATE = 0x869L
+    const val FOLLOW_INTERACT_MESSAGE_SHOWN = 6 // verified live: 6 while the message box is up (printing or waiting for A)
     const val FS_FOLLOW_MON = 0xE4L          // FollowMon struct (inline)
     const val FOLLOW_MON_MAP_OBJECT = 0x00L  // LocalMapObject *
     const val FOLLOW_MON_SPECIES = 0x10L
@@ -157,6 +161,8 @@ object HgssAddresses {
     const val ME_OBJ = 0x14L
     const val ME_WARP = 0x18L
     const val ME_COORD = 0x1CL
+    const val ME_SCRIPT_HEADER = 0x820L      // u8 script_header[0x100] (after u8 event_data[0x800])
+    const val FS_SCRIPTS_DISABLED = 0xACL    // u32 unkAC: map scene scripts are not checked when non-zero
     // BG_EVENT size 0x14: u16 scriptId; u16 type; int x; int z; int y; u16 dir
     const val BG_SIZE = 0x14L
     const val BG_SCRIPT = 0x00L
@@ -200,6 +206,22 @@ object HgssAddresses {
     const val TILE_COLLISION_BIT = 0x8000
     const val BLOCK_TILES = 32
 
+    // ChooseStarterAppWork (src/choose_starter_app.c; "u8 frame; // 3A4" anchors the offsets), verified live
+    const val CS_CUR_SELECTION = 0x394L      // u32: 0 Chikorita, 1 Cyndaquil, 2 Totodile (sSpecies); RIGHT: 0 -> 2 -> 1
+    const val CS_SELECT_STATE = 0x3A8L       // int: 0 nothing inspected, 1 inspecting the front ball, 2 confirming
+    const val CS_PROC_HANDLE_INPUT = 5       // CHOOSE_STARTER_STATE_HANDLE_INPUT (OverlayManager proc state)
+
+    // Mailbox app (overlay 103): data +0x0C inner work, inner +0x278 GridInputHandler* (+0x0D nextInput: slot 0..9
+    // row by row in 2 columns, 10 = CANCEL), verified live. Mail save (SAVE_MAILBOX): Mail[20] of 0x38 bytes:
+    // +7 mail_type (0xFF = empty), +8 author_name u16[8].
+    const val MAILBOX_INNER = 0x0CL
+    const val MAILBOX_GRID_INPUT = 0x278L
+    const val GRID_INPUT_NEXT = 0x0DL
+    const val SAVE_MAILBOX = 13
+    const val MAIL_SIZE = 0x38L
+    const val MAIL_TYPE = 0x07L
+    const val MAIL_AUTHOR = 0x08L
+
     // OakSpeechData (include/oaks_speech_internal.h) = OverlayManager.data of the Oak speech app (overlay 53)
     const val OAK_STATE = 0x0CL
     const val OAK_STRING = 0x110L            // String *string: last dialog message (freed after printing, usually still readable)
@@ -240,6 +262,11 @@ object HgssAddresses {
     const val SC_NATIVE = 0x04L              // ScrCmdFunc native_ptr
 
     // String (include/pm_string.h)
+    // TextPrinter (include/font_types_def.h): template.currentChar.raw (+0) points into the String being printed
+    const val TP_CURRENT_CHAR = 0x00L
+    const val TP_STATE = 0x28L               // 0/1/4/5/6 printing/scrolling, 2/3/7/8 waiting at a page break for A
+    val TEXT_PRINTER_WAIT_STATES = setOf(2, 3, 7, 8)
+
     const val STR_MAXSIZE = 0x00L
     const val STR_SIZE = 0x02L
     const val STR_MAGIC = 0x04L
@@ -247,15 +274,42 @@ object HgssAddresses {
     const val STRING_MAGIC = 0xB6F8D2ECL     // src/pm_string.c:9
 
     // StartMenuTaskData (include/start_menu.h) — TaskManager.env of Task_StartMenu
+    const val SE_FIELD_MENU = 0x10L          // FieldMenu * of top-screen multichoice menus (ScrCmd_064..067)
+
+    // Bottom-screen manager: FieldSystem.unkD8 -> SysTask (data at +0x10) -> {u8 appId; u8 state; SysTask *app}
+    const val FS_BOTTOM_SCREEN_TASK = 0xD8L
+    const val SYSTASK_DATA = 0x10L
+    const val BSM_APP_ID = 0x00L             // 0 = start menu icons, 3 = script menu (yes/no, multichoice)
+    const val BSM_APP_TASK = 0x04L
+    const val BOTTOM_APP_SCRIPT_MENU = 3
+    // Overlay 27 touch menu ("TM", ov27_0225C434): +0 state, +0xC FieldMenu*, +0x394 cursor
+    const val TOUCH_MENU_STATE = 0x00L       // 4 = yes/no waiting, 8 = multichoice waiting
+    const val TOUCH_MENU_FIELD_MENU = 0x0CL
+    const val TOUCH_MENU_CURSOR = 0x394L
+    const val TM_STATE_YES_NO_WAIT = 4
+    const val TM_STATE_MENU_WAIT = 8
+    // FieldMenu (ov01_021EDAFC, 0x2E0 bytes)
+    const val FMENU_COUNT = 0x9BL            // u8
+    const val FMENU_LIST_MENU = 0xB8L        // ListMenu2D * (top-screen menus)
+    const val FMENU_ITEMS_TOP = 0xBCL        // ListMenuItem[28] {String *text; s32 value}, top-screen menus
+    const val FMENU_ITEMS_TOUCH = 0x1C4L     // ListMenuItem[28], touch-screen menus
+    const val LIST_MENU_ITEM_SIZE = 8L
+    const val LM2D_SELECTED = 0x15L          // ListMenu2D.selectedIndex (Get2dMenuSelection)
+
     const val SM_CURSOR_ACTIVE = 0x20L
-    const val SM_STATE = 0x26L
+    const val SM_STATE = 0x26L               // u16: 3 = HANDLE_INPUT (waiting), 0..2 init, 4/5 fade/app, 0x10/0x11 closing
+    const val SM_STATE_HANDLE_INPUT = 3
     const val SM_SELECTED_INDEX = 0x28L
     const val SM_NUM_BUTTONS = 0x2CL
     const val SM_SELECTION_TO_ACTION = 0x3AL // u8[10]; StartMenuAction enum in src/start_menu.c:47
-    val START_MENU_ACTIONS = listOf(
-        "POKEDEX", "POKEMON", "BAG", "TRAINER_CARD", "SAVE", "OPTIONS", "RUNNING_SHOES", "ACTION_7", "RETIRE",
-        "ACTION_9", "ACTION_10", "POKEGEAR", "ACTION_12",
+    /** StartMenuAction (src/start_menu.c) -> label shown on the icon. */
+    val START_MENU_LABELS = listOf(
+        "POKéDEX", "POKéMON", "BAG", "TRAINER CARD", "SAVE", "OPTIONS", "EXIT", "ACTION_7", "RETIRE",
+        "POKéGEAR", "POKéGEAR", "POKéGEAR", "POKéGEAR",
     )
+    const val START_MENU_ACTION_TRAINER_CARD = 3
+    /** sActionToIconIndex: grid slot of each action's icon (slot = column * 4 + row); others are not grid icons. */
+    val START_MENU_ICON_OF_ACTION = mapOf(0 to 0, 1 to 1, 2 to 2, 3 to 4, 4 to 5, 5 to 6, 11 to 3, 12 to 3)
 
     // ------------------------------------------------------------------------------------------------
     // SaveData (include/save.h) and save arrays (include/constants/save_arrays.h)
@@ -271,6 +325,11 @@ object HgssAddresses {
     const val SAVE_PARTY = 2
     const val SAVE_BAG = 3
     const val SAVE_FLAGS = 4                 // SaveVarsFlags {u16 vars[0x170]; u8 flags[...]}
+    const val SAVE_LOCAL_FIELD_DATA = 5
+    const val SAVE_POKEDEX = 6
+    const val FLAGS_OFFSET = 0x2E0L          // SaveVarsFlags.flags: flag id -> byte id/8, bit id%8
+    const val LFD_RUNNING_SHOES = 0x6CL      // LocalFieldData.playerSaveData.hasRunningShoes (u16)
+    const val POKEDEX_ENABLED = 0x336L       // Pokedex.dexEnabled (u8)
 
     // PLAYERDATA (include/player_data.h): Options options; PlayerProfile profile; u16 coins; IGT igt
     const val PD_PROFILE = 0x04L
@@ -341,7 +400,7 @@ object HgssAddresses {
     const val BM_TYPE2 = 0x25L
     const val BM_ABILITY = 0x27L
     const val BM_PP_CUR = 0x2CL
-    const val BM_PP_MAX = 0x30L
+    const val BM_PP_MAX = 0x30L           // u8 movePP[4]: actually the PP Ups (max PP is computed)
     const val BM_LEVEL = 0x34L
     const val BM_NICKNAME = 0x36L            // u16[11]
     const val BM_HP = 0x4CL
@@ -351,11 +410,19 @@ object HgssAddresses {
     const val BM_STATUS2 = 0x70L
     const val BM_ITEM = 0x78L
 
+    const val BI_FEEDBACK_TASK = 0x0CL       // SysTask * of the button-press animation (NULL when idle)
+    const val BI_UNK10_TASK = 0x10L
+    const val BI_TOUCH_DISABLED = 0x68EL     // u8: 1 while the menu slides in
+    const val BI_KEY_PRESSED = 0x6E0L        // u8: last choice made with buttons (cursor shown automatically next time)
+    const val BC_COMMAND = 0x08L             // int: 5 = CONTROLLER_COMMAND_SELECTION_SCREEN_INPUT
+    const val BC_BATTLER_STATE = 0x00L       // u8[4]: 1 command, 4 move, 6 target (waiting for the player)
+    const val BC_COMMAND_SELECTION = 5
+    val BATTLER_WAITING_STATES = setOf(1, 4, 6)
     const val BI_CUR_MENU_ID = 0x68BL        // s8 curMenuId (enum BattleMenuID include/constants/battle_menu.h) [medium]
     const val BI_MENU_CURSOR = 0x6DCL        // {u8 enabled; s8 y; s8 x}
     val BATTLE_MENUS = mapOf(
-        -1 to "NONE", 0 to "MENU_0", 1 to "MAIN_INITIAL", 2 to "MAIN", 3 to "MENU_3", 4 to "MENU_4", 5 to "MENU_5",
-        6 to "MENU_6", 7 to "MENU_7", 8 to "MENU_8", 9 to "PAL_PARK_INITIAL", 10 to "PAL_PARK", 11 to "FIGHT",
+        -1 to "NONE", 0 to "NONE", 1 to "MAIN", 2 to "MAIN", 3 to "MAIN", 4 to "MAIN", 5 to "MAIN_FIGHT_ONLY",
+        6 to "MAIN_FIGHT_ONLY", 7 to "MAIN", 8 to "MAIN", 9 to "PAL_PARK_INITIAL", 10 to "PAL_PARK", 11 to "FIGHT",
         12 to "TARGET", 13 to "YES_NO", 14 to "KEEP_FORGET_MOVE", 15 to "GIVE_UP_ON_MOVE", 16 to "SWITCH_OR_FLEE",
         17 to "SWITCH_OR_KEEP", 18 to "VS_RECORDER_PLAYBACK", 19 to "MENU_19", 20 to "MENU_20",
     )
@@ -440,6 +507,7 @@ data class HgssVersion(
     val fnTaskRunScripts: Long,        // Task_RunScripts (fieldmap.o) src/fieldmap.c:97
     val fnTaskStartMenu: Long,         // Task_StartMenu (start_menu.o)
     val fnTaskWildEncounter: Long,     // Task_WildEncounter (encounter.o)
+    val fnTaskFollowMonInteract: Long, // Task_FollowMonInteract (overlay 2): talking to the following Pokémon
 
     // --- Native script waits (ScriptContext.native_ptr), src/scrcmd_c.c ---
     val fnScrWaitABPress: Long,        // sub_02041000 (ScrCmd_WaitABPress)
@@ -454,6 +522,15 @@ data class HgssVersion(
     val fnScrWaitAppDestroy: Long,     // ScrNative_WaitApplication_DestroyTaskData
     val fnScrPauseTimer: Long,         // RunPauseTimer (ScrCmd_Wait)
     val fnScrWaitTextPrint: Long,      // ov01_021EF348 (field overlay 1, scrcmd_message.o): waits for the text printer
+    /** `sTextPrinterTasks` (src/text.c): SysTask *[8], one per text printer id; NULL when the printer is done. */
+    val textPrinterTasks: Long,
+    /** u16 at `_021D1034+0xC` (unk_0200FA24.o): non-zero while a palette fade / screen wipe runs (IsPaletteFadeFinished). */
+    val paletteFadeActive: Long,
+    /** BrightnessData.transitionActive of the sub and main screens (master brightness fades). */
+    val brightnessSubActive: Long,
+    val brightnessMainActive: Long,
+    val fnScrTouchYesNo: Long,         // sub_020477C0 (ScrCmd_GetMenuChoice): yes/no drawn on the touch screen (overlay 27)
+    val fnScrTouchMenu: Long,          // sub_020478D0 (ScrCmd_MenuExec): multichoice drawn on the touch screen (overlay 27)
 
     // --- Terrain accessor tables assigned to FieldSystem.unk60 by sub_0205489C (asm/unk_02054648.s) ---
     /** {sub_02054774, sub_020547D8}: normal maps, attributes come from the field map loader (FieldSystem.unk2C). */
@@ -496,6 +573,7 @@ data class HgssVersion(
             fnTaskRunScripts = 0x0203FF44L,
             fnTaskStartMenu = 0x0203BEF0L,
             fnTaskWildEncounter = 0x02050C18L,
+            fnTaskFollowMonInteract = 0x02250110L,
             fnScrWaitABPress = 0x02041000L,
             fnScrWaitButtonOrDelay = 0x02041040L,
             fnScrWaitButton = 0x02041074L,
@@ -508,6 +586,12 @@ data class HgssVersion(
             fnScrWaitAppDestroy = 0x02042974L,
             fnScrPauseTimer = 0x020408D8L,
             fnScrWaitTextPrint = 0x021EF348L,
+            textPrinterTasks = 0x021D1F74L,
+            paletteFadeActive = 0x021D1040L,
+            brightnessSubActive = 0x021D0ED0L,
+            brightnessMainActive = 0x021D0EF0L,
+            fnScrTouchYesNo = 0x020477C0L,
+            fnScrTouchMenu = 0x020478D0L,
             terrainAccessorLoader = 0x020FC604L,
             terrainAccessorTerrainAttributes = 0x020FC614L,
         )

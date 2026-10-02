@@ -12,15 +12,13 @@ import me.nathanfallet.aiplayspokemon.game.hgss.HgssAddresses as A
  *
  * Entry points:
  *  - [read]: full snapshot ([HgssState]), or null if the RAM does not look like a running HGSS at all.
- *  - [readGrid]: collision/behavior grid around the player (also embedded in [HgssState.surroundings]).
- *  - [renderGrid]: ASCII rendering (rows + legend) of a [LocalGrid], ready to paste in a prompt.
  *
  * Every pointer is validated to be inside main RAM before being followed; any unexpected value produces a
  * partial state (+ a warning) instead of an exception.
  */
 class HgssReader(private val memory: Memory, private val version: HgssVersion? = null) {
 
-    /** Addresses of the version being read, resolved at the start of each [read] / [readGrid]. */
+    /** Addresses of the version being read, resolved at the start of each [read]. */
     private var v: HgssVersion = version ?: HgssVersion.HEARTGOLD_US
 
     /**
@@ -124,7 +122,9 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             ptr(om + A.OM_DATA)?.let { data -> readGameString(ptr(data + A.OAK_STRING)) }
                 ?.let { DialogueInfo(text = it, messageBoxOpen = true, waitingFor = "intro") }
         } else null
-        return HgssState(frame = frame, mode = mode, modeDetail = detail, dialogue = dialogue)
+        // Outside the field we can only tell that nothing is fading (menus/intro wait for a button most of the time).
+        val awaiting = mode in setOf(GameMode.INTRO_MOVIE, GameMode.TITLE_SCREEN, GameMode.MAIN_MENU, GameMode.NEW_GAME_INTRO) && !isFading()
+        return HgssState(frame = frame, mode = mode, modeDetail = detail, dialogue = dialogue, awaitingInput = awaiting)
     }
 
     private fun readField(ctx: Ctx, frame: Long, om: Long, execState: Int): HgssState {
@@ -152,6 +152,8 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
         var detail: String? = null
         var dialogue: DialogueInfo? = null
         var startMenu: StartMenuInfo? = null
+        var menu: MenuInfo? = null
+        var app: AppInfo? = null
         var battle: BattleInfo? = null
 
         if (subApp != null) {
@@ -171,16 +173,27 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             } else {
                 mode = GameMode.APP
                 detail = name
+                app = runCatching { readApp(subApp, name, ptr(v.saveDataPtr)) }.getOrNull()
             }
         } else if (taskman != null) {
             val tasks = taskChain(taskman)
             val scriptEnv = tasks.firstNotNullOfOrNull { (_, env) -> env?.takeIf { u32(it + A.SE_CHECK) == A.SCRIPT_ENV_MAGIC } }
             val startMenuTask = tasks.firstOrNull { (func, _) -> func == v.fnTaskStartMenu }
+            val followerTask = tasks.firstOrNull()?.first == v.fnTaskFollowMonInteract
             when {
+                followerTask -> {
+                    dialogue = readFollowerMessage(fs)
+                    mode = if (dialogue.messageBoxOpen) GameMode.DIALOGUE else GameMode.SCRIPT
+                    detail = "follower_" + dialogue.waitingFor
+                }
+
                 scriptEnv != null -> {
                     dialogue = readDialogue(scriptEnv)
                     mode = if (dialogue.messageBoxOpen) GameMode.DIALOGUE else GameMode.SCRIPT
                     detail = dialogue.waitingFor
+                    if (dialogue.waitingFor == "yes_no" || dialogue.waitingFor == "multichoice") {
+                        menu = runCatching { readScriptMenu(fs, scriptEnv, dialogue.waitingFor) }.getOrNull()
+                    }
                 }
 
                 startMenuTask != null -> {
@@ -207,21 +220,42 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
         val player = saveData?.let { runCatching { readPlayer(it) }.getOrNull() }
         val party = saveData?.let { runCatching { readParty(ctx, it) }.getOrNull() } ?: emptyList()
         val bag = saveData?.let { runCatching { readBag(it) }.getOrNull() }
+        val story = saveData?.let { runCatching { readStory(it) }.getOrNull() }
 
         // The overworld structures (map loader, map objects) are only alive while the field map app runs.
         val fieldAlive = subApp == null && fieldMapApp != null
         val location = runCatching { readLocation(ctx, fs, fieldAlive) }.getOrNull()
         val surroundings = if (fieldAlive && mapReady) runCatching { readSurroundings(ctx, fs, saveData) }.getOrNull() else null
 
+        val fading = isFading()
+        val scenePending = mode == GameMode.OVERWORLD && sceneScriptPending(fs, saveData)
+        val awaiting = !fading && when (mode) {
+            GameMode.OVERWORLD -> playerControllable && location?.moving == false && !scenePending
+            GameMode.DIALOGUE, GameMode.SCRIPT -> when (dialogue?.waitingFor) {
+                "waiting_button" -> true
+                "yes_no", "multichoice" -> menu?.waiting != false
+                else -> false
+            }
+            GameMode.START_MENU -> startMenu?.waiting == true
+            GameMode.APP -> app?.waiting ?: (subApp != null && s32(subApp + A.OM_EXEC_STATE) == 2)
+            GameMode.BATTLE -> battle?.awaitingInput == true
+            else -> false
+        }
         return HgssState(
             frame = frame,
             mode = mode,
             modeDetail = detail,
             playerControllable = playerControllable,
+            awaitingInput = awaiting,
+            fading = fading,
+            scenePending = scenePending,
             player = player,
             location = location,
             dialogue = dialogue,
             startMenu = startMenu,
+            menu = menu,
+            app = app,
+            story = story,
             party = party,
             battle = battle,
             surroundings = surroundings,
@@ -229,6 +263,42 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             warnings = ctx.warnings,
         )
     }
+
+    /**
+     * True when a map scene script is about to start: the game checks the map's "on frame" table (var == value)
+     * before reading the player's input (src/fieldmap.c GetMapSceneScriptId, FieldInput_Process), e.g. Mom's
+     * scene right after arriving on the first floor.
+     */
+    private fun sceneScriptPending(fs: Long, saveData: Long?): Boolean {
+        if (u32(fs + A.FS_SCRIPTS_DISABLED) != 0L) return false
+        val header = ptr(fs + A.FS_MAP_EVENTS)?.let { it + A.ME_SCRIPT_HEADER } ?: return false
+        var p = header
+        var table: Long? = null
+        while (p < header + 0x100) {
+            val type = u8(p)
+            if (type == 0) break
+            if (type == 1) {
+                val ofs = u32(p + 1)
+                if (ofs != 0L) table = p + 5 + ofs
+                break
+            }
+            p += 5
+        }
+        var t = table ?: return false
+        repeat(32) {
+            val var1 = u16(t)
+            if (var1 == 0) return false
+            val a = varGet(saveData, var1)
+            val b = varGet(saveData, u16(t + 2))
+            if (a != null && a == b) return true
+            t += 6
+        }
+        return false
+    }
+
+    /** A palette fade / wipe or a master-brightness transition is running (warps, apps opening, script fades). */
+    private fun isFading(): Boolean =
+        u16(v.paletteFadeActive) != 0 || u32(v.brightnessSubActive) != 0L || u32(v.brightnessMainActive) != 0L
 
     /** Walks TaskManager->prev from the top task. Returns (func, env) pairs, top first. */
     private fun taskChain(top: Long): List<Pair<Long, Long?>> {
@@ -253,8 +323,8 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             if (u8(sc + A.SC_MODE) == 2) fn(sc + A.SC_NATIVE) else null
         }
         val waiting = when {
-            v.fnScrYesNo in natives -> "yes_no"
-            v.fnScrMenuWait1 in natives || v.fnScrMenuWait2 in natives -> "multichoice"
+            v.fnScrYesNo in natives || v.fnScrTouchYesNo in natives -> "yes_no"
+            v.fnScrMenuWait1 in natives || v.fnScrMenuWait2 in natives || v.fnScrTouchMenu in natives -> "multichoice"
             natives.any {
                 it == v.fnScrWaitABPress || it == v.fnScrWaitButton ||
                     it == v.fnScrWaitButtonOrDpad || it == v.fnScrWaitButtonOrDelay
@@ -266,24 +336,188 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             natives.isNotEmpty() -> "native(0x${natives.first().toString(16)})"
             else -> "running"
         }
-        val text = if (open) readGameString(ptr(env + A.SE_STRING_BUFFER_0)) else null
+        val strPtr = if (open) ptr(env + A.SE_STRING_BUFFER_0) else null
+        val text = readGameString(strPtr)
+        // The field message printer: alive while printing or waiting at a page break (\r / \f) for A.
+        val printer = ptr(v.textPrinterTasks + 4L * u8(env + A.SE_TEXT_PRINTER))?.let { ptr(it + A.SYSTASK_DATA) }
+        val printerState = printer?.let { u8(it + A.TP_STATE) }
+        val pageBreak = printerState != null && printerState in A.TEXT_PRINTER_WAIT_STATES
+        var printedChars: Int? = null
+        if (strPtr != null && printer != null && text != null) {
+            val data = strPtr + A.STR_DATA
+            val cur = u32(printer + A.TP_CURRENT_CHAR)
+            val size = u16(strPtr + A.STR_SIZE)
+            if (cur >= data && cur <= data + 2L * size) printedChars = ((cur - data) / 2).toInt()
+        }
+        // The printer's progress only matters while the script waits for it (after that the slot may be stale).
+        val visible = if (strPtr != null && text != null) {
+            val size = u16(strPtr + A.STR_SIZE).coerceAtMost(2048)
+            HgssText.visibleLines(chars(strPtr + A.STR_DATA, size), if (printer != null && waiting == "printing") printedChars else null)
+        } else null
+        val waitingFor = when {
+            pageBreak && waiting == "printing" -> "waiting_button"
+            waiting == "printing" -> "printing"
+            else -> waiting
+        }
         return DialogueInfo(
             text = text,
+            visibleText = visible,
+            printing = waiting == "printing" && !pageBreak,
             messageBoxOpen = open,
-            waitingFor = waiting,
+            waitingFor = waitingFor,
             scriptId = u16(env + A.SE_ACTIVE_SCRIPT),
         )
+    }
+
+    /**
+     * Talking to the following Pokémon: Task_FollowMonInteract (overlay 2) prints its own message, outside the script
+     * environment. Its work (FieldSystem.unk120) holds the message String at +0x10 and a state byte at +0x869 that is 6
+     * while the message box is up (verified live).
+     */
+    private fun readFollowerMessage(fs: Long): DialogueInfo {
+        val work = ptr(fs + A.FS_FOLLOW_INTERACT)
+        val shown = work != null && u8(work + A.FOLLOW_INTERACT_STATE) == A.FOLLOW_INTERACT_MESSAGE_SHOWN
+        if (!shown) return DialogueInfo(messageBoxOpen = false, waitingFor = "running")
+        val strPtr = ptr(work!! + A.FOLLOW_INTERACT_STRING)
+        val text = readGameString(strPtr) ?: return DialogueInfo(messageBoxOpen = true, waitingFor = "waiting_button")
+        val data = strPtr!! + A.STR_DATA
+        val size = u16(strPtr + A.STR_SIZE)
+        // The printer currently printing this string, if any.
+        var printed: Int? = null
+        var pageBreak = false
+        for (i in 0 until 8) {
+            val printer = ptr(v.textPrinterTasks + 4L * i)?.let { ptr(it + A.SYSTASK_DATA) } ?: continue
+            val cur = u32(printer + A.TP_CURRENT_CHAR)
+            if (cur >= data && cur <= data + 2L * size) {
+                printed = ((cur - data) / 2).toInt()
+                pageBreak = u8(printer + A.TP_STATE) in A.TEXT_PRINTER_WAIT_STATES
+            }
+        }
+        val printing = printed != null && !pageBreak
+        return DialogueInfo(
+            text = text,
+            visibleText = HgssText.visibleLines(chars(data, size.coerceAtMost(2048)), if (printing) printed else null),
+            printing = printing,
+            messageBoxOpen = true,
+            waitingFor = if (printing) "printing" else "waiting_button",
+        )
+    }
+
+    /**
+     * The script menu waiting for a choice. Most of them are drawn on the touch screen by overlay 27
+     * (ScrCmd_GetMenuChoice / ScrCmd_MenuExec): FieldSystem.unkD8 -> bottom-screen manager (app 3) -> touch menu
+     * {state, FieldMenu*, cursor}. A few use the top screen: ScriptEnvironment.unk24 (ListMenu2D, yes/no) or
+     * ScriptEnvironment.unk10 (FieldMenu with its ListMenu2D). Option labels are the expanded Strings of the FieldMenu.
+     */
+    private fun readScriptMenu(fs: Long, env: Long, kind: String): MenuInfo? {
+        val natives = (0 until 3).mapNotNull { i ->
+            val sc = ptr(env + A.SE_SCRIPT_CONTEXTS + 4L * i) ?: return@mapNotNull null
+            if (u8(sc + A.SC_MODE) == 2) fn(sc + A.SC_NATIVE) else null
+        }
+        fun items(fieldMenu: Long, offset: Long): List<String> {
+            val n = u8(fieldMenu + A.FMENU_COUNT)
+            if (n !in 1..28) return emptyList()
+            return (0 until n).map { i -> readGameString(ptr(fieldMenu + offset + i * A.LIST_MENU_ITEM_SIZE))?.replace('\n', ' ') ?: "?" }
+        }
+        if (v.fnScrTouchYesNo in natives || v.fnScrTouchMenu in natives) {
+            val manager = ptr(fs + A.FS_BOTTOM_SCREEN_TASK)?.let { ptr(it + A.SYSTASK_DATA) } ?: return null
+            if (u8(manager + A.BSM_APP_ID) != A.BOTTOM_APP_SCRIPT_MENU) return null
+            val tm = ptr(manager + A.BSM_APP_TASK)?.let { ptr(it + A.SYSTASK_DATA) } ?: return null
+            val state = s32(tm + A.TOUCH_MENU_STATE)
+            val cursor = s32(tm + A.TOUCH_MENU_CURSOR)
+            return if (v.fnScrTouchYesNo in natives) {
+                MenuInfo("yes_no", listOf("YES", "NO"), cursor.takeIf { it in 0..1 }, waiting = state == A.TM_STATE_YES_NO_WAIT)
+            } else {
+                val labels = ptr(tm + A.TOUCH_MENU_FIELD_MENU)?.let { items(it, A.FMENU_ITEMS_TOUCH) } ?: emptyList()
+                // 5..8 options: 2 columns, row by row; with an odd count the last one sits alone at the bottom right
+                // (ov27_0225D3C4, verified on screen), so a "-" placeholder keeps row-major indices right.
+                val grid = labels.size > 4
+                val padded = grid && labels.size % 2 == 1
+                val options = if (padded) labels.dropLast(1) + "-" + labels.last() else labels
+                val index = cursor.takeIf { it in labels.indices }?.let { if (padded && it == labels.size - 1) it + 1 else it }
+                MenuInfo("multichoice", options, index, columns = if (grid) 2 else 1, waiting = state == A.TM_STATE_MENU_WAIT)
+            }
+        }
+        if (v.fnScrYesNo in natives) {
+            val cursor = ptr(env + A.SE_LIST_MENU_2D)?.let { u8(it + A.LM2D_SELECTED) }
+            return MenuInfo("yes_no", listOf("YES", "NO"), cursor?.takeIf { it in 0..1 }, screen = "top")
+        }
+        val fieldMenu = ptr(env + A.SE_FIELD_MENU) ?: return MenuInfo(kind, emptyList(), null, screen = "top")
+        val options = items(fieldMenu, A.FMENU_ITEMS_TOP)
+        val cursor = ptr(fieldMenu + A.FMENU_LIST_MENU)?.let { u8(it + A.LM2D_SELECTED) }
+        return MenuInfo("multichoice", options, cursor?.takeIf { it in options.indices }, screen = "top")
+    }
+
+    /** What we know about a full-screen app: at least its name; entries/cursor/prompt for the ones we decode. */
+    private fun readApp(om: Long, name: String, saveData: Long?): AppInfo {
+        val running = s32(om + A.OM_EXEC_STATE) == 2
+        val data = ptr(om + A.OM_DATA)
+        return when (name) {
+            "choose_starter" -> {
+                val work = data ?: return AppInfo(name, "Starter selection")
+                // D-pad order: RIGHT turns the machine 0 -> 2 -> 1 (Chikorita -> Totodile -> Cyndaquil).
+                val order = listOf(0, 2, 1)
+                val labels = listOf("CHIKORITA (Grass)", "CYNDAQUIL (Fire)", "TOTODILE (Water)")
+                val sel = u32(work + A.CS_CUR_SELECTION).toInt().takeIf { it in 0..2 }
+                val front = sel?.let { labels[it].substringBefore(' ') }
+                val prompt = when (u32(work + A.CS_SELECT_STATE).toInt()) {
+                    0 -> "Prof. Elm: pick a Poké Ball. A looks at the ball in front, LEFT/RIGHT turn the machine to the next ball."
+                    1 -> "The ball in front holds $front. A chooses it (Elm then asks to confirm), LEFT/RIGHT turn to another ball."
+                    2 -> "Prof. Elm asks: do you want $front? A = yes, take it; B = no, look again."
+                    else -> null
+                }
+                AppInfo(
+                    name, "Starter selection (Prof. Elm's machine)", order.map { labels[it] }, sel?.let { order.indexOf(it) },
+                    layout = "horizontal", prompt = prompt, waiting = running && s32(om + A.OM_PROC_STATE) == A.CS_PROC_HANDLE_INPUT,
+                )
+            }
+            "mailbox" -> {
+                val slots = (0 until 10).map { i ->
+                    val mail = saveData?.let { saveArray(it, A.SAVE_MAILBOX) }?.let { it + i * A.MAIL_SIZE }
+                    if (mail == null || u8(mail + A.MAIL_TYPE) == 0xFF) "-"
+                    else "mail from " + HgssText.decode(chars(mail + A.MAIL_AUTHOR, 8))
+                }
+                // CANCEL is the bottom-right button: a "-" placeholder keeps the 2-column row-major layout.
+                val entries = slots + "-" + "CANCEL"
+                val next = data?.let { ptr(it + A.MAILBOX_INNER) }?.let { ptr(it + A.MAILBOX_GRID_INPUT) }?.let { u8(it + A.GRID_INPUT_NEXT) }
+                val cursor = when (next) {
+                    in 0..9 -> next
+                    10 -> 11
+                    else -> null
+                }
+                AppInfo(
+                    name, "PC Mailbox", entries, cursor, layout = "grid2",
+                    prompt = "stored mail in 2 columns (\"-\" = empty slot): D-pad moves, A opens the selected mail's menu, B or CANCEL closes the Mailbox",
+                    waiting = running && !isFading(),
+                )
+            }
+            else -> AppInfo(name, name.replace('_', ' '), waiting = running)
+        }
     }
 
     private fun readStartMenu(fs: Long, env: Long): StartMenuInfo? {
         val n = u32(env + A.SM_NUM_BUTTONS).toInt()
         if (n !in 1..10) return null
-        val items = (0 until n).map { i ->
-            val a = u8(env + A.SM_SELECTION_TO_ACTION + i)
-            A.START_MENU_ACTIONS.getOrElse(a) { "ACTION_$a" }
+        // The last two entries are the fixed Pokégear touch buttons (actions 9 and 10), not grid icons.
+        val actions = (0 until n).map { i -> u8(env + A.SM_SELECTION_TO_ACTION + i) }
+        val grid = arrayOfNulls<String>(8)
+        val slotOfIndex = mutableMapOf<Int, Int>()
+        actions.forEachIndexed { i, action ->
+            if (i >= n - 2) return@forEachIndexed
+            val icon = A.START_MENU_ICON_OF_ACTION[action] ?: return@forEachIndexed
+            val label = if (action == A.START_MENU_ACTION_TRAINER_CARD) "TRAINER CARD" else A.START_MENU_LABELS.getOrElse(action) { "?" }
+            grid[icon] = label
+            slotOfIndex[i] = icon
         }
-        val cursor = u8(fs + A.FS_START_MENU_CURSOR).takeIf { it < n }
-        return StartMenuInfo(items, cursor)
+        // Grid slot (icon index) -> row = icon % 4, column = icon / 4; list row by row, dropping empty rows.
+        val rows = (0 until 4).filter { r -> grid[r] != null || grid[r + 4] != null }
+        val items = rows.flatMap { r -> listOf(grid[r] ?: "-", grid[r + 4] ?: "-") }
+        val cursorIndex = u8(fs + A.FS_START_MENU_CURSOR)
+        val cursor = slotOfIndex[cursorIndex]?.let { icon -> rows.indexOf(icon % 4).takeIf { it >= 0 }?.let { it * 2 + icon / 4 } }
+        return StartMenuInfo(
+            items, cursor, waiting = u16(env + A.SM_STATE) == A.SM_STATE_HANDLE_INPUT,
+            leftColumn = (0 until 4).mapNotNull { grid[it] }, rightColumn = (4 until 8).mapNotNull { grid[it] },
+        )
     }
 
     // ================================================================================================
@@ -388,6 +622,16 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
         }
     }
 
+    /** Story flags/vars listed in [HgssProgress] (SaveVarsFlags, src/save_vars_flags.c). */
+    private fun readStory(saveData: Long): StoryInfo? {
+        val vf = saveArray(saveData, A.SAVE_FLAGS) ?: return null
+        val flags = HgssProgress.FLAGS.filter { id -> u8(vf + A.FLAGS_OFFSET + id / 8) shr (id % 8) and 1 == 1 }.toSet()
+        val vars = HgssProgress.VARS.associateWith { id -> u16(vf + 2L * (id - A.VAR_BASE)) }
+        val shoes = saveArray(saveData, A.SAVE_LOCAL_FIELD_DATA)?.let { u16(it + A.LFD_RUNNING_SHOES) != 0 } ?: false
+        val dex = saveArray(saveData, A.SAVE_POKEDEX)?.let { u8(it + A.POKEDEX_ENABLED) != 0 } ?: false
+        return StoryInfo(flags, vars, shoes, dex)
+    }
+
     /** Script var value (FieldSystem_VarGet, src/fieldmap.c:365) — only save vars are supported. */
     private fun varGet(saveData: Long?, varId: Int): Int? = when {
         varId < A.VAR_BASE -> varId
@@ -423,6 +667,7 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             // At rest the position vector is exactly the tile center (src/map_object.c:525).
             val px = s32(mo + A.MO_POSITION_VECTOR)
             val pz = s32(mo + A.MO_POSITION_VECTOR + 8)
+            // (MapObject flags 0x10/0x20 are useless here: the standing "movement" restarts every frame when idle.)
             moving = px != x * 16 * 4096 + 8 * 4096 || pz != z * 16 * 4096 + 8 * 4096 ||
                 s32(mo + A.MO_PREVIOUS_X) != x || s32(mo + A.MO_PREVIOUS_Z) != z
         }
@@ -531,22 +776,42 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
     // Surroundings: map objects, events, grid
     // ================================================================================================
 
-    private fun readSurroundings(ctx: Ctx, fs: Long, saveData: Long?, gridWidth: Int = 15, gridHeight: Int = 11): Surroundings? {
+    private fun readSurroundings(ctx: Ctx, fs: Long, saveData: Long?): Surroundings? {
         val playerMo = playerMapObject(fs) ?: return null
         val px = s32(playerMo + A.MO_X)
         val pz = s32(playerMo + A.MO_Z)
-        val objects = readMapObjects(fs, playerMo, px, pz)
-        val (warps, bgs, triggers) = readEvents(ctx, fs, saveData, px, pz)
+        val mapId = ptr(fs + A.FS_LOCATION)?.let { s32(it + A.LOC_MAP_ID) } ?: -1
+        val mapType = HgssData.mapType(mapId)
+        val interior = mapType == "INTERIOR"
         val tiles = TileReader(fs)
-        val grid = buildGrid(tiles, px, pz, s32(playerMo + A.MO_FACING), objects, warps, bgs, triggers, gridWidth, gridHeight)
+        val objects = readMapObjects(fs, playerMo, px, pz)
+        val (warps, bgs, triggers) = readEvents(ctx, fs, saveData, px, pz, mapId, tiles, interior)
+        val grid = buildArea(tiles, px, pz, interior)
+        // Furniture the player can examine (PC, TV, bookshelves...) that has no BG event of its own.
+        val examinables = grid?.let { g ->
+            (0 until g.height).flatMap { r ->
+                (0 until g.width).mapNotNull { c ->
+                    val x = g.originX + c
+                    val z = g.originZ + r
+                    if (g.rows[r][c] == '-' || bgs.any { it.x == x && it.z == z }) return@mapNotNull null
+                    val attr = tiles.attr(x, z) ?: return@mapNotNull null
+                    val label = HgssLabels.examinableBehavior(HgssData.tileBehaviorNames.getOrNull(attr and 0xFF)) ?: return@mapNotNull null
+                    // Only furniture the player can stand next to.
+                    if (listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1).none { (dx, dz) -> g.at(x + dx, z + dz) in "._\"" }) return@mapNotNull null
+                    BgEventInfo(x, z, x - px, z - pz, "tile", 0, label, attr and A.TILE_COLLISION_BIT != 0)
+                }
+            }
+        } ?: emptyList()
         return Surroundings(
             matrixWidth = tiles.width.takeIf { it > 0 },
             matrixHeight = tiles.height.takeIf { it > 0 },
+            mapType = mapType,
             grid = grid,
             objects = objects,
             warps = warps,
-            bgEvents = bgs,
+            bgEvents = bgs + examinables,
             triggers = triggers,
+            neighbors = if (interior) emptyList() else readNeighbors(fs, mapId, px, pz),
         )
     }
 
@@ -570,6 +835,7 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             val kind = when {
                 o == follower -> "follower"
                 spriteName == "MONSTARBALL" -> "item_ball"
+                spriteName in OBSTACLE_SPRITES -> "obstacle"
                 else -> "npc"
             }
             out += MapObjectInfo(
@@ -586,16 +852,18 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
                 scriptId = s32(o + A.MO_SCRIPT_ID),
                 hidden = flags and A.MO_FLAG_HIDDEN != 0L,
                 kind = kind,
+                label = if (kind == "follower") "your Pokémon (following you)" else HgssLabels.person(spriteName),
             )
         }
         return out.sortedBy { Math.abs(it.dx) + Math.abs(it.dz) }
     }
 
     private fun readEvents(
-        ctx: Ctx, fs: Long, saveData: Long?, px: Int, pz: Int,
+        ctx: Ctx, fs: Long, saveData: Long?, px: Int, pz: Int, mapId: Int, tiles: TileReader, interior: Boolean,
     ): Triple<List<WarpInfo>, List<BgEventInfo>, List<TriggerInfo>> {
         val me = ptr(fs + A.FS_MAP_EVENTS) ?: return Triple(emptyList(), emptyList(), emptyList())
         fun count(off: Long) = u32(me + off).toInt().takeIf { it in 0..256 } ?: 0.also { ctx.warnings += "bad event count" }
+        fun behavior(x: Int, z: Int) = tiles.attr(x, z)?.let { HgssData.tileBehaviorNames.getOrNull(it and 0xFF) }
 
         val warps = ptr(me + A.ME_WARP, 2)?.let { base ->
             (0 until count(A.ME_NUM_WARP)).map { i ->
@@ -603,7 +871,11 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
                 val x = u16(w + A.WARP_X)
                 val z = u16(w + A.WARP_Z)
                 val dest = u16(w + A.WARP_DEST_MAP)
-                WarpInfo(i, x, z, x - px, z - pz, dest, HgssData.mapName(dest), HgssData.mapLocation(dest), u16(w + A.WARP_DEST_WARP))
+                val kind = HgssLabels.exitKind(behavior(x, z), interior)
+                WarpInfo(
+                    i, x, z, x - px, z - pz, dest, HgssData.mapName(dest), HgssData.mapLocation(dest), u16(w + A.WARP_DEST_WARP),
+                    kind = kind.name, pressDirection = kind.pressDirection,
+                )
             }
         } ?: emptyList()
 
@@ -618,7 +890,13 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
                     2 -> "hidden_item"
                     else -> "type${u16(b + A.BG_TYPE)}"
                 }
-                BgEventInfo(x, z, x - px, z - pz, type, u16(b + A.BG_SCRIPT))
+                val attr = tiles.attr(x, z)
+                val label = when (type) {
+                    "sign" -> "sign"
+                    "hidden_item" -> "hidden item"
+                    else -> HgssLabels.bgLabel(mapId, x, z) ?: HgssLabels.examinableBehavior(behavior(x, z)) ?: "something to examine"
+                }
+                BgEventInfo(x, z, x - px, z - pz, type, u16(b + A.BG_SCRIPT), label, blocked = attr != null && attr and A.TILE_COLLISION_BIT != 0)
             }
         } ?: emptyList()
 
@@ -637,121 +915,161 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
         return Triple(warps, bgs, triggers)
     }
 
+    /**
+     * Other maps of the same matrix next to the player's (e.g. Route 29 west of New Bark Town): for each direction,
+     * the first block within 2 blocks whose map id differs (MAPMATRIX.headers, include/map_matrix.h).
+     */
+    private fun readNeighbors(fs: Long, mapId: Int, px: Int, pz: Int): List<NeighborArea> {
+        val matrix = ptr(fs + A.FS_MAP_MATRIX, 2) ?: return emptyList()
+        val w = u8(matrix + A.MM_WIDTH)
+        val h = u8(matrix + A.MM_HEIGHT)
+        if (w !in 1..255 || h !in 1..255 || w * h <= 1) return emptyList()
+        fun header(bx: Int, bz: Int): Int? =
+            if (bx in 0 until w && bz in 0 until h) u16(matrix + A.MM_HEADERS + 2L * (bz * w + bx)) else null
+        val bx = px / A.BLOCK_TILES
+        val bz = pz / A.BLOCK_TILES
+        val out = mutableListOf<NeighborArea>()
+        for ((name, d) in listOf("north" to (0 to -1), "south" to (0 to 1), "west" to (-1 to 0), "east" to (1 to 0))) {
+            for (step in 1..2) {
+                val nx = bx + d.first * step
+                val nz = bz + d.second * step
+                val id = header(nx, nz) ?: break
+                if (id == mapId) continue
+                if (id !in 1 until 1000 || HgssData.mapName(id).startsWith("Everywhere")) break
+                val boundary = when (name) {
+                    "north" -> (nz + 1) * A.BLOCK_TILES - 1
+                    "south" -> nz * A.BLOCK_TILES
+                    "west" -> (nx + 1) * A.BLOCK_TILES - 1
+                    else -> nx * A.BLOCK_TILES
+                }
+                out += NeighborArea(name, id, HgssData.mapLocation(id) ?: HgssData.mapName(id), boundary)
+                break
+            }
+        }
+        return out
+    }
+
+    private companion object {
+        /** Half size of the area read around the player (the loaded blocks never reach further). */
+        const val AREA_HALF_SIZE = 32
+
+        /** Map objects that are things, not people: Cut trees, Rock Smash rocks, boulders. */
+        val OBSTACLE_SPRITES = setOf("TREE", "ROCK", "BREAKROCK")
+    }
+
     private val bJumpEast by lazy { HgssData.behaviorId("JUMP_EAST") }
     private val bJumpWest by lazy { HgssData.behaviorId("JUMP_WEST") }
     private val bJumpNorth by lazy { HgssData.behaviorId("JUMP_NORTH") }
     private val bJumpSouth by lazy { HgssData.behaviorId("JUMP_SOUTH") }
-    private val warpLikeBehaviors by lazy {
-        listOf(
-            "DOOR", "WARP_ENTRANCE_EAST", "WARP_ENTRANCE_WEST", "WARP_ENTRANCE_NORTH", "WARP_ENTRANCE_SOUTH",
-            "WARP_EAST", "WARP_WEST", "WARP_NORTH", "WARP_SOUTH", "WARP_STAIRS_EAST", "WARP_STAIRS_WEST",
-            "WARP_PANEL", "LADDER_NORTH", "LADDER_SOUTH", "LADDER_DOWN", "ESCALATOR", "ESCALATOR_FLIP_FACE",
-        ).map { HgssData.behaviorId(it) }.filter { it >= 0 }.toSet()
+    private val grassBehaviors by lazy {
+        HgssData.tileBehaviorNames.withIndex().filter { (i, name) ->
+            HgssData.tileBehaviorFlags[i] and 2 != 0 && "CAVE" !in name
+        }.map { it.index }.toSet()
     }
 
-    val gridLegend: Map<String, String> = linkedMapOf(
-        "@" to "you (player)",
-        "N" to "NPC / object (blocks movement, talk with A while facing it)",
-        "f" to "your following Pokémon",
-        "o" to "item ball",
-        "W" to "warp / door / stairs / ladder (walk into it to change map)",
-        "S" to "sign or interactable spot (press A while facing it)",
-        "T" to "event trigger (a scene starts when stepped on)",
-        "#" to "blocked (wall, tree, furniture...)",
-        "." to "walkable",
-        "\"" to "tall grass (wild Pokémon)",
-        "~" to "water (needs Surf)",
-        "v" to "ledge: jump south only", "^" to "ledge: jump north only",
-        "<" to "ledge: jump west only", ">" to "ledge: jump east only",
-        "?" to "unknown / outside the loaded map",
-    )
-
-    private fun buildGrid(
-        tiles: TileReader, px: Int, pz: Int, facing: Int,
-        objects: List<MapObjectInfo>, warps: List<WarpInfo>, bgs: List<BgEventInfo>, triggers: List<TriggerInfo>,
-        w: Int, h: Int,
-    ): LocalGrid {
-        val ox = px - w / 2
-        val oz = pz - h / 2
-        val flags = HgssData.tileBehaviorFlags
-        val rows = (0 until h).map { r ->
-            val sb = StringBuilder(w)
-            for (c in 0 until w) {
-                val x = ox + c
-                val z = oz + r
-                val obj = objects.firstOrNull { it.x == x && it.z == z && !it.hidden }
-                val attr = tiles.attr(x, z)
-                val ch = when {
-                    x == px && z == pz -> '@'
-                    obj != null -> when (obj.kind) {
-                        "follower" -> 'f'
-                        "item_ball" -> 'o'
-                        else -> 'N'
-                    }
-                    warps.any { it.x == x && it.z == z } -> 'W'
-                    bgs.any { it.x == x && it.z == z && it.type != "hidden_item" } -> 'S'
-                    attr == null -> '?'
-                    else -> {
-                        val b = attr and 0xFF
-                        val blocked = attr and A.TILE_COLLISION_BIT != 0
-                        val trig = triggers.any { t -> t.active == true && x >= t.x && x < t.x + t.width && z >= t.z && z < t.z + t.height }
-                        when {
-                            b == bJumpSouth -> 'v'
-                            b == bJumpNorth -> '^'
-                            b == bJumpWest -> '<'
-                            b == bJumpEast -> '>'
-                            b in warpLikeBehaviors -> 'W'
-                            flags[b] and 1 != 0 -> '~'
-                            blocked -> '#'
-                            trig -> 'T'
-                            flags[b] and 2 != 0 -> '"'
-                            else -> '.'
-                        }
-                    }
-                }
-                sb.append(ch)
-            }
-            sb.toString()
+    private fun terrainChar(attr: Int): Char {
+        if (attr < 0) return '-'
+        val b = attr and 0xFF
+        return when {
+            b == bJumpSouth -> '_'
+            b == bJumpNorth -> '='
+            b == bJumpWest -> '{'
+            b == bJumpEast -> '}'
+            HgssData.tileBehaviorFlags[b] and 1 != 0 -> '~'
+            attr and A.TILE_COLLISION_BIT != 0 -> '#'
+            b in grassBehaviors -> '"'
+            else -> '.'
         }
-        return LocalGrid(ox, oz, w, h, rows, gridLegend)
     }
 
     /**
-     * Reads only the grid around the player (without the full snapshot). Returns null outside the overworld.
+     * The terrain around the player, cropped to what is real.
+     *
+     * Rooms are 32x32 blocks where only the room itself is used: the walls have the collision bit and everything
+     * beyond them is plain 0x0000, like a walkable floor. So the area reachable from the player (flood fill through
+     * tiles without collision, ignoring people) is computed over the loaded blocks; indoors, tiles that are neither
+     * reachable nor next to a reachable tile are outside the room ('-'). Tiles outside the matrix or not loaded are
+     * '-' too. The result is the window of [halfWidth]/[halfHeight] tiles around the player (by default the whole area
+     * the game keeps loaded: the 2x2 blocks of 32x32 tiles around the player), cropped to the bounding box of the real
+     * tiles.
      */
-    fun readGrid(width: Int = 15, height: Int = 11): LocalGrid? = try {
-        v = resolveVersion().first ?: throw IllegalStateException("unsupported version")
-        val fs = currentFieldSystem()
-        fs?.let { f ->
-            readSurroundings(Ctx(), f, ptr(v.saveDataPtr), width, height)?.grid
+    private fun buildArea(tiles: TileReader, px: Int, pz: Int, interior: Boolean, halfWidth: Int = AREA_HALF_SIZE, halfHeight: Int = AREA_HALF_SIZE): LocalGrid? {
+        if (tiles.width == 0) return null
+        val mw = tiles.width * A.BLOCK_TILES
+        val mh = tiles.height * A.BLOCK_TILES
+        val reach = A.BLOCK_TILES
+        val x0 = maxOf(0, px - reach)
+        val x1 = minOf(mw - 1, px + reach)
+        val z0 = maxOf(0, pz - reach)
+        val z1 = minOf(mh - 1, pz + reach)
+        if (x1 < x0 || z1 < z0 || px !in x0..x1 || pz !in z0..z1) return null
+        val w = x1 - x0 + 1
+        val h = z1 - z0 + 1
+        val attrs = IntArray(w * h) { i -> tiles.attr(x0 + i % w, z0 + i / w) ?: -1 }
+        fun passable(i: Int) = attrs[i] >= 0 && attrs[i] and A.TILE_COLLISION_BIT == 0
+
+        val reached = BooleanArray(w * h)
+        val queue = ArrayDeque<Int>()
+        fun seed(i: Int, force: Boolean = false) {
+            if (!reached[i] && (force || passable(i))) {
+                reached[i] = true
+                queue.addLast(i)
+            }
         }
-    } catch (_: Exception) {
-        null
-    }
+        seed((pz - z0) * w + (px - x0), force = true)
+        // Areas that continue beyond what we read (matrix continues past our window, or blocks not loaded).
+        if (!interior) for (i in 0 until w * h) {
+            val x = x0 + i % w
+            val z = z0 + i / w
+            val open = (x == x0 && x > 0) || (x == x1 && x < mw - 1) || (z == z0 && z > 0) || (z == z1 && z < mh - 1) ||
+                listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1).any { (dx, dz) ->
+                    val nx = x + dx - x0
+                    val nz = z + dz - z0
+                    nx in 0 until w && nz in 0 until h && attrs[nz * w + nx] < 0
+                }
+            if (open) seed(i)
+        }
+        while (queue.isNotEmpty()) {
+            val i = queue.removeFirst()
+            val x = i % w
+            val z = i / w
+            if (x > 0) seed(i - 1)
+            if (x < w - 1) seed(i + 1)
+            if (z > 0) seed(i - w)
+            if (z < h - 1) seed(i + w)
+        }
+        fun real(x: Int, z: Int): Boolean {
+            val i = z * w + x
+            if (attrs[i] < 0) return false
+            if (!interior) return true
+            for (dz in -1..1) for (dx in -1..1) {
+                val nx = x + dx
+                val nz = z + dz
+                if (nx in 0 until w && nz in 0 until h && reached[nz * w + nx]) return true
+            }
+            return false
+        }
 
-    private fun currentFieldSystem(): Long? {
-        val om = ptr(v.mainAppState + A.MAIN_APP_OVERLAY_MANAGER) ?: return null
-        val init = fn(om + A.OM_INIT)
-        if (init != v.fnFieldContinueAppInit && init != v.fnFieldNewGameAppInit) return null
-        if (s32(om + A.OM_EXEC_STATE) < 2) return null
-        val fs = ptr(om + A.OM_DATA) ?: return null
-        val sub0 = ptr(fs + A.FS_SUB0) ?: return null
-        if (ptr(sub0 + A.FSS0_SUB_APP) != null || ptr(sub0 + A.FSS0_FIELD_MAP_APP) == null) return null
-        if (u32(fs + A.FS_MAP_READY) == 0L) return null
-        return fs
-    }
-
-    /** Renders a grid as text: header with coordinates, the rows, and the legend of the symbols present. */
-    fun renderGrid(grid: LocalGrid, facing: String? = null): String {
-        val sb = StringBuilder()
-        sb.append("Map around you (north is up; top-left tile = x ${grid.originX}, z ${grid.originZ}")
-        if (facing != null) sb.append("; you face $facing")
-        sb.append("):\n")
-        grid.rows.forEach { sb.append(it).append('\n') }
-        val used = grid.rows.joinToString("").toSet().map { it.toString() }.toSet()
-        sb.append("Legend:\n")
-        grid.legend.filterKeys { it in used }.forEach { (k, v) -> sb.append("  ").append(k).append(" = ").append(v).append('\n') }
-        return sb.toString()
+        // Window around the player, cropped to the real tiles.
+        val wx0 = maxOf(x0, px - halfWidth) - x0
+        val wx1 = minOf(x1, px + halfWidth) - x0
+        val wz0 = maxOf(z0, pz - halfHeight) - z0
+        val wz1 = minOf(z1, pz + halfHeight) - z0
+        var cx0 = Int.MAX_VALUE
+        var cx1 = Int.MIN_VALUE
+        var cz0 = Int.MAX_VALUE
+        var cz1 = Int.MIN_VALUE
+        val isReal = Array(wz1 - wz0 + 1) { r -> BooleanArray(wx1 - wx0 + 1) { c -> real(wx0 + c, wz0 + r) } }
+        for (r in isReal.indices) for (c in isReal[r].indices) if (isReal[r][c]) {
+            cx0 = minOf(cx0, c); cx1 = maxOf(cx1, c); cz0 = minOf(cz0, r); cz1 = maxOf(cz1, r)
+        }
+        if (cx0 > cx1) return null
+        val rows = (cz0..cz1).map { r ->
+            buildString {
+                for (c in cx0..cx1) append(if (isReal[r][c]) terrainChar(attrs[(wz0 + r) * w + wx0 + c]) else '-')
+            }
+        }
+        return LocalGrid(x0 + wx0 + cx0, z0 + wz0 + cz0, cx1 - cx0 + 1, cz1 - cz0 + 1, rows)
     }
 
     // ================================================================================================
@@ -778,10 +1096,31 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             }.distinctBy { it.trainerId }
         } else emptyList()
         val input = ptr(bs + A.BS_BATTLE_INPUT)
-        val menu = input?.let { A.BATTLE_MENUS[s8(it + A.BI_CUR_MENU_ID)] }
+        val menuId = input?.let { s8(it + A.BI_CUR_MENU_ID) }
+        val menu = menuId?.let { A.BATTLE_MENUS[it] }
         val cursor = input?.let {
-            if (u8(it + A.BI_MENU_CURSOR) != 0) listOf(s8(it + A.BI_MENU_CURSOR + 2), s8(it + A.BI_MENU_CURSOR + 1)) else null
+            if (u8(it + A.BI_MENU_CURSOR) != 0) listOf(s8(it + A.BI_MENU_CURSOR + 1), s8(it + A.BI_MENU_CURSOR + 2)) else null
         }
+        // battle_input.c / the player's battle controller: the menu is up, not sliding in, no button animation,
+        // and (for the command/move/target menus) the engine is in the selection phase waiting for battler 0.
+        // The battler's selection state must match the menu shown (1 command, 4 move, 6 target): right after FIGHT is
+        // chosen the battler is already choosing a move while the main menu is still displayed.
+        val battlerState = u8(battleCtx + A.BC_BATTLER_STATE)
+        val expectedState = when (menuId) {
+            in 1..10 -> 1
+            11 -> 4
+            12 -> 6
+            else -> null
+        }
+        // Bag (8) / party screen (10) opened from the battle menu: their own screens handle the input.
+        val subScreen = if (s32(battleCtx + A.BC_COMMAND) == A.BC_COMMAND_SELECTION) when (battlerState) {
+            8 -> "BAG_SCREEN"
+            10 -> "PARTY_SCREEN"
+            else -> null
+        } else null
+        val awaiting = subScreen != null || input != null && menuId != null && menuId in 1..17 &&
+            u8(input + A.BI_TOUCH_DISABLED) == 0 && u32(input + A.BI_FEEDBACK_TASK) == 0L && u32(input + A.BI_UNK10_TASK) == 0L &&
+            (menuId >= 13 || (s32(battleCtx + A.BC_COMMAND) == A.BC_COMMAND_SELECTION && battlerState == expectedState))
         return BattleInfo(
             isWild = type and 1L == 0L,
             battleTypeFlags = flags,
@@ -790,8 +1129,9 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             player = battlers.filter { it.side == "player" && it.species != 0 },
             opponents = battlers.filter { it.side == "opponent" && it.species != 0 },
             trainers = trainers,
-            menu = menu,
-            menuCursor = cursor,
+            menu = subScreen ?: menu,
+            menuCursor = if (subScreen != null) null else cursor,
+            awaitingInput = awaiting,
             message = readGameString(ptr(bs + A.BS_MSG_BUFFER)),
             safariBalls = if (type and (1L shl 5) != 0L) s32(bs + A.BS_SAFARI_BALLS) else null,
         )
@@ -802,7 +1142,8 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
         val species = u16(m + A.BM_SPECIES)
         val moves = (0 until 4).mapNotNull { i ->
             val mv = u16(m + A.BM_MOVES + 2L * i)
-            if (mv == 0) null else moveInfo(mv, u8(m + A.BM_PP_CUR + i), u8(m + A.BM_PP_MAX + i))
+            // BattleMon.movePP holds the PP Ups (src/battle/overlay_12_0224E4FC.c), not the max PP.
+            if (mv == 0) null else moveInfo(mv, u8(m + A.BM_PP_CUR + i), HgssPokemon.maxPp(mv, u8(m + A.BM_PP_MAX + i)))
         }
         val t1 = u8(m + A.BM_TYPE1)
         val t2 = u8(m + A.BM_TYPE2)

@@ -10,6 +10,8 @@ package me.nathanfallet.aiplayspokemon.game.hgss
  *  - maps.txt           include/constants/maps.h (MAP_* constant, prettified), index = map id
  *  - map_locations.txt  in-game location name of each map (map header mapsec -> msg_0279)
  *  - map_sections.txt   msgdata msg_0279 (mapsec names)
+ *  - map_types.txt      map header mapType of each map (src/data/map_headers.h), index = map id
+ *  - bg_labels.tsv      map id, x, z, label of examinable BG events (keyword of the first message their script prints)
  *  - trainer_classes.txt msgdata msg_0730
  *  - sprites.tsv        include/constants/sprites.h (id \t name)
  *  - species_types.txt  files/poketool/personal/personal.json ("Grass/Poison")
@@ -19,7 +21,7 @@ package me.nathanfallet.aiplayspokemon.game.hgss
  */
 object HgssData {
 
-    private fun lines(name: String): List<String> = try {
+    internal fun lines(name: String): List<String> = try {
         HgssData::class.java.getResourceAsStream("/hgss/$name")?.bufferedReader(Charsets.UTF_8)?.use { r ->
             r.readLines()
         } ?: emptyList()
@@ -34,6 +36,7 @@ object HgssData {
     val maps: List<String> by lazy { lines("maps.txt") }
     val mapLocations: List<String> by lazy { lines("map_locations.txt") }
     val mapSections: List<String> by lazy { lines("map_sections.txt") }
+    val mapTypes: List<String> by lazy { lines("map_types.txt") }
     val trainerClasses: List<String> by lazy { lines("trainer_classes.txt") }
     val speciesTypes: List<String> by lazy { lines("species_types.txt") }
 
@@ -82,11 +85,15 @@ object HgssData {
                 "\\n" -> "\n"
                 "\\r" -> "\n"
                 "\\f" -> "\n\n"
+                // Bag pocket icons (0x113..0x11A) drawn inline in messages ("in the [icon]MEDICINE Pocket").
+                in POCKET_ICON_GLYPHS -> ""
                 else -> s
             }
             code to v
         }.toMap()
     }
+
+    private val POCKET_ICON_GLYPHS = setOf("♈", "♉", "♊", "♋", "♌", "♍", "♎", "♏")
 
     val types = listOf(
         "Normal", "Fighting", "Flying", "Poison", "Ground", "Rock", "Bug", "Ghost", "Steel", "???",
@@ -99,6 +106,9 @@ object HgssData {
     fun abilityName(id: Int): String = abilities.getOrNull(id)?.takeIf { it.isNotEmpty() } ?: "ABILITY_$id"
     fun mapName(id: Int): String = maps.getOrNull(id)?.takeIf { it.isNotEmpty() } ?: "MAP_$id"
     fun mapLocation(id: Int): String? = mapLocations.getOrNull(id)?.takeIf { it.isNotEmpty() }
+
+    /** CITY_TOWN, ROUTE, INTERIOR, CAVE, UNDERGROUND (map header mapType), or null. */
+    fun mapType(id: Int): String? = mapTypes.getOrNull(id)?.takeIf { it.isNotEmpty() }
     fun spriteName(id: Int): String = sprites[id] ?: "SPRITE_$id"
     fun typeName(id: Int): String = types.getOrNull(id) ?: "TYPE_$id"
     fun trainerClassName(id: Int): String = trainerClasses.getOrNull(id)?.takeIf { it.isNotEmpty() } ?: "CLASS_$id"
@@ -109,6 +119,42 @@ object HgssData {
 object HgssText {
     const val EOS = 0xFFFF
     const val CTRL = 0xFFFE
+
+    const val NEWLINE = 0xE000
+    const val SCROLL = 0x25BC   // \r: wait for A then scroll one line
+    const val NEW_PAGE = 0x25BD // \f: wait for A then clear the box
+
+    /**
+     * What the 2-line message box shows after printing [printed] chars (all of them when null): the last two lines
+     * of the current page. Lines are split by newlines and scrolls; a new page clears them.
+     */
+    fun visibleLines(chars: IntArray, printed: Int?): String {
+        val end = printed?.coerceAtMost(chars.size) ?: chars.size
+        val lines = mutableListOf<String>()
+        val line = StringBuilder()
+        // A new page only clears the box once its first character prints (at the page break the old page is still shown).
+        var newPage = false
+        var i = 0
+        while (i < end) {
+            when (val c = chars[i]) {
+                EOS -> break
+                CTRL -> {
+                    if (i + 2 >= chars.size) break
+                    i += 3 + chars[i + 2]
+                    continue
+                }
+                NEWLINE, SCROLL -> { lines += line.toString(); line.clear() }
+                NEW_PAGE -> { lines += line.toString(); line.clear(); newPage = true }
+                else -> {
+                    if (newPage) { lines.clear(); newPage = false }
+                    line.append(HgssData.charmap[c] ?: if (c == 0) "" else "?")
+                }
+            }
+            i++
+        }
+        if (line.isNotEmpty()) lines += line.toString()
+        return lines.filter { it.isNotEmpty() }.takeLast(2).joinToString("\n").trim()
+    }
 
     /** Decodes a u16 character array (stops at EOS). Control sequences FFFE,cmd,argc,args... are skipped. */
     fun decode(chars: IntArray): String {

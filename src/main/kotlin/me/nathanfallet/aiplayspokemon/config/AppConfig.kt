@@ -1,5 +1,7 @@
 package me.nathanfallet.aiplayspokemon.config
 
+import kotlinx.serialization.json.Json
+import me.nathanfallet.aiplayspokemon.agent.PlayerSettings
 import me.nathanfallet.aiplayspokemon.decision.DecisionBackend
 import me.nathanfallet.aiplayspokemon.decision.jev.JevClient
 import me.nathanfallet.aiplayspokemon.decision.llm.LlmProvider
@@ -25,6 +27,7 @@ import kotlin.io.path.outputStream
  * | LLM provider          | `LLM_PROVIDER` (`openai`, `anthropic`, `openrouter`, `ollama`) | `llm.provider` |
  * | LLM model             | `LLM_MODEL`                             | `llm.<provider>.model`  |
  * | LLM thinks first      | `LLM_THINKING` (`true` / `false`)       | `llm.thinking`          |
+ * | MCP server port       | `MCP_PORT`                              | `mcp.port` (3333)       |
  * | LLM API key           | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | `llm.<provider>.apiKey` |
  *
  * Everything the app writes (config, downloaded cores, in-game saves, save states) lives in
@@ -78,6 +81,16 @@ class AppConfig(
 
     // endregion
 
+    /** Experiment options of the player (mode, timing, memory...), edited in the UI. */
+    var playerSettings: PlayerSettings
+        get() = properties.getProperty("player.settings")
+            ?.let { runCatching { settingsJson.decodeFromString(PlayerSettings.serializer(), it) }.getOrNull() }
+            ?: PlayerSettings()
+        set(value) = save("player.settings", settingsJson.encodeToString(PlayerSettings.serializer(), value))
+
+    /** Port of the MCP server (external agents play through it). */
+    val mcpPort: Int get() = setting("MCP_PORT", "mcp.port")?.toIntOrNull() ?: 3333
+
     fun saveRomPath(path: Path) = save("rom", path.toAbsolutePath().toString())
 
     private val LlmProvider.key get() = name.lowercase()
@@ -96,6 +109,7 @@ class AppConfig(
 
     companion object {
         private const val CONFIG_FILE = "config.properties"
+        private val settingsJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
         fun load(args: Array<String>): AppConfig {
             val dataDirectory = System.getenv("AI_PLAYS_POKEMON_DATA_DIR")?.let(Path::of)
