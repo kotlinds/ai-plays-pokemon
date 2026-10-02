@@ -97,12 +97,12 @@ fun ControlPanel(controller: AppController, modifier: Modifier = Modifier) {
             }
         }
         if (backend == DecisionBackend.LLM) LlmSelector(controller)
-        ExperimentSettings(controller)
-        McpSection(controller)
+        ExperimentSettings(controller, backend)
 
         val currentPlayer = player
         when {
             controller.game == null -> Text("This ROM isn't supported by the agent yet: you can still play it yourself.")
+            backend == DecisionBackend.MCP -> McpSection(controller)
             currentPlayer == null -> ApiKeyForm(controller.missingApiKey ?: "the model", controller::setApiKey)
             else -> PlayerSection(currentPlayer)
         }
@@ -160,11 +160,12 @@ private fun LlmSelector(controller: AppController) {
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ExperimentSettings(controller: AppController) {
+private fun ExperimentSettings(controller: AppController, backend: DecisionBackend) {
     val settings by controller.settings.collectAsState()
     Text("Mode", fontWeight = FontWeight.Bold)
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        ControlMode.entries.forEach { mode ->
+        // Hybrid needs our own loop (fast model + planner), so it isn't offered to an external agent.
+        ControlMode.entries.filter { backend != DecisionBackend.MCP || it != ControlMode.HYBRID }.forEach { mode ->
             FilterChip(
                 selected = settings.mode == mode,
                 onClick = { controller.updateSettings { it.copy(mode = mode) } },
@@ -178,15 +179,18 @@ private fun ExperimentSettings(controller: AppController) {
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    val toggles = listOf(
+    // Options that only make sense for some backends are shown only there.
+    val llmInLoop = backend == DecisionBackend.LLM || settings.mode == ControlMode.HYBRID
+    val toggles = listOfNotNull(
         Triple("Pause while thinking", settings.pauseWhileThinking) { s: PlayerSettings, v: Boolean -> s.copy(pauseWhileThinking = v) },
         Triple("Wait for the game to react", settings.waitForReaction) { s: PlayerSettings, v: Boolean -> s.copy(waitForReaction = v) },
-        Triple("Sequences (LLM)", settings.allowSequences) { s: PlayerSettings, v: Boolean -> s.copy(allowSequences = v) },
-        Triple("Reasoning (LLM)", settings.reasoning) { s: PlayerSettings, v: Boolean -> s.copy(reasoning = v) },
-        Triple("Notes (LLM)", settings.modelNotes) { s: PlayerSettings, v: Boolean -> s.copy(modelNotes = v) },
+        Triple("Sequences (LLM)", settings.allowSequences) { s: PlayerSettings, v: Boolean -> s.copy(allowSequences = v) }.takeIf { llmInLoop },
+        Triple("Reasoning (LLM)", settings.reasoning) { s: PlayerSettings, v: Boolean -> s.copy(reasoning = v) }.takeIf { llmInLoop },
+        Triple("Notes (LLM)", settings.modelNotes) { s: PlayerSettings, v: Boolean -> s.copy(modelNotes = v) }.takeIf { llmInLoop },
         Triple("Explored map", settings.exploredMap) { s: PlayerSettings, v: Boolean -> s.copy(exploredMap = v) },
         Triple("Story goal (assist)", settings.storyGoal) { s: PlayerSettings, v: Boolean -> s.copy(storyGoal = v) },
-        Triple("Sample probabilities", settings.sampleProbabilities) { s: PlayerSettings, v: Boolean -> s.copy(sampleProbabilities = v) },
+        Triple("Sample probabilities", settings.sampleProbabilities) { s: PlayerSettings, v: Boolean -> s.copy(sampleProbabilities = v) }
+            .takeIf { backend == DecisionBackend.JEV },
     )
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         toggles.forEach { (label, value, update) ->
@@ -272,13 +276,10 @@ private fun Stats(state: PlayerState) {
 @Composable
 private fun McpSection(controller: AppController) {
     val server by controller.mcp.collectAsState()
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilterChip(
-            selected = server != null,
-            onClick = controller::toggleMcp,
-            label = { Text(if (server != null) "MCP server on" else "MCP server (external agent)") },
-        )
-    }
+    Text(
+        if (server != null) "MCP server running: an external agent plays through it." else "Starting the MCP server…",
+        fontWeight = FontWeight.Bold,
+    )
     server?.let { running ->
         val activity by running.activity.collectAsState()
         SelectionContainer {

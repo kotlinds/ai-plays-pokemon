@@ -68,8 +68,14 @@ data class ChoiceResult(
  */
 open class DecisionException(message: String, val retryable: Boolean, cause: Throwable? = null) : IOException(message, cause)
 
-/** The decision models the app can use, selectable in the UI. */
+/**
+ * Who plays, selectable in the UI: our own loop with a [DecisionModel] (Jev or an LLM), or an
+ * external agent connected to the app's MCP server.
+ */
 enum class DecisionBackend(val label: String) {
     JEV("Jev"),
     LLM("LLM"),
+
+    /** An external agent (e.g. Claude Code) plays through the MCP server; our loop doesn't run. */
+    MCP("MCP"),
 }

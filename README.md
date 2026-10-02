@@ -46,7 +46,7 @@ reasoning and note.
 **Claude without an API key**: choose LLM → *Claude (Claude Code login)* with a model like `sonnet` or `opus`. Each
 decision runs `claude -p` (a few seconds of overhead) and counts towards your Claude plan's usage.
 
-**An external agent through MCP**: turn on *MCP server* in the app, then connect the agent, e.g.
+**An external agent through MCP**: select the *MCP* tab (it starts the server), then connect the agent, e.g.
 `claude mcp add --transport http pokemon http://localhost:3333/mcp`, and ask it to play. It gets two tools: `get_state`
 (screen, memory, options of the current mode) and `act` (carry out an option, optionally a short sequence). The agent
 keeps its own context between calls, and the game is frozen while it thinks.

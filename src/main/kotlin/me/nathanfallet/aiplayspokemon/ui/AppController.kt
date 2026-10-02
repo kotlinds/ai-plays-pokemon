@@ -31,6 +31,7 @@ import me.nathanfallet.aiplayspokemon.decision.DecisionModel
 import me.nathanfallet.aiplayspokemon.decision.jev.JevClient
 import me.nathanfallet.aiplayspokemon.decision.jev.JevDecisionModel
 import me.nathanfallet.aiplayspokemon.agent.AgentSession
+import me.nathanfallet.aiplayspokemon.agent.ControlMode
 import me.nathanfallet.aiplayspokemon.agent.PlayerSettings
 import me.nathanfallet.aiplayspokemon.mcp.GameMcpServer
 import me.nathanfallet.aiplayspokemon.decision.claudecode.ClaudeCodeDecisionModel
@@ -82,6 +83,7 @@ class AppController(
 
     init {
         createPlayer()
+        updateMcpServer()
         scope.launch { refreshObservation() }
     }
 
@@ -91,19 +93,18 @@ class AppController(
         config.playerSettings = updated
     }
 
-    /** Starts or stops the MCP server. While it runs, our own player is paused (one player at a time). */
-    fun toggleMcp() {
-        val game = game ?: return
+    /** Runs the MCP server only while the MCP tab is selected (one player at a time). */
+    private fun updateMcpServer() {
+        val wanted = _backend.value == DecisionBackend.MCP && game != null
         val running = _mcp.value
-        if (running != null) {
+        if (wanted && running == null) {
+            val server = GameMcpServer(AgentSession(emulator, game!!) { _settings.value }, emulator, config.mcpPort)
+            server.start()
+            _mcp.value = server
+        } else if (!wanted && running != null) {
             running.stop()
             _mcp.value = null
-            return
         }
-        _player.value?.pause()
-        val server = GameMcpServer(AgentSession(emulator, game) { _settings.value }, emulator, config.mcpPort)
-        server.start()
-        _mcp.value = server
     }
 
     /** Switches the decision model: the current player is stopped and replaced. */
@@ -111,7 +112,11 @@ class AppController(
         if (backend == _backend.value) return
         _backend.value = backend
         config.backend = backend
+        if (backend == DecisionBackend.MCP && _settings.value.mode == ControlMode.HYBRID) {
+            updateSettings { it.copy(mode = ControlMode.ASSISTED) } // hybrid needs our own loop
+        }
         createPlayer()
+        updateMcpServer()
     }
 
     /** Switches the LLM provider (and loads the model last used with it). */
@@ -141,6 +146,7 @@ class AppController(
         when (_backend.value) {
             DecisionBackend.JEV -> config.jevApiKey = apiKey.trim()
             DecisionBackend.LLM -> config.saveLlmApiKey(_llm.value.provider, apiKey.trim())
+            DecisionBackend.MCP -> return // the external agent brings its own model
         }
         createPlayer()
     }
@@ -150,6 +156,7 @@ class AppController(
         get() = when (_backend.value) {
             DecisionBackend.JEV -> "TypeSafe (console.typesafe.ai/keys)".takeIf { _player.value == null }
             DecisionBackend.LLM -> _llm.value.provider.takeIf { it.needsApiKey && config.llmApiKey(it) == null }?.label
+            DecisionBackend.MCP -> null
         }
 
     private fun createPlayer() {
@@ -184,6 +191,8 @@ class AppController(
                 else -> LlmDecisionModel(provider, model, apiKey, thinking)
             }
         }
+
+        DecisionBackend.MCP -> null // the external agent decides
     }
 
     /** Polls the RAM a few times per second so the panel shows what the AI would see right now. */
