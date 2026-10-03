@@ -77,6 +77,12 @@ sealed interface ActionError {
         override val message = "A human is playing right now: wait until they stop"
     }
 
+    /** The person watching paused the game: nothing can be done until they resume it (the state can still be read). */
+    data object PausedByHuman : ActionError {
+        override val code = "PAUSED"
+        override val message = "The game is paused by the person watching: wait until they resume it"
+    }
+
     /** This game doesn't support the action yet. */
     data class Unsupported(val action: String) : ActionError {
         override val code = "UNSUPPORTED"

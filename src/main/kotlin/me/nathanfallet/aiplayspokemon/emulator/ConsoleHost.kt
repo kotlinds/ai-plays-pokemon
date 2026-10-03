@@ -176,6 +176,15 @@ class ConsoleHost(
         }
     }
 
+    /**
+     * Reads the game (the main RAM of the current frame) on the console thread, without running any frame: unlike
+     * [lease], it doesn't wait while the user has paused the game, so the state can always be looked at.
+     */
+    suspend fun <T> observe(block: (Memory) -> T): T = onConsoleThread { console -> block(mainRam(console)) }
+
+    /** True while the person watching has paused the game (agent actions are refused, see [lease]). */
+    val isUserPaused: Boolean get() = userPaused.value
+
     /** Runs [block] on the console thread between two frames and returns its result. */
     private suspend fun <T> onConsoleThread(block: (LibretroConsole) -> T): T {
         val result = CompletableDeferred<T>()

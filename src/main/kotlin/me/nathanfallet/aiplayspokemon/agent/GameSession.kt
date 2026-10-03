@@ -59,7 +59,7 @@ class GameSession(
 
     /** Counts a screenshot when the current screen isn't decoded. */
     suspend fun countScreenshot() {
-        val screen = host.lease("observe", game.inputProbe) { game.state(memory()).screen }
+        val screen = host.observe { memory -> game.state(memory).screen }
         countBlind(screen)
     }
 
@@ -82,14 +82,12 @@ class GameSession(
     val version: Long get() = recorder.log.since(0).lastOrNull { it is GameEvent.ScreenChanged }?.seq ?: 0L
 
     /** Decodes the current state (on the console thread). */
-    suspend fun state(): GameState = host.lease("observe", game.inputProbe) { game.state(memory()) }
+    suspend fun state(): GameState = host.observe { memory -> game.state(memory) }
 
     /** What the agent reads: events since its last call, the screen and state, the actions possible now. */
     suspend fun describe(full: Boolean = false): JsonObject {
-        val (state, legacy) = host.lease("observe", game.inputProbe) {
-            val memory = memory()
-            game.state(memory) to game.observe(memory).state
-        }
+        // Observing runs no frame: it works while the game is paused.
+        val (state, legacy) = host.observe { memory -> game.state(memory) to game.observe(memory).state }
         return describe(state, legacy, full)
     }
 
@@ -109,6 +107,7 @@ class GameSession(
             return failure(action, ActionError.StaleState(expectedVersion, current), describe())
         }
         if (host.driver.value == ConsoleHost.Driver.Human) return failure(action, ActionError.HumanDriving, describe())
+        if (host.isUserPaused) return failure(action, ActionError.PausedByHuman, describe())
         val outcome = try {
             host.lease(action.key, game.inputProbe) {
                 if (action is GameAction.Press || action is GameAction.Touch) countBlind(game.state(memory()).screen)
