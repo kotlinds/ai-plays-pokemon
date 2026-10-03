@@ -106,8 +106,9 @@ class GameSession(
         if (expectedVersion != null && expectedVersion < current) {
             return failure(action, ActionError.StaleState(expectedVersion, current), describe())
         }
-        if (host.driver.value == ConsoleHost.Driver.Human) return failure(action, ActionError.HumanDriving, describe())
-        if (host.isUserPaused) return failure(action, ActionError.PausedByHuman, describe())
+        // Only a human really pressing keys (or the Pause button) stops an agent; the free run doesn't.
+        ActGate.refusal(humanPlaying = host.humanActivity.isPlaying(), userPaused = host.isUserPaused)
+            ?.let { return failure(action, it, describe()) }
         val outcome = try {
             host.lease(action.key, game.inputProbe) {
                 if (action is GameAction.Press || action is GameAction.Touch) countBlind(game.state(memory()).screen)

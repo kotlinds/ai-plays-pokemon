@@ -129,7 +129,7 @@ Two modules:
   target (3 corrections at most, then an explicit error). Movement uses the maps read from the **ROM** (tiles,
   heights, warps, events) with the live people and the game's script variables on top. Nothing is ever written to
   the game's RAM: everything goes through buttons and the touch screen, like a player.
-- **the app** runs the emulator through libretro-kmp (a libretro core loaded in process) on
+- **the app** runs the emulator through [libretro-kmp](https://github.com/kotlinds/libretro-kmp) (a libretro core loaded in process, on Maven Central) on
   a single console thread that drives time (agents get a lease; the human can always take over), and connects the
   deciders: our loop (`PokemonPlayer` with Jev, LLMs through Koog, or `claude -p`) or an external agent through MCP.
 

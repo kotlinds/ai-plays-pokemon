@@ -31,7 +31,8 @@ import kotlin.concurrent.thread
  *
  * The console ([LibretroConsole]) only advances when someone calls `step`. The host is that someone, and at any
  * time exactly one [Driver] is in charge:
- * - [Driver.Human]: the game runs freely in real time, with the keyboard / mouse inputs of the person watching;
+ * - [Driver.Human]: the game runs freely in real time, with the keyboard / mouse inputs of the person watching
+ *   (whether someone actually plays is [humanActivity], what agents are refused on);
  * - [Driver.Agent]: an agent action holds a [lease] and steps the console itself, frame by frame (the free run is
  *   suspended meanwhile, so nothing happens that the action doesn't see);
  * - [Driver.Idle]: nobody, the game is frozen (paused by the user, or "pause while thinking").
@@ -60,6 +61,9 @@ class ConsoleHost(
     private val humanButtons = MutableStateFlow<Set<Button>>(emptySet())
 
     @Volatile private var humanTouch: TouchPoint? = null
+
+    /** The human's real inputs (not the free run): agents are refused while they play. */
+    val humanActivity = HumanActivity()
     @Volatile private var closed = false
     @Volatile private var leaseActive = false
 
@@ -234,6 +238,7 @@ class ConsoleHost(
         if (source != InputSource.HUMAN) return
         if (humanButtons.value.isEmpty() && buttons.isNotEmpty()) humanInputListener?.invoke()
         humanButtons.value = buttons
+        humanActivity.keys(held = buttons.isNotEmpty())
     }
 
     override fun touch(position: Pair<Float, Float>?) {
@@ -242,6 +247,7 @@ class ConsoleHost(
             val y = (fy * 2 - 1) * SCREEN_HEIGHT
             if (y < 0) null else TouchPoint((fx * SCREEN_WIDTH).toInt().coerceIn(0, SCREEN_WIDTH - 1), y.toInt().coerceIn(0, SCREEN_HEIGHT - 1))
         }
+        humanActivity.touch(touching = humanTouch != null)
     }
 
     override suspend fun awaitFrames(count: Int) {

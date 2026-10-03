@@ -10,9 +10,9 @@ pluginManagement {
 
 dependencyResolutionManagement {
     repositories {
-        mavenLocal() // dev.kotlinds:libretro-kmp, published locally for now
         google()
         mavenCentral()
+        mavenLocal()
     }
 }
 
