@@ -8,6 +8,7 @@ import java.net.http.HttpResponse
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 
 /**
@@ -20,6 +21,14 @@ enum class LibretroCoreSpec(
     val buildbotName: String,
     /** Core options answered through RETRO_ENVIRONMENT_GET_VARIABLE; missing keys use the core's defaults. */
     val options: Map<String, String>,
+    /**
+     * SHA-256 of the exact core build we tested, per platform. The buildbot only serves "latest", which can
+     * change at any time: a different build may behave differently or reject our save states, so we refuse
+     * to run an unknown build instead of failing in subtle ways. Platforms without a pinned hash aren't checked.
+     */
+    private val sha256: Map<String, String> = emptyMap(),
+    /** How the core stores the in-game save on disk (the app keeps `<rom>.sav` as the canonical file). */
+    val saveFormat: SaveFormat = SaveFormat.RAW,
 ) {
     /**
      * melonDS 0.9.3 (libretro port). We don't use the newer "melonDS DS" core because its ARM JIT
@@ -36,13 +45,39 @@ enum class LibretroCoreSpec(
             "melonds_touch_mode" to "Touch", // the touch screen is driven by the libretro pointer device
             "melonds_language" to "English",
         ),
+        sha256 = mapOf("apple/osx/arm64" to "1f0139c31bc5388222dcca8f70490aed2e290c31bf65ea4b03f4c362df585900"),
+    ),
+
+    /**
+     * DeSmuME 0.9.12 (libretro port). Unlike melonDS 0.9.3 it can load an existing in-game save without BIOS /
+     * firmware dumps: with a save present, HeartGold's main menu turns DS wireless on, which melonDS 0.9.3's
+     * generated firmware can't do ("A communication error has occurred"). Interpreter only (its JIT would fight
+     * the JVM's). Touch needs `desmume_pointer_mouse`; saves are `.dsv` files (see [SaveFormat.DESMUME]).
+     */
+    DESMUME(
+        buildbotName = "desmume_libretro",
+        options = mapOf(
+            "desmume_cpu_mode" to "interpreter",
+            "desmume_screens_layout" to "top/bottom",
+            "desmume_screens_gap" to "0",
+            "desmume_pointer_mouse" to "enabled",
+            "desmume_pointer_type" to "touch",
+            "desmume_firmware_language" to "English",
+            "desmume_frameskip" to "0",
+            "desmume_internal_resolution" to "256x192",
+        ),
+        sha256 = mapOf("apple/osx/arm64" to "33845ef6ffc0ca2fc5203e58a1f1dc608ba90e8e9b140de109d52b14ccec3c17"),
+        saveFormat = SaveFormat.DESMUME,
     ),
     ;
 
     companion object {
-        /** Picks the core able to run a ROM, from its file extension. */
-        fun forRom(rom: Path): LibretroCoreSpec = when (rom.fileName.toString().substringAfterLast('.').lowercase()) {
-            "nds" -> MELONDS
+        /**
+         * Picks the core for a ROM, from its file extension; [preferred] (a config option) chooses among the cores
+         * able to run it.
+         */
+        fun forRom(rom: Path, preferred: String? = null): LibretroCoreSpec = when (rom.fileName.toString().substringAfterLast('.').lowercase()) {
+            "nds" -> entries.firstOrNull { it.name.equals(preferred, ignoreCase = true) } ?: DESMUME
             else -> throw IllegalArgumentException("No emulator core configured for $rom")
         }
     }
@@ -51,7 +86,7 @@ enum class LibretroCoreSpec(
     fun resolve(directory: Path): Path {
         val platform = Platform.current()
         val target = directory.resolve("$buildbotName.${platform.extension}")
-        if (Files.exists(target)) return target
+        if (Files.exists(target)) return target.also { verify(it, platform) }
 
         Files.createDirectories(directory)
         val url = "https://buildbot.libretro.com/nightly/${platform.buildbotPath}/latest/$buildbotName.${platform.extension}.zip"
@@ -65,9 +100,22 @@ enum class LibretroCoreSpec(
             val entry = zip.nextEntry ?: throw IOException("Empty archive at $url")
             val temporary = directory.resolve("${entry.name}.part")
             Files.copy(zip, temporary, StandardCopyOption.REPLACE_EXISTING)
+            verify(temporary, platform)
             Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING)
         }
         return target
+    }
+
+    /** Checks the core file against the pinned hash of its platform (see [sha256]). */
+    private fun verify(file: Path, platform: Platform) {
+        val expected = sha256[platform.buildbotPath] ?: return
+        val actual = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file)).joinToString("") { "%02x".format(it) }
+        if (actual != expected) {
+            throw IOException(
+                "Unexpected $buildbotName build at $file (sha256 $actual, expected $expected). " +
+                    "The buildbot's latest build changed: test it, then update the pinned hash in LibretroCoreSpec.",
+            )
+        }
     }
 
     /** Platform naming used by the libretro buildbot. */

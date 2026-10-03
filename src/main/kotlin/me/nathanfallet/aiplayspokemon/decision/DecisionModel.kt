@@ -73,9 +73,8 @@ open class DecisionException(message: String, val retryable: Boolean, cause: Thr
  * external agent connected to the app's MCP server.
  */
 enum class DecisionBackend(val label: String) {
-    JEV("Jev"),
-    LLM("LLM"),
-
     /** An external agent (e.g. Claude Code) plays through the MCP server; our loop doesn't run. */
     MCP("MCP"),
+    LLM("LLM"),
+    JEV("Jev"),
 }

@@ -1,10 +1,9 @@
 package me.nathanfallet.aiplayspokemon.agent
 
+import dev.kotlinds.pokemonclient.data.KnowledgeLevel
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import me.nathanfallet.aiplayspokemon.agent.actions.AgentAction
 import me.nathanfallet.aiplayspokemon.decision.ChoiceRequest
-import me.nathanfallet.aiplayspokemon.game.Observation
 
 /**
  * Turns "what the player can perceive and remember" into a decision request.
@@ -43,16 +42,15 @@ object DecisionPrompt {
         append(". ")
         append(CONVENTIONS)
         append(" Choose the next option that makes the most progress towards `objective`")
-        if (settings.storyGoal) append(" and `story_goal`")
+        if (settings.knowledge.allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH)) append(" and `story_goal`")
         append(". If your recent actions changed nothing, do something different.")
         if (planner) append(" You are the planner: also write in `note` the goal and plan the fast decision model should follow next.")
     }
 
     fun build(
         objective: String,
-        observation: Observation,
+        turn: AgentSession.Turn,
         memory: AgentMemory,
-        actions: List<AgentAction>,
         settings: PlayerSettings,
         generative: Boolean,
         plannerGoal: String? = null,
@@ -60,13 +58,13 @@ object DecisionPrompt {
     ) = ChoiceRequest(
         state = buildJsonObject {
             put("objective", objective)
-            if (settings.storyGoal) observation.storyGoal?.let { put("story_goal", it) }
+            if (settings.knowledge.allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH)) turn.observation.storyGoal?.let { put("story_goal", it) }
             plannerGoal?.let { put("goal_from_planner", it) }
-            put("game", observation.state)
-            put("memory", memory.describe(settings.exploredMap, observation))
+            put("game", turn.state)
+            put("memory", memory.describe(settings.exploredMap, turn.observation))
         },
         instructions = instructions(settings, planner),
-        options = actions.associate { it.id to it.description },
+        options = turn.options.associate { it.key to it.description },
         allowSequence = generative && settings.allowSequences,
         reasoning = settings.reasoning,
         allowNote = generative && (settings.modelNotes || planner),

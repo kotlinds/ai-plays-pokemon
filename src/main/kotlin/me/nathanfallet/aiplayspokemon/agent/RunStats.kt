@@ -2,7 +2,7 @@ package me.nathanfallet.aiplayspokemon.agent
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import me.nathanfallet.aiplayspokemon.game.Observation
+import dev.kotlinds.pokemonclient.Observation
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.LocalDateTime

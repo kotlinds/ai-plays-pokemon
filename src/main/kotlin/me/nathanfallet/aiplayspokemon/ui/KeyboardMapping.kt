@@ -1,7 +1,7 @@
 package me.nathanfallet.aiplayspokemon.ui
 
 import androidx.compose.ui.input.key.Key
-import me.nathanfallet.aiplayspokemon.emulator.Button
+import dev.kotlinds.pokemonclient.console.Button
 
 /** Keyboard → DS buttons, using the same defaults as melonDS / most emulators. */
 object KeyboardMapping {

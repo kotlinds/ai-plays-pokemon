@@ -2,9 +2,11 @@ import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
     alias(libs.plugins.kotlinJvm)
+    alias(libs.plugins.kotlinMultiplatform) apply false
     alias(libs.plugins.kotlinSerialization)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
+    alias(libs.plugins.kover)
 }
 
 group = "me.nathanfallet.aiplayspokemon"
@@ -29,15 +31,20 @@ dependencies {
     implementation(libs.koog.openrouter) // OpenRouter: Gemini, Mistral, DeepSeek, Llama... behind one key
     runtimeOnly(libs.slf4j.nop) // Koog logs through SLF4J: silence it
 
+    // The Pokémon game client library of this repository (reads the game, typed actions)
+    implementation(project(":pokemon-client"))
+
     // Emulator: loads a libretro core (melonDS) as a native library
     implementation(libs.jna)
+    implementation(libs.libretro.kmp)
 
     // MCP server: lets an external agent (e.g. Claude Code) play through tools
     implementation(libs.mcp.server)
     implementation(libs.ktor.server.cio)
 
-    // Nintendo DS ROM parsing (game code...), from the kotlinds organization
-    implementation(libs.kotlinds.rom)
+
+    // Test coverage: `./gradlew koverHtmlReport` covers the app and the pokemon-client library together.
+    kover(project(":pokemon-client"))
 
     testImplementation(libs.kotlin.test)
     testImplementation(libs.kotlinx.coroutines.test)

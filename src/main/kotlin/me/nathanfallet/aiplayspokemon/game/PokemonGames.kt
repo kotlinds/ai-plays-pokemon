@@ -1,8 +1,9 @@
 package me.nathanfallet.aiplayspokemon.game
 
 import dev.kotlinds.NdsRom
-import me.nathanfallet.aiplayspokemon.game.hgss.HgssGame
-import me.nathanfallet.aiplayspokemon.game.hgss.HgssVersion
+import dev.kotlinds.pokemonclient.PokemonGame
+import dev.kotlinds.pokemonclient.hgss.HgssGame
+import dev.kotlinds.pokemonclient.hgss.HgssVersion
 import java.nio.file.Path
 import kotlin.io.path.readBytes
 
@@ -15,13 +16,16 @@ import kotlin.io.path.readBytes
  */
 object PokemonGames {
 
-    private val games: Map<String, () -> PokemonGame> = buildMap {
+    private val games: Map<String, (NdsRom) -> PokemonGame> = buildMap {
         // HeartGold / SoulSilver: one reader, one address table per ROM (see HgssVersion.ALL).
-        HgssVersion.ALL.forEach { version -> put(version.gameCode) { HgssGame(version) } }
+        HgssVersion.ALL.forEach { version -> put(version.gameCode) { rom -> HgssGame(version, rom) } }
     }
 
     /** Returns the reader for [rom], or null when the game isn't supported by the agent. */
-    fun detect(rom: Path): PokemonGame? = ndsGameCode(rom)?.let { games[it] }?.invoke()
+    fun detect(rom: Path): PokemonGame? {
+        val image = runCatching { NdsRom.parse(rom.readBytes()) }.getOrNull() ?: return null
+        return games[image.gameCode]?.invoke(image)
+    }
 
     /**
      * The 4-letter game code of an NDS ROM header (read with kotlinds), e.g. "IPKE":

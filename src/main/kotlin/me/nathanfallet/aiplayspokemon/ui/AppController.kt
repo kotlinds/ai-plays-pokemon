@@ -17,12 +17,13 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import me.nathanfallet.aiplayspokemon.agent.PokemonPlayer
 import me.nathanfallet.aiplayspokemon.config.AppConfig
-import me.nathanfallet.aiplayspokemon.emulator.Button
-import me.nathanfallet.aiplayspokemon.emulator.Emulator
+import dev.kotlinds.pokemonclient.console.Button
+import me.nathanfallet.aiplayspokemon.emulator.ConsoleHost
 import me.nathanfallet.aiplayspokemon.emulator.InputSource
-import me.nathanfallet.aiplayspokemon.game.Observation
-import me.nathanfallet.aiplayspokemon.game.PokemonGame
-import me.nathanfallet.aiplayspokemon.game.RamMemory
+import dev.kotlinds.pokemonclient.Observation
+import dev.kotlinds.pokemonclient.PokemonGame
+import dev.kotlinds.pokemonclient.runtime.Recorder
+import dev.kotlinds.pokemonclient.RamMemory
 import java.nio.file.Files
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -34,6 +35,8 @@ import me.nathanfallet.aiplayspokemon.agent.AgentSession
 import me.nathanfallet.aiplayspokemon.agent.ControlMode
 import me.nathanfallet.aiplayspokemon.agent.PlayerSettings
 import me.nathanfallet.aiplayspokemon.mcp.GameMcpServer
+import me.nathanfallet.aiplayspokemon.agent.GameSession
+import me.nathanfallet.aiplayspokemon.agent.actionMode
 import me.nathanfallet.aiplayspokemon.decision.claudecode.ClaudeCodeDecisionModel
 import me.nathanfallet.aiplayspokemon.decision.llm.LlmDecisionModel
 import me.nathanfallet.aiplayspokemon.decision.llm.LlmProvider
@@ -43,7 +46,7 @@ import me.nathanfallet.aiplayspokemon.decision.llm.LlmProvider
  * emulator input, and keeps a live [observation] of the game for display (even while a human plays).
  */
 class AppController(
-    val emulator: Emulator,
+    val emulator: ConsoleHost,
     val game: PokemonGame?,
     private val config: AppConfig,
     private val scope: CoroutineScope,
@@ -81,7 +84,17 @@ class AppController(
     private val _observation = MutableStateFlow<Observation?>(null)
     val observation: StateFlow<Observation?> = _observation.asStateFlow()
 
+    /**
+     * Watches every frame and logs what happens (texts, battle messages, captures...), so agents get everything
+     * shown since their last call. Null for unsupported games.
+     */
+    val recorder: Recorder? = game?.let { Recorder(it) }
+
     init {
+        recorder?.let { r ->
+            emulator.frameListener = r::onFrame
+            emulator.humanInputListener = { r.humanInput(emulator.status.value.frameCount) }
+        }
         createPlayer()
         updateMcpServer()
         scope.launch { refreshObservation() }
@@ -98,7 +111,8 @@ class AppController(
         val wanted = _backend.value == DecisionBackend.MCP && game != null
         val running = _mcp.value
         if (wanted && running == null) {
-            val server = GameMcpServer(AgentSession(emulator, game!!) { _settings.value }, emulator, config.mcpPort)
+            val session = GameSession(emulator, game!!, recorder!!, mode = { _settings.value.mode.actionMode }, knowledge = { _settings.value.knowledge })
+            val server = GameMcpServer(session, emulator, config.mcpPort, mode = { _settings.value.mode.actionMode }, pauseWhileThinking = { _settings.value.pauseWhileThinking }, knowledge = { _settings.value.knowledge })
             server.start()
             _mcp.value = server
         } else if (!wanted && running != null) {
@@ -141,6 +155,18 @@ class AppController(
     }
 
     /** Stores the API key of the current model (Jev or LLM provider) in the config file. */
+    /** Port of the MCP server: one app per agent, each on its own port, to compare agents side by side. */
+    val mcpPort: Int get() = config.mcpPort
+
+    /** Changes the MCP server port and restarts the server on it. */
+    fun setMcpPort(port: Int) {
+        if (port !in 1024..65535 || port == config.mcpPort) return
+        config.mcpPort = port
+        _mcp.value?.stop()
+        _mcp.value = null
+        updateMcpServer()
+    }
+
     fun setApiKey(apiKey: String) {
         if (apiKey.isBlank()) return
         when (_backend.value) {
@@ -166,7 +192,7 @@ class AppController(
         _player.value = if (game != null && model != null) {
             // In hybrid mode, the LLM settings define the planner (it may be the same as the decider).
             PokemonPlayer(
-                emulator, game, model,
+                emulator, game, recorder!!, model,
                 planner = createModel(DecisionBackend.LLM),
                 scope = scope,
                 settings = { _settings.value },
@@ -243,7 +269,7 @@ class AppController(
         return true
     }
 
-    fun togglePause() = if (emulator.status.value.running) emulator.pause() else emulator.resume()
+    fun togglePause() = emulator.setUserPaused(emulator.status.value.running)
 }
 
 /** Which LLM to use: a provider, one of its model ids, and whether it thinks before answering. */

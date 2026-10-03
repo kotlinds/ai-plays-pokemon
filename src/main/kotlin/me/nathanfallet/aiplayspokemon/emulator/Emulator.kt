@@ -1,5 +1,7 @@
 package me.nathanfallet.aiplayspokemon.emulator
 
+import dev.kotlinds.pokemonclient.console.Button
+import dev.kotlinds.pokemonclient.console.Frame
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -63,8 +65,6 @@ interface Emulator : AutoCloseable {
 /** Who is pressing buttons. */
 enum class InputSource { HUMAN, AGENT }
 
-/** Buttons of a Nintendo DS (a superset of the GBA's, so it also fits GBA/GB cores). */
-enum class Button { A, B, X, Y, L, R, START, SELECT, UP, DOWN, LEFT, RIGHT }
 
 data class EmulatorInfo(
     /** Emulator name and version, e.g. "melonDS 0.9.3". */
@@ -82,5 +82,3 @@ data class EmulatorStatus(
     val measuredFps: Double = 0.0,
 )
 
-/** One video frame: ARGB pixels, row-major. For the DS, both screens are stacked (256x384). */
-class Frame(val width: Int, val height: Int, val pixels: IntArray)

@@ -1,0 +1,339 @@
+package dev.kotlinds.pokemonclient.state
+
+import dev.kotlinds.pokemonclient.console.Button
+import dev.kotlinds.pokemonclient.console.TouchPoint
+
+/**
+ * What the game is waiting for right now, decoded from RAM into one common model shared by every game.
+ *
+ * Rule: a screen that waits for a key always says so. There is never a "nothing to do" state while the game
+ * waits: either a [Selectable] (choose an entry), a [PressToContinue] (press A), a [Dialogue], or [Unknown]
+ * (not decoded yet: be careful, use raw buttons or a screenshot).
+ */
+sealed interface Screen {
+    /** What the game expects. */
+    val awaiting: Awaiting
+
+    /**
+     * A screen where a cursor picks one entry. This is the only abstraction the navigator needs: read the
+     * cursor, move along the [topology], re-read, confirm only on the target.
+     */
+    sealed interface Selectable : Screen {
+        val entries: List<Entry>
+        val cursor: Cursor
+        val topology: Topology
+        val cancel: CancelBehavior
+        override val awaiting get() = Awaiting.INPUT
+    }
+
+    /** A yes / no question. */
+    data class YesNo(
+        val question: String?,
+        override val entries: List<Entry>,
+        override val cursor: Cursor,
+        override val topology: Topology,
+        override val cancel: CancelBehavior = CancelBehavior.CONFIRMS_LAST,
+    ) : Selectable
+
+    /** A list or grid of options: multichoice, start menu, PC menus, BUY / SELL... */
+    data class ListMenu(
+        val kind: MenuKind,
+        override val entries: List<Entry>,
+        override val cursor: Cursor,
+        override val topology: Topology,
+        override val cancel: CancelBehavior = CancelBehavior.CLOSES,
+    ) : Selectable
+
+    /** The battle command menu (FIGHT / BAG / RUN / POKéMON) of [actor]. */
+    data class BattleCommand(
+        val actor: BattlerRef?,
+        override val entries: List<Entry>,
+        override val cursor: Cursor,
+        override val topology: Topology,
+        override val cancel: CancelBehavior = CancelBehavior.NONE,
+    ) : Selectable
+
+    /** Choosing a move: to use in battle, or to forget when learning a new one ([newMove] not null). */
+    data class MoveSelect(
+        val context: MoveContext,
+        val mon: MonId?,
+        val newMove: Named<MoveId>?,
+        override val entries: List<Entry>,
+        override val cursor: Cursor,
+        override val topology: Topology,
+        override val cancel: CancelBehavior,
+    ) : Selectable
+
+    /** Choosing the target of a move in a double battle (only live targets are selectable). */
+    data class TargetSelect(
+        override val entries: List<Entry>,
+        override val cursor: Cursor,
+        override val topology: Topology,
+        override val cancel: CancelBehavior = CancelBehavior.CLOSES,
+    ) : Selectable
+
+    /** The party grid, for a [purpose] (in battle, in the battle's order). */
+    data class PartyGrid(
+        val purpose: PartyPurpose,
+        override val entries: List<Entry>,
+        override val cursor: Cursor,
+        override val topology: Topology,
+        override val cancel: CancelBehavior,
+        /** In switch mode ("Move to where?"), the Pokémon being moved. */
+        val moving: MonId? = null,
+    ) : Selectable
+
+    /** The small menu opened on a Pokémon or a box slot: SUMMARY / SWITCH / ITEM..., DEPOSIT / RELEASE... */
+    data class ContextMenu(
+        val owner: MonId?,
+        override val entries: List<Entry>,
+        override val cursor: Cursor,
+        override val topology: Topology,
+        override val cancel: CancelBehavior = CancelBehavior.CLOSES,
+        /** For the bag's action menu (USE / GIVE / ...), the item it applies to. */
+        val item: ItemId? = null,
+    ) : Selectable
+
+    /** The bag, open on [pocket] (page [page] for paged pockets). */
+    data class Bag(
+        val pocket: String,
+        val pockets: List<String>,
+        val page: Int,
+        val pages: Int,
+        val inBattle: Boolean,
+        override val entries: List<Entry>,
+        override val cursor: Cursor,
+        override val topology: Topology,
+        override val cancel: CancelBehavior = CancelBehavior.CLOSES,
+    ) : Selectable
+
+    /** The naming keyboard: [buffer] is what is typed so far. */
+    data class Keyboard(
+        val purpose: String,
+        val page: String,
+        val buffer: String,
+        val maxLength: Int,
+        override val entries: List<Entry>,
+        override val cursor: Cursor,
+        override val topology: Topology,
+        override val cancel: CancelBehavior = CancelBehavior.NONE,
+    ) : Selectable
+
+    /** A PC box. */
+    data class PcBox(
+        val box: Int,
+        val boxName: String,
+        override val entries: List<Entry>,
+        override val cursor: Cursor,
+        override val topology: Topology,
+        override val cancel: CancelBehavior = CancelBehavior.CLOSES,
+        /** What the PC was opened for (null when unknown). */
+        val mode: PcMode? = null,
+    ) : Selectable
+
+    /** A shop's buy list. */
+    data class Shop(
+        val money: Long,
+        override val entries: List<Entry>,
+        override val cursor: Cursor,
+        override val topology: Topology,
+        override val cancel: CancelBehavior = CancelBehavior.CLOSES,
+    ) : Selectable
+
+    /** The fly map: destinations already visited. */
+    data class FlyMap(
+        override val entries: List<Entry>,
+        override val cursor: Cursor,
+        override val topology: Topology,
+        override val cancel: CancelBehavior = CancelBehavior.CLOSES,
+    ) : Selectable
+
+    /** A number to pick (shop quantity...): UP/DOWN change it, A confirms. */
+    data class Quantity(val value: Int, val min: Int, val max: Int) : Screen {
+        override val awaiting get() = Awaiting.INPUT
+    }
+
+    /** A screen that only waits for A: Pokédex page after a capture, level-up stats, end of a phone call... */
+    data class PressToContinue(val reason: ContinueReason, val text: String? = null) : Screen {
+        override val awaiting get() = Awaiting.INPUT
+    }
+
+    /** A message box (field, battle, phone, sign). [awaiting] tells if it waits for A or is still printing. */
+    data class Dialogue(
+        val source: TextSource,
+        val speaker: String?,
+        val text: String,
+        override val awaiting: Awaiting,
+    ) : Screen
+
+    /** A Pokémon is evolving: wait (or press A); B cancels the evolution. */
+    data class Evolution(val from: Named<SpeciesId>, val to: Named<SpeciesId>?, override val awaiting: Awaiting) : Screen
+
+    /** A long animation with nothing to do (trade, egg hatching, cut scene...). */
+    data class Animation(val kind: AnimationKind) : Screen {
+        override val awaiting get() = Awaiting.ANIMATION
+    }
+
+    /** Walking around. [banner] is a sign banner shown while walking past a sign: information only. */
+    data class Overworld(val banner: String? = null, override val awaiting: Awaiting) : Screen
+
+    /** A battle with no decision to make right now (animations, messages printing). */
+    data class Battle(override val awaiting: Awaiting) : Screen
+
+    /** Title screen, intro movie, loading. */
+    data class Intro(val detail: String, override val awaiting: Awaiting) : Screen
+
+    /**
+     * Not decoded yet. Actions refuse to act on it; the agent keeps raw buttons, touch and screenshots.
+     * [hint] says what the reader could tell (an app name, a raw wait function...).
+     */
+    data class Unknown(val hint: String?, override val awaiting: Awaiting) : Screen
+}
+
+/**
+ * True when [other] shows the same thing as this screen. Plain `==` doesn't work on [Screen.Selectable]s: their
+ * [Topology] is a function rebuilt on every decode, so two decodes of an unchanged menu are never equal. Every
+ * other field (kind, entries, cursor, question, page...) is compared.
+ */
+fun Screen.sameAs(other: Screen): Boolean {
+    if (this !is Screen.Selectable || other !is Screen.Selectable) return this == other
+    return this::class == other::class && withoutTopology(this) == withoutTopology(other)
+}
+
+private val TOPOLOGY_FIELD = Regex("topology=[^,)]*")
+
+private fun withoutTopology(screen: Screen.Selectable) = screen.toString().replace(TOPOLOGY_FIELD, "")
+
+/** What the game expects right now. */
+enum class Awaiting {
+    /** A button, a touch, a choice. */
+    INPUT,
+
+    /** Nothing: an animation, a transition, a scene is playing. */
+    ANIMATION,
+
+    /** Text is being printed: A speeds it up. */
+    TEXT_PRINTING,
+}
+
+/** One entry of a [Screen.Selectable]. */
+data class Entry(
+    /** Stable typed id of what the entry stands for, e.g. `option:yes`, `move:ember`, `mon:a3f1….0e21…`, `item:potion`. */
+    val id: String,
+    val label: String,
+    /** False for entries the game shows but refuses (fainted Pokémon, empty slot, no PP...). */
+    val selectable: Boolean = true,
+    /** True for entries with a lasting consequence that must be asked for explicitly (RELEASE...). */
+    val dangerous: Boolean = false,
+    /** Set when the entry can only be reached by touching the screen. */
+    val touch: TouchPoint? = null,
+)
+
+/** Where the cursor is. */
+sealed interface Cursor {
+    /** No cursor shown: the first D-pad press only makes it appear (battle menus...). */
+    data object Hidden : Cursor
+    data class At(val index: Int) : Cursor
+}
+
+/**
+ * How the cursor moves between entries: for each entry and D-pad button, the entry reached (null = doesn't
+ * move). Covers lists, grids, wrapping and irregular layouts alike.
+ */
+fun interface Topology {
+    fun next(from: Int, button: Button): Int?
+
+    companion object {
+        /** A vertical list; [wrap] when going past an end jumps to the other end. */
+        fun vertical(size: Int, wrap: Boolean = false) = Topology { from, button ->
+            when (button) {
+                Button.UP -> if (from > 0) from - 1 else if (wrap) size - 1 else null
+                Button.DOWN -> if (from < size - 1) from + 1 else if (wrap) 0 else null
+                else -> null
+            }
+        }
+
+        /** A horizontal row. */
+        fun horizontal(size: Int, wrap: Boolean = false) = Topology { from, button ->
+            when (button) {
+                Button.LEFT -> if (from > 0) from - 1 else if (wrap) size - 1 else null
+                Button.RIGHT -> if (from < size - 1) from + 1 else if (wrap) 0 else null
+                else -> null
+            }
+        }
+
+        /** A grid filled row by row with [columns] columns. */
+        fun grid(size: Int, columns: Int, wrap: Boolean = false) = Topology { from, button ->
+            val rows = (size + columns - 1) / columns
+            val row = from / columns
+            val column = from % columns
+            val target = when (button) {
+                Button.UP -> if (row > 0) from - columns else if (wrap) (rows - 1) * columns + column else null
+                Button.DOWN -> if (row < rows - 1) from + columns else if (wrap) column else null
+                Button.LEFT -> if (column > 0) from - 1 else if (wrap) from + columns - 1 else null
+                Button.RIGHT -> if (column < columns - 1) from + 1 else if (wrap) from - column else null
+                else -> null
+            }
+            target?.takeIf { it in 0 until size }
+        }
+
+        /** Explicit links, for irregular layouts: `links[from][button] = to`. */
+        fun of(links: Map<Int, Map<Button, Int>>) = Topology { from, button -> links[from]?.get(button) }
+    }
+}
+
+/** What B does on a [Screen.Selectable]. */
+enum class CancelBehavior {
+    /** Closes the screen (goes back). */
+    CLOSES,
+
+    /** Selects the last entry (often NO / CANCEL / QUIT) without confirming it. */
+    SELECTS_LAST,
+
+    /** Picks the last entry (NO, KEEP, FLEE...) and confirms it at once: B is an answer, not a way back. */
+    CONFIRMS_LAST,
+
+    /** B does nothing here. */
+    NONE,
+}
+
+/** Kinds of [Screen.ListMenu]. */
+enum class MenuKind { MULTICHOICE, START_MENU, PC, SHOP_ACTION, PHONE_CONTACTS, BATTLE_SWITCH_OR_KEEP, OTHER }
+
+/** Why a [Screen.MoveSelect] is shown. */
+enum class MoveContext {
+    /** Choosing the move to use this turn. */
+    BATTLE,
+
+    /** Choosing a move to forget, during or after a battle (level up). */
+    FORGET_IN_BATTLE,
+
+    /** Choosing a move to forget from the summary screen (evolution, TM / HM, move tutor). */
+    FORGET_SUMMARY,
+}
+
+/** Why the party grid is shown. */
+enum class PartyPurpose { FIELD, SWITCH, USE_ITEM, GIVE_ITEM, TEACH, BATTLE_SWITCH, BATTLE_REPLACE_FAINTED, BATTLE_USE_ITEM, OTHER }
+
+/** Sources of text. */
+enum class TextSource {
+    FIELD, BATTLE, PHONE, SIGN,
+
+    /** Messages of menus and apps (party menu, bag: "can't use that here"...). */
+    MENU,
+}
+
+/** Why the game waits for A on a [Screen.PressToContinue]. */
+enum class ContinueReason {
+    POKEDEX_ENTRY, LEVEL_UP_STATS, PHONE_CALL_ENDED, MESSAGE,
+
+    /** Something bit the fishing line: A now (within about a second) hooks it. */
+    FISHING_BITE,
+    OTHER,
+}
+
+/** What a [Screen.PcBox] was opened for. */
+enum class PcMode { DEPOSIT, WITHDRAW, MOVE, MOVE_ITEMS }
+
+/** Kinds of [Screen.Animation]. */
+enum class AnimationKind { TRADE, EGG_HATCH, CUTSCENE, TRANSITION }

@@ -20,7 +20,7 @@ import kotlin.io.path.outputStream
  * | Setting               | Environment variable                    | Config key              |
  * |-----------------------|-----------------------------------------|-------------------------|
  * | ROM                   | `POKEMON_ROM` (or first argument)       | `rom`                   |
- * | Decision model        | `DECISION_BACKEND` (`jev` / `llm`)      | `backend`               |
+ * | Decision model        | `DECISION_BACKEND` (`mcp` / `llm` / `jev`) | `backend` (mcp)      |
  * | Jev API key           | `TYPESAFE_API_KEY`                      | `typesafe.apiKey`       |
  * | Jev model             | `JEV_MODEL`                             | `typesafe.model`        |
  * | Jev endpoint          | `JEV_ENDPOINT`                          | `typesafe.endpoint`     |
@@ -28,6 +28,9 @@ import kotlin.io.path.outputStream
  * | LLM model             | `LLM_MODEL`                             | `llm.<provider>.model`  |
  * | LLM thinks first      | `LLM_THINKING` (`true` / `false`)       | `llm.thinking`          |
  * | MCP server port       | `MCP_PORT`                              | `mcp.port` (3333)       |
+ * | Emulator core         | `EMULATOR_CORE` (`desmume` / `melonds`) | `emulator.core`         |
+ * | Start muted           | `START_MUTED` (`true` / `false`)        | `start.muted`           |
+ * | Save state at launch  | `START_STATE` (slot number)             | `start.state`           |
  * | LLM API key           | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | `llm.<provider>.apiKey` |
  *
  * Everything the app writes (config, downloaded cores, in-game saves, save states) lives in
@@ -43,7 +46,7 @@ class AppConfig(
     // region Decision model
 
     var backend: DecisionBackend
-        get() = enumSetting("DECISION_BACKEND", "backend") ?: DecisionBackend.JEV
+        get() = enumSetting("DECISION_BACKEND", "backend") ?: DecisionBackend.MCP
         set(value) = save("backend", value.name.lowercase())
 
     // endregion
@@ -89,7 +92,18 @@ class AppConfig(
         set(value) = save("player.settings", settingsJson.encodeToString(PlayerSettings.serializer(), value))
 
     /** Port of the MCP server (external agents play through it). */
-    val mcpPort: Int get() = setting("MCP_PORT", "mcp.port")?.toIntOrNull() ?: 3333
+    var mcpPort: Int
+        get() = setting("MCP_PORT", "mcp.port")?.toIntOrNull() ?: 3333
+        set(value) = save("mcp.port", value.toString())
+
+    /** Preferred emulator core (see LibretroCoreSpec); DeSmuME by default. */
+    val emulatorCore: String? get() = setting("EMULATOR_CORE", "emulator.core")
+
+    /** Starts with the sound off (tests, or several instances side by side). */
+    val startMuted: Boolean get() = setting("START_MUTED", "start.muted")?.toBooleanStrictOrNull() ?: false
+
+    /** Save state slot loaded right after launch, if any (e.g. to resume a test scenario). */
+    val startState: Int? get() = setting("START_STATE", "start.state")?.toIntOrNull()
 
     fun saveRomPath(path: Path) = save("rom", path.toAbsolutePath().toString())
 

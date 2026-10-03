@@ -1,0 +1,373 @@
+package me.nathanfallet.aiplayspokemon.dev
+
+import dev.kotlinds.pokemonclient.view.MapView
+import dev.kotlinds.pokemonclient.hgss.HgssWorldSource
+import dev.kotlinds.pokemonclient.hgss.HgssLoadedMap
+import dev.kotlinds.pokemonclient.hgss.HgssData
+import dev.kotlinds.NdsRom
+import dev.kotlinds.pokemonclient.hgss.HgssVersion
+import dev.kotlinds.pokemonclient.hgss.HgssReader
+import dev.kotlinds.pokemonclient.hgss.HgssMemory
+import dev.kotlinds.pokemonclient.hgss.HgssGame
+import dev.kotlinds.pokemonclient.hgss.HgssFishing
+import dev.kotlinds.pokemonclient.hgss.FishingState
+import dev.kotlinds.pokemonclient.console.InputFrame
+import dev.kotlinds.pokemonclient.Memory
+import dev.kotlinds.pokemonclient.PokemonGame
+import dev.kotlinds.pokemonclient.RamMemory
+import dev.kotlinds.pokemonclient.console.Button
+import dev.kotlinds.pokemonclient.console.Frame
+import dev.kotlinds.pokemonclient.console.MemoryRegion
+import dev.kotlinds.pokemonclient.console.TouchPoint
+import dev.kotlinds.pokemonclient.actions.ActionMode
+import dev.kotlinds.pokemonclient.actions.ActionRegistry
+import dev.kotlinds.pokemonclient.actions.Navigator
+import dev.kotlinds.pokemonclient.runtime.ActionScope
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import dev.kotlinds.pokemonclient.runtime.kind
+import dev.kotlinds.pokemonclient.state.Awaiting
+import dev.kotlinds.pokemonclient.state.Screen
+import me.nathanfallet.aiplayspokemon.emulator.libretro.LibretroConsole
+import me.nathanfallet.aiplayspokemon.emulator.libretro.LibretroCoreSpec
+import me.nathanfallet.aiplayspokemon.game.PokemonGames
+import java.awt.image.BufferedImage
+import java.io.DataOutputStream
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.zip.GZIPOutputStream
+import javax.imageio.ImageIO
+import kotlin.io.path.readBytes
+import kotlin.io.path.writeBytes
+
+/**
+ * Development bench: drives the game headless (no window, no sound) from a script, to check decoders and actions
+ * on real screens, take screenshots and capture RAM fixtures for tests.
+ *
+ * ```
+ * ./gradlew devRun -PdevMain=me.nathanfallet.aiplayspokemon.dev.BenchKt -PdevArgs="<data dir>|<out dir>|<command>|..."
+ * ```
+ * Environment: `POKEMON_ROM` (ROM path), `EMULATOR_CORE` (desmume / melonds), `BENCH_WINDOW=1` (watch it live). The data directory holds `cores/`,
+ * `saves/` (the in-game save is loaded at boot) and `system/`, like the app's.
+ *
+ * Commands (one per argument):
+ * - `boot[:frames]`: from power-on, presses A until the overworld (continues the saved game);
+ * - `load:<file>` / `save:<file>`: loads / saves a save state (relative to the out dir);
+ * - `step:<n>`: emulates n frames; `tap:<BUTTON>[x<n>]`: self-checking taps; `touch:<x>,<y>`: touches the bottom screen;
+ * - `until:<kind>:<frames>`: steps until the screen kind starts with `kind` (e.g. `overworld`, `dialogue`);
+ * - `shot:<name>`: PNG of both screens; `state`: prints the decoded GameState; `screen`: prints the screen only;
+ *   `puzzle`: prints the position and the map puzzle (switches, shutters, teleports);
+ * - `act:<json>`: executes a typed action through the action registry (e.g. `act:{"type":"choose","entry":"option:6"}`);
+ *   `actions`: lists the actions available now;
+ * - `ram:<name>`: writes the full main RAM; `fixture:<name>`: writes a sparse RAM fixture (only the bytes the
+ *   decoders read) for unit tests.
+ */
+fun main(args: Array<String>) {
+    require(args.size >= 3) { "usage: <data dir>|<out dir>|<command>|..." }
+    val data = Path.of(args[0])
+    val out = Files.createDirectories(Path.of(args[1]))
+    val rom = Path.of(System.getenv("POKEMON_ROM") ?: error("POKEMON_ROM is not set"))
+    val game = PokemonGames.detect(rom) ?: error("Unsupported ROM $rom")
+    // BENCH_WINDOW=1 opens a live, muted window to watch the commands run at the console's speed.
+    val viewer = if (System.getenv("BENCH_WINDOW") == "1") BenchViewer("Bench — ${rom.fileName}") else null
+    val console = LibretroConsole(
+        LibretroCoreSpec.forRom(rom, System.getenv("EMULATOR_CORE")), rom, data,
+        onVideo = { viewer?.show(it) }, onAudio = { _, _ -> },
+    )
+    val bench = Bench(console, game, out, rom)
+    try {
+        args.drop(2).forEach { command ->
+            println("> $command")
+            bench.run(command)
+        }
+    } finally {
+        console.close()
+        viewer?.close()
+    }
+}
+
+private class Bench(private val console: LibretroConsole, private val game: PokemonGame, private val out: Path, private val romPath: Path) {
+
+    private val scope = ActionScope(console, game.inputProbe)
+    private val registry = ActionRegistry.of()
+
+    fun run(command: String) {
+        val name = command.substringBefore(':')
+        val arg = command.substringAfter(':', "")
+        when (name) {
+            "boot" -> boot(arg.toIntOrNull() ?: 6000)
+            "load" -> check(console.loadState(out.resolve(arg).readBytes())) { "state rejected: $arg" }
+            "save" -> out.resolve(arg).writeBytes(console.saveState())
+            "step" -> scope.step(arg.toInt())
+            "tap" -> {
+                val button = Button.valueOf(arg.substringBefore('x').uppercase())
+                repeat(arg.substringAfter('x', "1").toInt()) { println("  ${scope.tap(button)}") }
+            }
+            "hold" -> arg.split(':').let { (b, n) -> scope.step(n.toInt(), dev.kotlinds.pokemonclient.console.InputFrame.of(Button.valueOf(b.uppercase()))); scope.step(2) }
+            "raw" -> dev.kotlinds.pokemonclient.hgss.HgssReader(scope.memory()).read()?.let { st ->
+                println("  mode=${st.mode} detail=${st.modeDetail} awaiting=${st.awaitingInput} fading=${st.fading}")
+                println("  loc=${st.location?.let { "${it.mapName} ${it.x},${it.z} ${it.facing}" }}")
+                println("  menu=${st.menu} app=${st.app} dialogue=${st.dialogue?.text?.take(120)}")
+                st.surroundings?.bgEvents?.forEach { println("  bg $it") }
+                st.surroundings?.warps?.forEach { println("  warp ${it.x},${it.z} -> ${it.destMapName} ${it.kind} ${it.pressDirection}") }
+                st.surroundings?.grid?.let { g -> println("  origin ${g.originX},${g.originZ}"); g.rows.forEachIndexed { i, row -> println("  | ${g.originZ + i} $row") } }
+                st.surroundings?.objects?.forEach { println("  obj ${it.label} ${it.x},${it.z}") }
+            }
+            "touch" -> arg.split(',').let { (x, y) -> scope.touch(TouchPoint(x.toInt(), y.toInt())) }
+            "until" -> {
+                val (kind, frames) = arg.split(':')
+                val met = scope.stepUntil(frames.toInt()) { game.state(it).screen.kind.startsWith(kind) }
+                println("  ${if (met) "reached" else "NOT reached"} $kind at frame ${console.frame}")
+            }
+            "shot" -> console.framebuffer()?.let { save(it, out.resolve("$arg.png")) }
+            "state" -> println(game.state(scope.memory()).toString().replace(", ", ",\n  "))
+            "screen" -> println("  " + game.state(scope.memory()).screen)
+            "puzzle" -> game.state(scope.memory()).field.let { f ->
+                println("  ${f?.mapName} (${f?.mapId}) at ${f?.x},${f?.y}")
+                f?.puzzle?.let { p ->
+                    println("  puzzle ${p.kind}: ${p.rule}")
+                    p.switches.forEach { println("    $it") }
+                    p.barriers.forEach { println("    $it") }
+                    p.teleports.forEach { println("    $it") }
+                } ?: println("  no puzzle")
+            }
+            "ram" -> out.resolve("$arg.ram").writeBytes(ram())
+            "fixture" -> fixture(arg)
+            "world" -> world(arg)
+            "mapview" -> game.state(scope.memory()).field?.let { f ->
+                game.world?.areaOf(f.mapId)?.let { area -> MapView.render(area, f, game::zoneName) }
+            }?.forEach { (k, v) -> println("  $k: " + (v as? kotlinx.serialization.json.JsonArray)?.joinToString("\n    ", "\n    ") { it.toString().trim('"') }.orEmpty().ifEmpty { v.toString() }) }
+            "trace" -> trace(arg.toInt())
+            "steps" -> steps(Button.valueOf(arg.substringBefore('x').uppercase()), arg.substringAfter('x', "1").toInt())
+            "where" -> HgssReader(scope.memory(), HgssVersion.HEARTGOLD_US).read()?.let { st ->
+                println("  ${st.mode} ${st.modeDetail} at ${st.location?.x},${st.location?.z} facing ${st.location?.facing} map ${st.location?.mapName}")
+                st.surroundings?.bgEvents?.forEach { println("    bg $it") }
+                st.surroundings?.grid?.let { g -> g.rows.forEachIndexed { i, r -> println("    ${g.originZ + i}\t$r") }; println("    x0=${g.originX}") }
+            }
+            "fish" -> fish(arg.toInt())
+            "scr" -> println(describe(game.state(scope.memory()).screen))
+            "walk" -> walk(arg.split(',').map { Button.valueOf(it.trim().uppercase()) })
+            "cur" -> println(describe(game.state(scope.memory()).screen).lineSequence().first())
+            "act" -> {
+                val action = registry.parse(Json.parseToJsonElement(arg).jsonObject, ActionMode.ASSISTED).getOrThrow()
+                val outcome = registry.execute(action, scope, game)
+                Navigator(scope, game).settle()
+                println("  $outcome")
+                println("  " + game.state(scope.memory()).screen)
+            }
+            "actions" -> registry.available(game.state(scope.memory()), ActionMode.ASSISTED).forEach { println("  $it") }
+            else -> error("unknown command $command")
+        }
+    }
+
+    private fun trace(frames: Int) {
+        var last: String? = null
+        repeat(frames) {
+            scope.step(1)
+            val line = describe()
+            if (line != last) println("  [${console.frame}] $line")
+            last = line
+        }
+    }
+
+    private fun describe(): String {
+        val memory = scope.memory()
+        val fishing = (game as? HgssGame)?.let { HgssFishing.state(HgssMemory(memory, HgssVersion.HEARTGOLD_US)) }
+        val state = game.state(memory)
+        val position = state.field?.let { " at ${it.x},${it.y}${if (it.moving) " moving" else ""} ${it.movement.name.lowercase()}" } ?: ""
+        return brief(state.screen) + position + (fishing?.let { " fishing=$it" } ?: "")
+    }
+
+    /**
+     * Fishing "watch": steps up to [frames] frames, presses A for one frame on the first frame of a bite, and
+     * prints every change of the fishing probe.
+     */
+    private fun fish(frames: Int) {
+        var last: String? = null
+        repeat(frames) {
+            val memory = scope.memory()
+            val state = HgssFishing.state(HgssMemory(memory, HgssVersion.HEARTGOLD_US))
+            val line = "$state"
+            if (line != last) println("  [${console.frame}] fishing=$line screen=${brief(game.state(memory).screen)}")
+            last = line
+            scope.step(1, if (state is FishingState.Bite) InputFrame.of(Button.A) else InputFrame.NONE)
+        }
+    }
+
+    /** Walks [steps] tiles towards [button]: holds it until the player's tile changes, then waits until it stands still. */
+    private fun steps(button: Button, steps: Int) {
+        fun position() = HgssReader(scope.memory(), HgssVersion.HEARTGOLD_US).read()?.location?.let { Triple(it.x, it.z, it.moving) }
+        repeat(steps) {
+            val start = position()
+            scope.stepUntil(40, InputFrame.of(button)) { position()?.let { (x, z, _) -> x != start?.first || z != start.second } == true }
+            scope.stepUntil(40) { position()?.third == false }
+        }
+        println("  at ${position()}")
+    }
+
+    private fun brief(screen: Screen): String = when (screen) {
+        is Screen.Selectable -> "${screen::class.simpleName}(${(screen as? Screen.ListMenu)?.kind ?: ""} cursor=${screen.cursor} " +
+            "cancel=${screen.cancel} entries=${screen.entries.joinToString { e -> "${e.id}|${e.label.replace('\n', ' ')}" + (if (!e.selectable) "|x" else "") + (e.touch?.let { "@${it.x},${it.y}" } ?: "") }})"
+        else -> screen.toString().replace('\n', ' ')
+    }
+
+    /**
+     * Taps each button and checks the decoded topology: the cursor must land where `topology.next` predicted
+     * (staying put when it predicted null). Prints OK / MISMATCH per tap.
+     */
+    private fun walk(buttons: List<Button>) {
+        var ok = 0
+        for (button in buttons) {
+            val before = game.state(scope.memory()).screen as? Screen.Selectable ?: error("not a selectable screen")
+            val from = (before.cursor as? dev.kotlinds.pokemonclient.state.Cursor.At)?.index ?: error("cursor hidden")
+            val predicted = before.topology.next(from, button) ?: from
+            scope.tap(button)
+            scope.step(6)
+            val after = game.state(scope.memory()).screen as? Screen.Selectable
+            val got = (after?.cursor as? dev.kotlinds.pokemonclient.state.Cursor.At)?.index
+            val same = after != null && after::class == before::class
+            if (same && got == predicted) ok++
+            println("  ${if (same && got == predicted) "OK" else "MISMATCH"} $button: $from -> $got (predicted $predicted)${if (!same) " screen ${after?.let { it::class.simpleName }}" else ""}")
+        }
+        println("  walk: $ok/${buttons.size} OK")
+    }
+
+    /** Compact view of a screen: kind, cursor, entries and, for selectable screens, the D-pad moves of each entry. */
+    private fun describe(screen: Screen): String = buildString {
+        append("  ${screen::class.simpleName}")
+        if (screen !is Screen.Selectable) {
+            append(" $screen")
+            return@buildString
+        }
+        when (screen) {
+            is Screen.Bag -> append(" pocket=${screen.pocket} page=${screen.page}/${screen.pages}")
+            is Screen.PartyGrid -> append(" purpose=${screen.purpose}")
+            is Screen.ContextMenu -> append(" owner=${screen.owner}")
+            is Screen.YesNo -> append(" question=${screen.question}")
+            else -> {}
+        }
+        append(" cursor=${screen.cursor} cancel=${screen.cancel}")
+        val buttons = listOf(Button.UP, Button.DOWN, Button.LEFT, Button.RIGHT, Button.L, Button.R)
+        screen.entries.forEachIndexed { i, e ->
+            val moves = buttons.mapNotNull { b -> screen.topology.next(i, b)?.let { "${b.name[0]}${if (b == Button.L || b == Button.R) "b" else ""}$it" } }
+            append("\n    $i ${e.id} \"${e.label}\"${if (!e.selectable) " (x)" else ""}${e.touch?.let { " touch=${it.x},${it.y}" } ?: ""} ${moves.joinToString(" ")}")
+        }
+    }
+    /** Presses A from power-on until the player can walk (title screen, main menu CONTINUE, recap). */
+    private fun boot(maxFrames: Int) {
+        scope.step(120)
+        while (scope.framesUsed < maxFrames) {
+            val screen = game.state(scope.memory()).screen
+            if (screen is Screen.Overworld && screen.awaiting == Awaiting.INPUT) {
+                println("  overworld at frame ${console.frame}")
+                return
+            }
+            scope.tap(Button.A)
+            scope.step(20)
+        }
+        error("never reached the overworld")
+    }
+
+    private fun ram(): ByteArray =
+        ByteArray(console.memorySize(MemoryRegion.MAIN_RAM)).also { console.read(MemoryRegion.MAIN_RAM, 0, it.size, it) }
+
+    /** Decodes the current frame through a recording memory and keeps only the bytes read. */
+    private fun fixture(name: String) {
+        val recording = RecordingMemory(RamMemory(ram()))
+        game.state(recording)
+        game.observe(recording)
+        writeFixture(name, recording)
+    }
+
+    private fun writeFixture(name: String, recording: RecordingMemory) {
+        val file = out.resolve("$name.ram.sparse.gz")
+        DataOutputStream(GZIPOutputStream(Files.newOutputStream(file))).use { output ->
+            output.write("SPRM".toByteArray())
+            recording.ranges().forEach { (start, bytes) ->
+                output.writeInt(start.toInt())
+                output.writeInt(bytes.size)
+                output.write(bytes)
+            }
+        }
+        println("  fixture $file (${recording.ranges().sumOf { it.second.size }} bytes)")
+    }
+
+    private val romImage: NdsRom by lazy { NdsRom.parse(romPath.readBytes()) }
+    private val romVersion: HgssVersion by lazy { HgssVersion.forGameCode(romImage.gameCode) ?: error("unsupported ROM ${romImage.gameCode}") }
+    private val world: HgssWorldSource by lazy { HgssWorldSource(romImage, romVersion) }
+
+    /** Checks the ROM world decoder against the map loaded in RAM (every tile of every loaded block, zone events). */
+    private fun world(name: String) {
+        val recording = RecordingMemory(RamMemory(ram()))
+        val terrain = HgssLoadedMap(recording, romVersion)
+        val zone = terrain.zoneId ?: error("not in the field")
+        val header = world.header(zone)!!
+        val matrix = world.matrix(header.matrixId)!!
+        val area = world.areaOf(zone)!!
+        var compared = 0
+        var mismatches = 0
+        for (block in terrain.loadedBlocks) {
+            val bx = block % terrain.matrixWidth
+            val bz = block / terrain.matrixWidth
+            val land = world.landData(matrix.landAt(bx, bz)) ?: continue
+            for (lz in 0 until 32) for (lx in 0 until 32) {
+                val x = bx * 32 + lx
+                val z = bz * 32 + lz
+                val live = terrain.attribute(x, z) ?: continue
+                compared++
+                val decoded = land.attribute(lx, lz)
+                val tile = area.tile(x, z)
+                if (live != decoded || tile?.blocked != (live and 0x8000 != 0)) {
+                    if (mismatches++ < 10) println("  MISMATCH ($x,$z) ram=0x${live.toString(16)} rom=0x${decoded.toString(16)} tile=$tile")
+                }
+            }
+        }
+        val px = terrain.playerX!!
+        val pz = terrain.playerZ!!
+        println("  zone $zone ${HgssData.mapName(zone)} matrix ${matrix.id} blocks ${terrain.loadedBlocks} compared $compared tiles, $mismatches mismatches")
+        println("  player ($px,$pz) height ${terrain.playerHeight} tile ${area.tile(px, pz)} zoneAt ${area.zoneAt(px, pz)} altitude ${matrix.altitudeAt(px / 32, pz / 32)}")
+        val live = terrain.events()
+        val rom = world.events(zone)
+        println("  events: ${if (live == rom) "RAM = ROM" else "DIFFER\n    ram=$live\n    rom=$rom"} (${rom?.bgs?.size} bgs, ${rom?.objects?.size} objects, ${rom?.warps?.size} warps, ${rom?.coords?.size} coords)")
+        if (name.isNotEmpty()) writeFixture(name, recording)
+    }
+
+    private fun save(frame: Frame, file: Path) {
+        val image = BufferedImage(frame.width, frame.height, BufferedImage.TYPE_INT_RGB)
+        image.setRGB(0, 0, frame.width, frame.height, frame.pixels, 0, frame.width)
+        ImageIO.write(image, "png", file.toFile())
+    }
+}
+
+/** [Memory] that remembers which addresses were read, to store only those in a sparse fixture. */
+private class RecordingMemory(private val memory: Memory) : Memory {
+    private val touched = sortedSetOf<Long>()
+
+    private fun touch(addr: Long, size: Int) {
+        for (i in 0 until size) touched += addr + i
+    }
+
+    override fun read8(addr: Long) = memory.read8(addr).also { touch(addr, 1) }
+    override fun read16(addr: Long) = memory.read16(addr).also { touch(addr, 2) }
+    override fun read32(addr: Long) = memory.read32(addr).also { touch(addr, 4) }
+    override fun readBytes(addr: Long, size: Int) = memory.readBytes(addr, size).also { touch(addr, size) }
+
+    /** Contiguous runs of touched bytes, with their values. */
+    fun ranges(): List<Pair<Long, ByteArray>> {
+        val result = mutableListOf<Pair<Long, ByteArray>>()
+        var start = -1L
+        var previous = -2L
+        fun flush() {
+            if (start >= 0) result += start to memory.readBytes(start, (previous - start + 1).toInt())
+        }
+        for (addr in touched) {
+            if (addr != previous + 1) {
+                flush()
+                start = addr
+            }
+            previous = addr
+        }
+        flush()
+        return result.filter { (addr, _) -> addr in 0x02000000L..0x023FFFFFL }
+    }
+}

@@ -1,5 +1,6 @@
 package me.nathanfallet.aiplayspokemon.ui
 
+import dev.kotlinds.pokemonclient.data.KnowledgeLevel
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,6 +37,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import me.nathanfallet.aiplayspokemon.emulator.ConsoleHost
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
@@ -53,7 +55,7 @@ import me.nathanfallet.aiplayspokemon.agent.RunStats
 import me.nathanfallet.aiplayspokemon.agent.PokemonPlayer
 import me.nathanfallet.aiplayspokemon.decision.DecisionBackend
 import me.nathanfallet.aiplayspokemon.decision.llm.LlmProvider
-import me.nathanfallet.aiplayspokemon.game.Observation
+import dev.kotlinds.pokemonclient.Observation
 
 /** The right-hand panel: AI controls, what the AI sees, and what it decided. */
 @Composable
@@ -174,6 +176,17 @@ private fun ExperimentSettings(controller: AppController, backend: DecisionBacke
         }
     }
     Text(settings.mode.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Text("Knowledge", fontWeight = FontWeight.Bold)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        KnowledgeLevel.entries.forEach { level ->
+            FilterChip(
+                selected = settings.knowledge == level,
+                onClick = { controller.updateSettings { it.copy(knowledge = level) } },
+                label = { Text(KNOWLEDGE_LABELS.getValue(level)) },
+            )
+        }
+    }
+    Text(settings.knowledge.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     if (settings.mode == ControlMode.HYBRID) Text(
         "Planner: the LLM configured in the LLM tab.",
         style = MaterialTheme.typography.bodySmall,
@@ -188,7 +201,6 @@ private fun ExperimentSettings(controller: AppController, backend: DecisionBacke
         Triple("Reasoning (LLM)", settings.reasoning) { s: PlayerSettings, v: Boolean -> s.copy(reasoning = v) }.takeIf { llmInLoop },
         Triple("Notes (LLM)", settings.modelNotes) { s: PlayerSettings, v: Boolean -> s.copy(modelNotes = v) }.takeIf { llmInLoop },
         Triple("Explored map", settings.exploredMap) { s: PlayerSettings, v: Boolean -> s.copy(exploredMap = v) },
-        Triple("Story goal (assist)", settings.storyGoal) { s: PlayerSettings, v: Boolean -> s.copy(storyGoal = v) },
         Triple("Sample probabilities", settings.sampleProbabilities) { s: PlayerSettings, v: Boolean -> s.copy(sampleProbabilities = v) }
             .takeIf { backend == DecisionBackend.JEV },
     )
@@ -280,14 +292,33 @@ private fun McpSection(controller: AppController) {
         if (server != null) "MCP server running: an external agent plays through it." else "Starting the MCP server…",
         fontWeight = FontWeight.Bold,
     )
+    val driver by controller.emulator.driver.collectAsState()
+    Text(
+        "Driving the game: " + when (val d = driver) {
+            is ConsoleHost.Driver.Agent -> "agent (${d.label})"
+            ConsoleHost.Driver.Human -> "you / free run"
+            ConsoleHost.Driver.Idle -> "nobody (paused)"
+        },
+        style = MaterialTheme.typography.bodySmall,
+    )
+    var port by remember { mutableStateOf(controller.mcpPort.toString()) }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5) }, label = { Text("MCP port") }, singleLine = true, modifier = Modifier.width(120.dp))
+        OutlinedButton(onClick = { port.toIntOrNull()?.let(controller::setMcpPort) }, enabled = port.toIntOrNull() != controller.mcpPort) {
+            Text("Apply")
+        }
+    }
     server?.let { running ->
         val activity by running.activity.collectAsState()
+        val blind by running.blindUses.collectAsState()
         SelectionContainer {
             Text(
                 "Connect an agent, e.g.: claude mcp add --transport http pokemon ${running.url}\n" +
                     "Then ask it to play. Calls: ${activity.calls}" +
                     (activity.lastAction?.let { "\nLast: $it" } ?: "") +
-                    (activity.lastReasoning?.let { "\n“$it”" } ?: ""),
+                    (activity.lastReasoning?.let { "\n“$it”" } ?: "") +
+                    (if (blind.isEmpty()) "" else "\nUndecoded screens used blindly: " +
+                        blind.entries.sortedByDescending { it.value }.joinToString { "${it.key} ×${it.value}" }),
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
             )
@@ -327,7 +358,7 @@ private fun DecisionCard(decision: Decision) {
     Card {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                "#${decision.number} → ${decision.actions.joinToString(" → ") { it.id }}${if (decision.byPlanner) "  (planner)" else ""}",
+                "#${decision.number} → ${decision.actions.joinToString(" → ")}${if (decision.byPlanner) "  (planner)" else ""}",
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace,
             )
@@ -363,7 +394,7 @@ private fun DecisionHistory(history: List<Decision>, modifier: Modifier = Modifi
     LazyColumn(modifier) {
         items(history, key = { it.number }) { decision ->
             Text(
-                "#${decision.number}  ${decision.actions.joinToString(",") { it.id }.padEnd(10)} ${(decision.confidence?.let(::percent) ?: "").padStart(4)}  ${decision.observation.summary}",
+                "#${decision.number}  ${decision.actions.joinToString(",").padEnd(10)} ${(decision.confidence?.let(::percent) ?: "").padStart(4)}  ${decision.observation.summary}",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 maxLines = 1,
@@ -420,3 +451,10 @@ private fun KeyboardHelp() {
 private fun percent(value: Double) = "${(value * 100).toInt()}%"
 
 private val prettyJson = Json { prettyPrint = true }
+
+/** Short names of the knowledge levels, for the chips. */
+private val KNOWLEDGE_LABELS = mapOf(
+    KnowledgeLevel.NONE to "Screen only",
+    KnowledgeLevel.POKEDEX to "Pokédex",
+    KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH to "+ Walkthrough",
+)

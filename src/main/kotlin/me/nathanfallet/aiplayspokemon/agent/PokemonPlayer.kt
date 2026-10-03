@@ -11,13 +11,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
-import me.nathanfallet.aiplayspokemon.agent.actions.AgentAction
+import dev.kotlinds.pokemonclient.runtime.Recorder
 import me.nathanfallet.aiplayspokemon.decision.ChoiceResult
 import me.nathanfallet.aiplayspokemon.decision.DecisionException
 import me.nathanfallet.aiplayspokemon.decision.DecisionModel
-import me.nathanfallet.aiplayspokemon.emulator.Emulator
-import me.nathanfallet.aiplayspokemon.game.Observation
-import me.nathanfallet.aiplayspokemon.game.PokemonGame
+import me.nathanfallet.aiplayspokemon.emulator.ConsoleHost
+import dev.kotlinds.pokemonclient.Observation
+import dev.kotlinds.pokemonclient.PokemonGame
 import java.nio.file.Path
 import kotlin.random.Random
 
@@ -34,15 +34,16 @@ import kotlin.random.Random
  * The game is frozen while the AI thinks (when enabled), and the human keeps the keyboard at all times.
  */
 class PokemonPlayer(
-    emulator: Emulator,
+    emulator: ConsoleHost,
     game: PokemonGame,
+    recorder: Recorder,
     val model: DecisionModel,
     private val planner: DecisionModel?,
     private val scope: CoroutineScope,
     settings: () -> PlayerSettings,
     runsDirectory: Path?,
 ) {
-    val session = AgentSession(emulator, game, settings)
+    val session = AgentSession(emulator, game, recorder, settings)
     private val settings get() = session.settings()
     private val emulator = emulator
     private val stats = RunStats(runsDirectory, "${model.name}${planner?.let { " + planner ${it.name}" } ?: ""}")
@@ -82,7 +83,6 @@ class PokemonPlayer(
             } catch (error: Exception) {
                 _state.update { it.copy(error = error.message ?: error.toString()) }
             } finally {
-                session.controller.releaseAll()
                 _state.update { it.copy(playing = false, thinking = false) }
             }
         }
@@ -105,7 +105,7 @@ class PokemonPlayer(
         val turn = session.prepare()
         if (state.value.decisions == 0) stats.start(turn.observation)
         val startedAt = System.nanoTime()
-        val (result, byPlanner) = session.controller.thinking {
+        val (result, byPlanner) = session.thinking {
             _state.update { it.copy(thinking = true) }
             try {
                 decide(turn)
@@ -124,7 +124,7 @@ class PokemonPlayer(
         val decision = Decision(
             number = state.value.decisions + 1,
             observation = turn.observation,
-            actions = report.performed.ifEmpty { listOf(choice) },
+            actions = report.performed.ifEmpty { listOf(choice.key) },
             confidence = result.confidence,
             probabilities = result.probabilities.entries.sortedByDescending { it.value }.map { it.key to it.value },
             latencyMillis = latencyMillis,
@@ -134,7 +134,7 @@ class PokemonPlayer(
             byPlanner = byPlanner,
             problem = report.problem,
         )
-        val presses = session.controller.presses
+        val presses = session.actionsDone
         _state.update {
             val inputTokens = it.inputTokens + result.inputTokens
             val cost = it.costUsd + (result.costUsd ?: 0.0)
@@ -222,7 +222,7 @@ data class Decision(
     val number: Int,
     val observation: Observation,
     /** Actions carried out (the choice, then the sequence if any). */
-    val actions: List<AgentAction>,
+    val actions: List<String>,
     /** How certain the model was (0..1), or null when it can't tell. */
     val confidence: Double?,
     /** Options sorted by probability, most likely first. */

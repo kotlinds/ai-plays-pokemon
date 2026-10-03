@@ -22,7 +22,7 @@ What every AI gets:
   - **Hybrid**: assisted actions picked by a fast decision model (Jev), with an LLM planner called when it hesitates,
     loops, or periodically, whose goal the fast model then follows.
 
-Every variant is an option in the app (mode, timing, sequences, reasoning, notes, explored map, story goal assist...),
+Every variant is an option in the app (mode, knowledge level, timing, sequences, reasoning, notes, explored map...),
 and each run records milestones (new places, story progress) with decisions, presses, time, tokens and cost in
 `~/.ai-plays-pokemon/runs/`, so configurations can be compared.
 
@@ -36,7 +36,8 @@ to try (or [Ollama](https://ollama.com) for a local model, e.g. `ollama pull gem
 ```
 
 Without an argument, the app asks for the ROM with a file picker and remembers it. On first launch it downloads the
-melonDS libretro core for your platform from the libretro buildbot.
+DeSmuME libretro core for your platform from the libretro buildbot (melonDS is available too; both are pinned and
+checked by SHA-256). In-game saves are converted between the cores' formats automatically.
 
 In the window: the game on the left; on the right, choose the AI (Jev, or an LLM provider + model id), paste its API key
 if needed, pick the mode and options, and **▶ Let … play** starts the autonomous loop. You can see exactly what the AI
@@ -46,10 +47,20 @@ reasoning and note.
 **Claude without an API key**: choose LLM → *Claude (Claude Code login)* with a model like `sonnet` or `opus`. Each
 decision runs `claude -p` (a few seconds of overhead) and counts towards your Claude plan's usage.
 
-**An external agent through MCP**: select the *MCP* tab (it starts the server), then connect the agent, e.g.
-`claude mcp add --transport http pokemon http://localhost:3333/mcp`, and ask it to play. It gets two tools: `get_state`
-(screen, memory, options of the current mode) and `act` (carry out an option, optionally a short sequence). The agent
-keeps its own context between calls, and the game is frozen while it thinks.
+**An external agent through MCP**: select the *MCP* tab (it starts the server; the port can be changed there), then
+connect the agent, e.g. `claude mcp add --transport http pokemon http://localhost:3333/mcp`, and ask it to play. It
+gets four tools, always the same:
+
+- `get_state`: the screen (with the ids of its entries), messages and events since the last call, the team, the
+  battle (with the estimated effectiveness of each move at the Pokédex knowledge level), a text map of the
+  surroundings with the ids of exits, people and signs, and the actions possible now with their valid values;
+- `act`: one typed action (`{"type": "buy", "item": "Poke Ball", "quantity": 5}`, `{"type": "go_to", "target":
+  "warp:3"}`, `{"type": "attack", "move": "move:85"}`...), optionally followed by up to 8 more (`then`), a note to
+  itself and a short reasoning; a refused action always says why (typed error);
+- `lookup`: game knowledge from the ROM (species, moves, items, types, learnsets, TMs), within the knowledge level;
+- `screenshot`: both screens, for anything the state doesn't describe.
+
+The agent keeps its own context between calls, and the game is frozen while it thinks.
 
 | Keys        | Action                     | Keys   | Action                         |
 |-------------|----------------------------|--------|--------------------------------|
@@ -70,7 +81,7 @@ core, in-game saves and save states). Environment variables take precedence:
 | Environment variable                                        | Config key              | Default                                |
 |-------------------------------------------------------------|-------------------------|----------------------------------------|
 | `POKEMON_ROM` (or first argument)                           | `rom`                   | asked with a file picker               |
-| `DECISION_BACKEND` (`jev` / `llm`)                          | `backend`               | `jev`                                  |
+| `DECISION_BACKEND` (`mcp` / `llm` / `jev`)                  | `backend`               | `mcp`                                  |
 | `TYPESAFE_API_KEY`                                          | `typesafe.apiKey`       | entered in the app                     |
 | `JEV_MODEL`                                                 | `typesafe.model`        | `jev-latest`                           |
 | `JEV_ENDPOINT`                                              | `typesafe.endpoint`     | `https://api.typesafe.ai/v1/systemone` |
@@ -78,6 +89,8 @@ core, in-game saves and save states). Environment variables take precedence:
 | `LLM_MODEL`                                                 | `llm.<provider>.model`  | a default per provider                 |
 | `LLM_THINKING` (Ollama reasoning models think first)        | `llm.thinking`          | `false`                                |
 | `MCP_PORT`                                                  | `mcp.port`              | `3333`                                 |
+| `EMULATOR_CORE` (`desmume` / `melonds`)                     | `emulator.core`         | `desmume`                              |
+| `START_MUTED`                                               | `start.muted`           | `false`                                |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | `llm.<provider>.apiKey` | entered in the app                     |
 | `AI_PLAYS_POKEMON_DATA_DIR`                                 | —                       | `~/.ai-plays-pokemon`                  |
 
@@ -87,52 +100,49 @@ server implementing the same `POST /v1/systemone` protocol, e.g. an open-weight 
 ## How it works
 
 ```
-                 ┌──────────────────────── ui ─────────────────────────┐
-                 │  EmulatorScreen · ControlPanel · keyboard → buttons │
-                 └───────┬──────────────────────────────────┬──────────┘
-                         │ frames, status                   │ play / pause, state
-  ┌──── emulator ────────▼─────┐                  ┌─────────▼──── agent ─────────────┐   ┌──── mcp ─────────┐
-  │ Emulator (interface)       │   main RAM       │ AgentSession: prepare → act      │◄──│ GameMcpServer    │
-  │  └ LibretroEmulator        │ ───────────────► │  GameController · AgentMemory    │   │ (external agent) │
-  │     └ LibretroCore (JNA)   │                  │  actions: AgentAction (sealed)   │   └──────────────────┘
-  │        └ melonDS core      │ ◄─────────────── │ PokemonPlayer: the decision loop │
-  └────────────────────────────┘   buttons        └───┬───────────────────────┬──────┘
-                                                      │ RAM → Observation     │ ChoiceRequest → ChoiceResult
-                                             ┌────────▼─────── game ───┐  ┌───▼──────── decision ───────────┐
-                                             │ PokemonGame (interface) │  │ DecisionModel (interface)       │
-                                             │  └ hgss: HeartGold      │  │  ├ jev: Jev (TypeSafe API)      │
-                                             │    RAM reader           │  │  ├ llm: LLMs through Koog       │
-                                             │                         │  │  └ claudecode: `claude -p`      │
-                                             └─────────────────────────┘  └─────────────────────────────────┘
+ ┌──────────────── app (me.nathanfallet.aiplayspokemon) ─────────────────┐
+ │ ui: EmulatorScreen · ControlPanel        mcp: GameMcpServer (4 tools)  │
+ │ agent: GameSession · PokemonPlayer       decision: Jev · LLMs · claude │
+ │ emulator: ConsoleHost (one console thread, drivers: idle/human/agent)  │
+ │   └ LibretroConsole ── libretro-kmp ── DeSmuME / melonDS core          │
+ └───────────────┬───────────────────────────────────────────────────────┘
+                 │ ConsolePort (step, read RAM, frames, save states)
+ ┌───────────────▼──── pokemon-client (dev.kotlinds.pokemonclient) ──────┐
+ │ state: GameState, sealed Screen (entries, cursor, topology), events   │
+ │ runtime: ActionScope (self-checking taps), Recorder                    │
+ │ actions: Navigator (verified cursor moves), typed GameActions, plans, │
+ │          ActionRegistry (schema, availability, typed errors)           │
+ │ world: Area, Pathfinder (levels, ledges, surf, triggers)  view: MapView│
+ │ data: GameData, Lookup, KnowledgeLevel                                 │
+ │ hgss: HeartGold/SoulSilver — RAM decoders per screen family, ROM maps │
+ │       and data (kotlinds), story table                                 │
+ └────────────────────────────────────────────────────────────────────────┘
 ```
 
-Each package has one job and depends only on the interfaces of the others:
+Two modules:
 
-- **`emulator`** — runs a console. `Emulator` is the interface the rest of the app uses (frames, buttons, touch, RAM
-  snapshots, save states). `LibretroEmulator` implements it by loading a [libretro](https://www.libretro.com) core in
-  process: libretro is a small C API that emulators ("cores") implement, so we get melonDS (and could get DeSmuME,
-  mGBA...) without writing an emulator. `LibretroCore` is the thin JNA layer over the C API; `LibretroCoreSpec` lists the
-  cores we know (download URL, options).
-- **`game`** — understands a specific Pokémon game. `PokemonGame.observe(memory)` turns a RAM snapshot into an
-  `Observation`: a `GameMode` (overworld, dialogue, menu, battle...), the player's `Location`, and a JSON `state` for
-  the AI. `PokemonGames` picks the reader from the ROM's game code (read with
-  [kotlinds](https://github.com/kotlinds/kotlinds)). `hgss/` is the HeartGold/SoulSilver reader, built from the
-  [pret/pokeheartgold](https://github.com/pret/pokeheartgold) decompilation (addresses per ROM version in
-  `HgssVersion`, structures, Gen 4 party encryption, name tables in `resources/hgss`). This layer is meant to become a
-  standalone library later (a common interface to read Pokémon games' RAM, one implementation per game).
-- **`decision`** — the brain, behind `DecisionModel.choose(ChoiceRequest): ChoiceResult`. `jev/` is the TypeSafe API
-  client (`JevClient`, request/response models) and its adapter; `llm/` plays with any LLM through Koog
-  (`LlmProvider` lists the providers; `LlmAnswerFormat` is the shared answer format: reasoning, note, sequence and a
-  strictly validated choice); `claudecode/` runs Claude through the Claude Code CLI.
-- **`agent`** — plays. `AgentSession` is the game as seen by any AI: `prepare()` waits until the game expects input,
-  observes it and lists the options of the current mode (`ActionCatalog`: buttons, plus in assisted modes typed
-  actions like `TakeExit`, `Interact`, `Explore`, `ChooseOption`, carried out with `Pathfinder`/`Navigation`), and
-  `act()` carries a choice (and sequence) out through the `GameController` (presses held until the game reacts) and
-  records in `AgentMemory` exactly what changed. `PokemonPlayer` is our decision loop on top of it (with the hybrid
-  planner and `RunStats` milestones); `PlayerSettings` holds every experiment option.
-- **`mcp`** — `GameMcpServer` exposes the same `AgentSession` as MCP tools for external agents.
-- **`ui`** — Compose Desktop window. `AppController` owns the player and translates keyboard/mouse into emulator input.
-- **`config`** — `AppConfig`, settings resolution.
+- **`pokemon-client`** (Kotlin Multiplatform, as much as possible in `commonMain`) is the library: it knows Pokémon,
+  not emulators. A game reads the RAM into one common, typed model: `GameState` with a sealed `Screen` (every menu
+  has its entries with **stable, language-independent ids** like `option:yes`, `mon:8dd175d1.76f3a6fb`, `move:85`,
+  its cursor and the exact D-pad topology). Actions are typed (`GameAction`) and carried out by **plans** that never
+  press blindly: the `Navigator` reads the cursor, moves it one verified tap at a time and confirms only on the
+  target (3 corrections at most, then an explicit error). Movement uses the maps read from the **ROM** (tiles,
+  heights, warps, events) with the live people and the game's script variables on top. Nothing is ever written to
+  the game's RAM: everything goes through buttons and the touch screen, like a player.
+- **the app** runs the emulator through libretro-kmp (a libretro core loaded in process) on
+  a single console thread that drives time (agents get a lease; the human can always take over), and connects the
+  deciders: our loop (`PokemonPlayer` with Jev, LLMs through Koog, or `claude -p`) or an external agent through MCP.
+
+A headless **bench** (`me.nathanfallet.aiplayspokemon.dev.BenchKt`, see its KDoc) runs commands and actions without
+the window (`BENCH_WINDOW=1` shows it live), and writes sparse RAM fixtures for the unit tests:
+
+```bash
+POKEMON_ROM=/path/to/rom.nds ./gradlew -q devRun -PdevMain=me.nathanfallet.aiplayspokemon.dev.BenchKt \
+  "-PdevArgs=<data dir>|<out dir>|load:my.state|step:1|act:{\"type\":\"heal\"}|shot:after"
+```
+
+Tests: `./gradlew :pokemon-client:jvmTest test` (with `POKEMON_ROM` set, the ROM tests run too); coverage with
+`./gradlew koverHtmlReport`.
 
 ### Pure, assisted, hybrid: why several modes?
 
@@ -145,8 +155,10 @@ unsure. Having the three side by side, with milestones recorded for each run, is
 
 ## Extending
 
-- **Another game** (SoulSilver, Platinum...): implement `PokemonGame` and register its ROM code in `PokemonGames`.
-- **Another emulator**: implement `Emulator` (or add a `LibretroCoreSpec` entry for another libretro core).
+- **Another game** (Platinum, Black/White, a GBA game later...), see [docs/adding-a-game.md](docs/adding-a-game.md): implement `PokemonGame` (RAM → `GameState`, screen
+  decoders, optionally `world` and `data` from the ROM) and register its ROM code in `PokemonGames`; the plans, the
+  navigator, the registry, the MCP server and every decider work unchanged.
+- **Another emulator**: implement `ConsolePort` (or add a `LibretroCoreSpec` entry for another libretro core).
 - **Another AI**: any model Koog supports is a provider + model id away (`LlmProvider`); anything else implements
   `DecisionModel`.
 - **Better eyes**: the more faithfully the game reader describes the screen (menu options, text in apps...), the better

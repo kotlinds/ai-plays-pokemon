@@ -1,5 +1,6 @@
 package me.nathanfallet.aiplayspokemon.agent
 
+import dev.kotlinds.pokemonclient.data.KnowledgeLevel
 import kotlinx.serialization.Serializable
 
 /**
@@ -25,8 +26,11 @@ data class PlayerSettings(
     val modelNotes: Boolean = true,
     /** Add the map of everything seen so far on the current map (not only the area around the player). */
     val exploredMap: Boolean = true,
-    /** Add the next story objective read from the game's flags (an assist, off by default). */
-    val storyGoal: Boolean = false,
+    /**
+     * What the agent may know beyond the screen: nothing more, the Pokédex (species / move sheets, type chart,
+     * estimated effectiveness), or also a walkthrough (next story goal, why a way is blocked...).
+     */
+    val knowledge: KnowledgeLevel = KnowledgeLevel.POKEDEX,
     /** Pick the action by sampling the model's probabilities (Jev) instead of always the most likely one. */
     val sampleProbabilities: Boolean = false,
     /** Hybrid mode: ask the planner when the decider's confidence is below this. */
@@ -49,3 +53,7 @@ enum class ControlMode(val label: String, val description: String) {
         "Assisted actions picked by the fast decision model, with an LLM planner called when it hesitates, loops, or periodically.",
     ),
 }
+
+/** The actions this mode gives the AI (hybrid uses assisted actions, with a planner on top). */
+val ControlMode.actionMode: dev.kotlinds.pokemonclient.actions.ActionMode
+    get() = if (this == ControlMode.PURE) dev.kotlinds.pokemonclient.actions.ActionMode.PURE else dev.kotlinds.pokemonclient.actions.ActionMode.ASSISTED

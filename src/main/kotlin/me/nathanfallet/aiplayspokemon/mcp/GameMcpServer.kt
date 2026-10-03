@@ -1,5 +1,12 @@
 package me.nathanfallet.aiplayspokemon.mcp
 
+import dev.kotlinds.pokemonclient.data.KnowledgeLevel
+import dev.kotlinds.pokemonclient.data.Lookup
+import dev.kotlinds.pokemonclient.data.LookupKind
+import dev.kotlinds.pokemonclient.actions.ActionException
+import dev.kotlinds.pokemonclient.actions.ActionMode
+import dev.kotlinds.pokemonclient.actions.GameAction
+import dev.kotlinds.pokemonclient.console.Frame
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
@@ -7,6 +14,7 @@ import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.server.mcpStreamableHttp
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
+import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
@@ -20,35 +28,40 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
-import me.nathanfallet.aiplayspokemon.agent.AgentSession
-import me.nathanfallet.aiplayspokemon.emulator.Emulator
+import me.nathanfallet.aiplayspokemon.agent.GameSession
+import me.nathanfallet.aiplayspokemon.emulator.ConsoleHost
+import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
+import java.util.Base64
+import javax.imageio.ImageIO
 
 /**
- * Exposes the game as an MCP server, so an external agent (Claude Code, another MCP client...) plays
- * instead of our own decision loop. The agent keeps its own context, memory and reasoning between
- * calls; the tools give it exactly what our loop gives a model:
+ * Exposes the game as an MCP server, so an external agent (Claude Code, another MCP client...) plays it.
  *
- * - `get_state`: what is on screen + memory + the options of the current mode (pure / assisted);
- * - `act`: carry out one option (and optionally a sequence), returning what changed and the new state.
+ * Four tools, always the same (so clients can cache them):
+ * - `get_state`: the screen, team, battle, position, what happened since the previous call, the actions possible
+ *   now with their valid values, and the version of the state;
+ * - `act`: carries out one typed action (`{"type": "attack", "move": "move:33"}`...), optionally followed by a short
+ *   list of further actions, and returns what happened and the new state;
+ * - `screenshot`: the console's screens as a picture, for what isn't decoded yet;
+ * - (game knowledge lookups come with phase 4).
  *
- * The game is frozen between calls when "pause while thinking" is on, as for our own loop.
- * Connect with e.g. `claude mcp add --transport http pokemon http://localhost:3333/mcp`.
+ * The game is frozen between calls when "pause while thinking" is on: nothing changes while the agent thinks.
  */
 class GameMcpServer(
-    private val session: AgentSession,
-    private val emulator: Emulator,
+    private val session: GameSession,
+    private val host: ConsoleHost,
     private val port: Int,
+    private val mode: () -> ActionMode,
+    private val pauseWhileThinking: () -> Boolean,
+    private val knowledge: () -> KnowledgeLevel,
 ) {
     private val mutex = Mutex()
-    private var turn: AgentSession.Turn? = null
     private var engine: EmbeddedServer<*, *>? = null
 
     private val _activity = MutableStateFlow(Activity())
@@ -60,126 +73,156 @@ class GameMcpServer(
 
     val url get() = "http://localhost:$port/mcp"
 
+    /** See [GameSession.blindUses]. */
+    val blindUses get() = session.blindUses
+
     fun start() {
         if (engine != null) return
         engine = embeddedServer(CIO, port = port, host = "127.0.0.1") {
             mcpStreamableHttp(path = "/mcp") { createServer() }
         }.start(wait = false)
+        if (pauseWhileThinking()) host.pause()
     }
 
     fun stop() {
         engine?.stop(500, 1_000)
         engine = null
-        if (!emulator.status.value.running) emulator.resume()
+        host.resume()
     }
 
     private fun createServer() = Server(
-        Implementation(name = "ai-plays-pokemon", version = "0.1.0"),
+        Implementation(name = "ai-plays-pokemon", version = "0.2.0"),
         ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false))),
         instructions = INSTRUCTIONS,
     ) {
         addTool(
             name = "get_state",
-            description = "Returns what is on screen right now, what you remember (recent actions and what they changed, " +
-                "places, dialogues, explored map) and the options you can choose from. Call it first, then `act`.",
-        ) {
-            val state = mutex.withLock { currentState() }
-            text(state)
+            description = "What is on screen, your team, the battle, where you are (with a text map), everything shown since " +
+                "your previous call, and the actions you can take now with their valid values. Call it first.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("detail") {
+                        put("type", "string")
+                        put("enum", JsonArray(listOf("compact", "full").map { kotlinx.serialization.json.JsonPrimitive(it) }))
+                        put("description", "full adds each action's description and your notes.")
+                    }
+                },
+            ),
+        ) { request ->
+            val full = request.arguments?.get("detail")?.jsonPrimitive?.contentOrNull == "full"
+            mutex.withLock { text(session.describe(full).encode()) }
         }
         addTool(
             name = "act",
-            description = "Carries out one of the options listed by get_state (by id), optionally followed by a short " +
-                "sequence of further option ids (`then`), and returns what changed and the new state with its options.",
+            description = "Carry out one action, e.g. {\"type\":\"attack\",\"move\":\"move:33\"}, {\"type\":\"choose\",\"entry\":\"option:yes\"}, " +
+                "{\"type\":\"press\",\"button\":\"a\"}. The `actions` of get_state list what is possible now. Menus are navigated and " +
+                "checked for you; an error says exactly why an action didn't happen. Always give a short first-person `reasoning`.",
             inputSchema = ToolSchema(
                 properties = buildJsonObject {
-                    putJsonObject("choice") {
-                        put("type", "string")
-                        put("description", "The id of the option to carry out, e.g. \"a\", \"up\", \"exit_0\".")
-                    }
+                    put("action", session.registry.jsonSchema(mode()))
                     putJsonObject("then") {
                         put("type", "array")
-                        putJsonObject("items") { put("type", "string") }
-                        put("description", "Optional further option ids to carry out right after, only when sure (max 8). Stops early if something unexpected happens.")
+                        put("description", "Optional further actions done right after, only when sure (max 8); stops at the first problem.")
                     }
                     putJsonObject("note") {
                         put("type", "string")
-                        put("description", "Optional note to yourself (goal/plan), shown back in your memory.")
+                        put("description", "Optional note to yourself (goal, plan), given back with the full state.")
                     }
                     putJsonObject("reasoning") {
                         put("type", "string")
-                        put("description", "Optional short reasoning, displayed in the app.")
+                        put("description", "One short sentence: why you do this (shown to the people watching).")
                     }
                 },
-                required = listOf("choice"),
+                required = listOf("action"),
             ),
         ) { request ->
             val arguments = request.arguments ?: JsonObject(emptyMap())
-            val choice = arguments["choice"]?.jsonPrimitive?.contentOrNull ?: return@addTool error("`choice` is required")
-            val then = (arguments["then"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty().take(8)
             val reasoning = arguments["reasoning"]?.jsonPrimitive?.contentOrNull
-            val result = mutex.withLock {
-                val current = turn ?: running { session.prepare() }
-                val action = current.resolve(choice) ?: return@withLock null
-                val report = running {
-                    session.act(current, action, then, reasoning, arguments["note"]?.jsonPrimitive?.contentOrNull)
+            mutex.withLock {
+                val actions = listOfNotNull(arguments["action"] as? JsonObject) + (arguments["then"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>().take(MAX_THEN)
+                if (actions.isEmpty()) return@withLock error("`action` must be an object like {\"type\": \"press\", \"button\": \"a\"}")
+                arguments["note"]?.jsonPrimitive?.contentOrNull?.let { session.act(GameAction.Note(it)) }
+                var result: JsonObject? = null
+                val performed = mutableListOf<String>()
+                for (json in actions) {
+                    val action = session.registry.parse(json, mode()).getOrElse { error ->
+                        val message = (error as? ActionException)?.error?.message ?: error.message ?: "invalid action"
+                        return@withLock error("$message. Call get_state for the valid actions.")
+                    }
+                    result = running { session.act(action) }
+                    performed += action.key
+                    if (result["ok"]?.jsonPrimitive?.contentOrNull != "true") break
                 }
-                _activity.update { it.copy(calls = it.calls + 1, lastAction = report.performed.joinToString(" → ") { it.id }, lastReasoning = reasoning) }
-                buildJsonObject {
-                    put("performed", JsonArray(report.performed.map { JsonPrimitive(it.id) }))
-                    report.problem?.let { put("problem", it) }
-                    if (report.skipped > 0) put("skipped", "${report.skipped} option(s) of the sequence were skipped because something unexpected happened")
-                    put("new_state", json.parseToJsonElement(currentState()))
-                }
+                _activity.update { it.copy(calls = it.calls + 1, lastAction = performed.joinToString(" → "), lastReasoning = reasoning) }
+                text(result!!.encode())
             }
-            if (result == null) error("Unknown option `$choice`: call get_state to see the current options.")
-            else text(json.encodeToString(JsonObject.serializer(), result))
+        }
+        addTool(
+            name = "lookup",
+            description = "Game knowledge, within the knowledge level of this run: " +
+                LookupKind.entries.joinToString("; ") { "${it.name.lowercase()} = ${it.description}" } +
+                ". Ids like species:25, move:85, item:17, TM01, or a name.",
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("kind") {
+                        put("type", "string")
+                        put("enum", JsonArray(LookupKind.entries.map { kotlinx.serialization.json.JsonPrimitive(it.name.lowercase()) }))
+                    }
+                    putJsonObject("id") {
+                        put("type", "string")
+                        put("description", "species:25, move:85, item:17, TM01, fire... or a name.")
+                    }
+                },
+                required = listOf("kind", "id"),
+            ),
+        ) { request ->
+            val arguments = request.arguments ?: JsonObject(emptyMap())
+            val kind = arguments["kind"]?.jsonPrimitive?.contentOrNull?.let { k -> LookupKind.entries.firstOrNull { it.name.equals(k, ignoreCase = true) } }
+                ?: return@addTool error("`kind` must be one of ${LookupKind.entries.joinToString { it.name.lowercase() }}")
+            val id = arguments["id"]?.jsonPrimitive?.contentOrNull ?: return@addTool error("`id` is missing")
+            val data = session.gameData ?: return@addTool error("No game data for this game")
+            Lookup(data, knowledge()).lookup(kind, id).fold({ text(it.encode()) }, { error(it.message ?: "lookup failed") })
+        }
+        addTool(
+            name = "screenshot",
+            description = "A picture of both screens (top, then the bottom touch screen), for anything the state doesn't describe.",
+        ) {
+            val frame = host.frames.value ?: return@addTool error("No frame yet")
+            mutex.withLock { session.countScreenshot() }
+            CallToolResult(content = listOf(ImageContent(data = png(frame), mimeType = "image/png")))
         }
     }
 
-    /** Prepares a turn (waiting for the game) and describes it with its options. */
-    private suspend fun currentState(): String {
-        val current = running { session.prepare() }
-        turn = current
-        val request = session.request(current, generative = true)
-        val state = buildJsonObject {
-            request.state.forEach { (key, value) -> put(key, value) }
-            put("mode", session.settings().mode.label)
-            put("options", buildJsonArray {
-                current.actions.forEach { action ->
-                    add(buildJsonObject {
-                        put("id", action.id)
-                        put("description", action.description)
-                    })
-                }
-            })
-        }
-        return json.encodeToString(JsonObject.serializer(), state)
-    }
-
-    /**
-     * Runs [block] with the game running, then freezes it again while the agent thinks (when
-     * "pause while thinking" is on).
-     */
+    /** Runs [block] with the free run allowed, then freezes the game again while the agent thinks (if enabled). */
     private suspend fun <T> running(block: suspend () -> T): T {
-        if (!emulator.status.value.running) emulator.resume()
+        host.resume()
         try {
             return block()
         } finally {
-            if (session.settings().pauseWhileThinking) emulator.pause()
+            if (pauseWhileThinking()) host.pause()
         }
     }
 
+    private fun JsonObject.encode() = json.encodeToString(JsonObject.serializer(), this)
     private fun text(value: String) = CallToolResult(content = listOf(TextContent(value)))
     private fun error(message: String) = CallToolResult(content = listOf(TextContent(message)), isError = true)
 
+    private fun png(frame: Frame): String {
+        val image = BufferedImage(frame.width, frame.height, BufferedImage.TYPE_INT_RGB)
+        image.setRGB(0, 0, frame.width, frame.height, frame.pixels, 0, frame.width)
+        val bytes = ByteArrayOutputStream().also { ImageIO.write(image, "png", it) }.toByteArray()
+        return Base64.getEncoder().encodeToString(bytes)
+    }
+
     private companion object {
         val json = Json { prettyPrint = false }
+        const val MAX_THEN = 8
 
         const val INSTRUCTIONS =
-            "You are playing Pokémon HeartGold on a Nintendo DS through this server. Call get_state to see the screen " +
-                "(read from the game's memory: map around you as text, dialogue, menus, battle, team), your memory and the " +
-                "options available; then call act with the id of an option. Options are either single button presses " +
-                "(like holding the controller) or, in assisted mode, actions carried out for you (walking to a place, talking " +
-                "to someone, choosing a menu option). Take notes with `note` to remember your goals. Play to progress through the story."
+            "You are playing a Pokémon game on a Nintendo DS through this server. Call get_state to see the screen (decoded from " +
+                "the game's memory: menus with their entries, dialogues, battle, team, a text map), what happened since your last " +
+                "call, and the actions you can take now. Then call act with one typed action. Menus are navigated and checked " +
+                "for you; when something can't be done you get an explicit error. Things are named by stable ids (mon:…, move:…, " +
+                "item:…, option:…). Raw buttons (press) are always there as a last resort. Play to progress through the story."
     }
 }

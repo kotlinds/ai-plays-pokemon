@@ -5,9 +5,8 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import me.nathanfallet.aiplayspokemon.agent.actions.AgentAction
-import me.nathanfallet.aiplayspokemon.game.Observation
-import me.nathanfallet.aiplayspokemon.game.Tile
+import dev.kotlinds.pokemonclient.Observation
+import dev.kotlinds.pokemonclient.Tile
 
 /**
  * What the player remembers between two decisions.
@@ -48,9 +47,9 @@ class AgentMemory(
     var decisionsWithoutProgress: Int = 0
         private set
 
-    fun record(action: AgentAction, before: Observation, after: Observation, thought: String? = null, problem: String? = null) {
+    fun record(action: String, before: Observation, after: Observation, thought: String? = null, problem: String? = null) {
         val situation = situationKey(before)
-        val count = repeats.merge("$situation|${action.id}", 1, Int::plus)!!
+        val count = repeats.merge("$situation|$action", 1, Int::plus)!!
         val changes = buildList {
             addAll(changes(before, after))
             problem?.let { add("the action stopped: $it") }
@@ -92,7 +91,7 @@ class AgentMemory(
     fun describe(includeExploredMap: Boolean, current: Observation?): JsonObject = buildJsonObject {
         put("recent_actions", JsonArray(actions.map { step ->
             buildJsonObject {
-                put("action", step.action.id)
+                put("action", step.action)
                 if (step.times > 1) put("times_in_a_row", step.times)
                 if (step.timesInSituation > 1) put("times_done_in_this_exact_situation", step.timesInSituation)
                 put("what_changed", step.changes)
@@ -193,7 +192,7 @@ class AgentMemory(
         while (size > max) removeFirst()
     }
 
-    private class Step(val action: AgentAction, val changes: String, val timesInSituation: Int, var times: Int = 1)
+    private class Step(val action: String, val changes: String, val timesInSituation: Int, var times: Int = 1)
     private class Place(val name: String, var decisions: Int = 1)
 
     private companion object {

@@ -12,6 +12,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.keepScreenOn
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
@@ -20,7 +21,7 @@ import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import me.nathanfallet.aiplayspokemon.emulator.Emulator
-import me.nathanfallet.aiplayspokemon.emulator.Frame
+import dev.kotlinds.pokemonclient.console.Frame
 import org.jetbrains.skia.ColorAlphaType
 import org.jetbrains.skia.Image
 import org.jetbrains.skia.ImageInfo
@@ -34,7 +35,9 @@ import java.nio.ByteOrder
 @Composable
 fun EmulatorScreen(emulator: Emulator, modifier: Modifier = Modifier) {
     val frame by emulator.frames.collectAsState()
-    Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
+    // While the game is on screen the computer must not go to sleep: a sleeping Mac froze a whole night of
+    // agent play (the game is often paused between agent calls, so this doesn't depend on it running).
+    Box(modifier.keepScreenOn().background(Color.Black), contentAlignment = Alignment.Center) {
         val current = frame ?: return@Box
         val bitmap = remember(current) { current.toImageBitmap() }
         Image(

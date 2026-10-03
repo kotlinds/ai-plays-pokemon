@@ -9,7 +9,8 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import me.nathanfallet.aiplayspokemon.config.AppConfig
 import me.nathanfallet.aiplayspokemon.emulator.libretro.LibretroCoreSpec
-import me.nathanfallet.aiplayspokemon.emulator.libretro.LibretroEmulator
+import kotlinx.coroutines.runBlocking
+import me.nathanfallet.aiplayspokemon.emulator.ConsoleHost
 import me.nathanfallet.aiplayspokemon.game.PokemonGames
 import me.nathanfallet.aiplayspokemon.ui.App
 import me.nathanfallet.aiplayspokemon.ui.AppController
@@ -30,13 +31,16 @@ fun main(args: Array<String>) {
     val config = AppConfig.load(args)
     val rom = config.romPath ?: chooseRom()?.also(config::saveRomPath) ?: return
 
-    val emulator = LibretroEmulator(LibretroCoreSpec.forRom(rom), rom, config.dataDirectory)
+    val emulator = ConsoleHost(LibretroCoreSpec.forRom(rom, config.emulatorCore), rom, config.dataDirectory)
     val game = PokemonGames.detect(rom)
+    if (config.startMuted) emulator.setMuted(true)
+    config.startState?.let { slot -> runBlocking { check(emulator.loadState(slot)) { "No save state in slot $slot" } } }
     emulator.start()
 
     application {
         val scope = rememberCoroutineScope()
         val controller = remember { AppController(emulator, game, config, scope) }
+        val windowState = rememberWindowState(size = DpSize(1068.dp, 840.dp))
         Window(
             onCloseRequest = {
                 controller.player.value?.pause()
@@ -44,10 +48,10 @@ fun main(args: Array<String>) {
                 exitApplication()
             },
             title = "AI plays Pokémon",
-            state = rememberWindowState(size = DpSize(1040.dp, 840.dp)),
+            state = windowState,
             onKeyEvent = controller::onKeyEvent,
         ) {
-            App(controller)
+            App(controller, windowState)
         }
     }
 }

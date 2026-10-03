@@ -5,14 +5,13 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import me.nathanfallet.aiplayspokemon.agent.actions.PressButton
-import me.nathanfallet.aiplayspokemon.emulator.Button
-import me.nathanfallet.aiplayspokemon.game.Direction
-import me.nathanfallet.aiplayspokemon.game.GameMode
-import me.nathanfallet.aiplayspokemon.game.LocalMap
-import me.nathanfallet.aiplayspokemon.game.Location
-import me.nathanfallet.aiplayspokemon.game.Observation
-import me.nathanfallet.aiplayspokemon.game.Tile
+import dev.kotlinds.pokemonclient.console.Button
+import dev.kotlinds.pokemonclient.Direction
+import dev.kotlinds.pokemonclient.GameMode
+import dev.kotlinds.pokemonclient.LocalMap
+import dev.kotlinds.pokemonclient.Location
+import dev.kotlinds.pokemonclient.Observation
+import dev.kotlinds.pokemonclient.Tile
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -29,11 +28,11 @@ class AgentMemoryTest {
     @Test
     fun `describes what each action changed`() {
         val memory = AgentMemory()
-        memory.record(PressButton(Button.UP), at(5, 5), at(5, 4))
-        memory.record(PressButton(Button.LEFT), at(5, 4), at(5, 4, facing = Direction.WEST))
-        memory.record(PressButton(Button.LEFT), at(5, 4, facing = Direction.WEST), at(5, 4, facing = Direction.WEST))
-        memory.record(PressButton(Button.UP), at(5, 4), at(3, 9, map = 2))
-        memory.record(PressButton(Button.A), at(3, 9, map = 2), at(3, 9, mode = GameMode.DIALOGUE, map = 2, facts = mapOf("dialogue" to "Hello!")))
+        memory.record("press(up)", at(5, 5), at(5, 4))
+        memory.record("press(left)", at(5, 4), at(5, 4, facing = Direction.WEST))
+        memory.record("press(left)", at(5, 4, facing = Direction.WEST), at(5, 4, facing = Direction.WEST))
+        memory.record("press(up)", at(5, 4), at(3, 9, map = 2))
+        memory.record("press(a)", at(3, 9, map = 2), at(3, 9, mode = GameMode.DIALOGUE, map = 2, facts = mapOf("dialogue" to "Hello!")))
 
         assertEquals(
             listOf(
@@ -50,7 +49,7 @@ class AgentMemoryTest {
     @Test
     fun `counts repeats in a row and in the same situation`() {
         val memory = AgentMemory()
-        repeat(4) { memory.record(PressButton(Button.A), at(5, 5), at(5, 5)) }
+        repeat(4) { memory.record("press(a)", at(5, 5), at(5, 5)) }
         val action = memory.actions().single()
         assertEquals(4, action["times_in_a_row"]!!.jsonPrimitive.int)
         // The first press "discovers" the tile the player stands on; the next three bring nothing new.
@@ -60,8 +59,8 @@ class AgentMemoryTest {
     @Test
     fun `progress resets the stagnation counter`() {
         val memory = AgentMemory()
-        memory.record(PressButton(Button.A), at(5, 5), at(5, 5))
-        memory.record(PressButton(Button.UP), at(5, 5), at(5, 4))
+        memory.record("press(a)", at(5, 5), at(5, 5))
+        memory.record("press(up)", at(5, 5), at(5, 4))
         assertEquals(0, memory.decisionsWithoutProgress)
     }
 
