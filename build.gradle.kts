@@ -24,6 +24,14 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.material3)
     implementation(libs.kotlinx.coroutines.swing)
+    // `-Puniversal`: also ship the UI natives of every desktop platform, so the uber jar
+    // (`./gradlew packageUberJarForCurrentOS -Puniversal`) runs on macOS, Linux and Windows alike.
+    if (providers.gradleProperty("universal").isPresent) {
+        runtimeOnly(compose.desktop.macos_arm64)
+        runtimeOnly(compose.desktop.macos_x64)
+        runtimeOnly(compose.desktop.linux_x64)
+        runtimeOnly(compose.desktop.windows_x64)
+    }
 
     // Decision models: Jev (JSON over the JDK HTTP client) and LLMs through Koog
     implementation(libs.kotlinx.serialization.json)

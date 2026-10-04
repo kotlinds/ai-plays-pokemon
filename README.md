@@ -40,6 +40,38 @@ Without an argument, the app asks for the ROM with a file picker and remembers i
 DeSmuME libretro core for your platform from the libretro buildbot (melonDS is available too; both are pinned and
 checked by SHA-256). In-game saves are converted between the cores' formats automatically.
 
+**On a new computer** (macOS, Linux or Windows, x86-64 or Apple Silicon), either:
+
+- **from source**: JDK 21, `git clone`, then `./gradlew run`. Gradle downloads the libraries from Maven Central
+  (libretro-kmp included);
+- **from a prebuilt jar**: Java 21 only, then `java -jar "AI Plays Pokemon-….jar"`. To build one jar that runs on
+  every platform: `./gradlew packageUberJarForCurrentOS -Puniversal`, written to `build/compose/jars/` (the name
+  carries the platform it was built on, but `-Puniversal` adds the other platforms' natives).
+
+Bring the ROM yourself. Its file name names the save: `heartgold-us.nds` → `heartgold-us.sav`.
+
+The emulator core is the only other file. It is downloaded on first launch from the libretro buildbot. Or copy it
+yourself, built for the target platform, into the data directory's `cores/` folder. The data directory is
+`~/.ai-plays-pokemon`, i.e. `%USERPROFILE%\.ai-plays-pokemon` on Windows.
+
+| Platform | Core file (DeSmuME) | Buildbot folder |
+|---|---|---|
+| macOS (Apple Silicon / Intel) | `desmume_libretro.dylib` | `apple/osx/arm64` / `apple/osx/x86_64` |
+| Linux x86-64 | `desmume_libretro.so` | `linux/x86_64` |
+| Windows x86-64 | `desmume_libretro.dll` | `windows/x86_64` |
+
+The URL is `https://buildbot.libretro.com/nightly/<folder>/latest/desmume_libretro.<ext>.zip`. No BIOS or firmware
+is needed.
+
+The core is checked against a pinned SHA-256 where one is pinned. Today that is only macOS Apple Silicon, the build
+we tested; other platforms take whatever build is "latest". If the buildbot has moved on, the app stops with
+"Unexpected … build". Then either:
+- copy the core from a computer where it works;
+- or test the new build and update the hash in `LibretroCoreSpec`.
+
+To carry a game over, copy `saves/<rom name>.sav` from the data directory. It is converted for the core
+automatically.
+
 In the window: the game on the left; on the right, choose the AI (Jev, or an LLM provider + model id), paste its API key
 if needed, pick the mode and options, and **▶ Let … play** starts the autonomous loop. You can see exactly what the AI
 receives ("What the AI sees" → Show JSON), and for each decision Jev's probability for every option, or the LLM's
