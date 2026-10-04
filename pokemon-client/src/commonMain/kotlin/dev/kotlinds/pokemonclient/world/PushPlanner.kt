@@ -41,7 +41,23 @@ class PushPlanner(private val area: Area, private val overlay: Overlay, private 
         movableTemplates.any { it.iceBlock || FieldMoveKind.STRENGTH in options.fieldMoves }
 
     /** The cheapest route from [start] to a node satisfying [isGoal], pushing objects on the way; null when none. */
-    fun route(start: Node, options: RouteOptions, goalTiles: Set<Pair<Int, Int>> = emptySet(), isGoal: (Node) -> Boolean): Route? {
+    fun route(start: Node, options: RouteOptions, goalTiles: Set<Pair<Int, Int>> = emptySet(), isGoal: (Node) -> Boolean): Route? =
+        search(start, options, goalTiles) { isGoal(it.node) }
+
+    /**
+     * The cheapest pushes from [start] that drop the boulder at [boulder] through its own hole ([LiveObject.fallsInto]),
+     * every other object staying where it is (pushing another one elsewhere could close the puzzle); null when it isn't
+     * a boulder with a hole, Strength isn't in [RouteOptions.fieldMoves], or no plan exists within the bound.
+     */
+    fun pushInto(start: Node, options: RouteOptions, boulder: Pair<Int, Int>): Route? {
+        val chosen = movableTemplates.firstOrNull { it.x == boulder.first && it.y == boulder.second && it.clearedBy == FieldMoveKind.STRENGTH && it.fallsInto != null }
+            ?: return null
+        // The others become plain obstacles: only the chosen boulder moves.
+        val fixed = overlay.objects.map { o -> if (o === chosen || (o.clearedBy != FieldMoveKind.STRENGTH && !o.iceBlock)) o else o.copy(clearedBy = null, iceBlock = false) }
+        return PushPlanner(area, overlay.copy(objects = fixed), maxStates).search(start, options, emptySet()) { state -> state.movables.single().gone }
+    }
+
+    private fun search(start: Node, options: RouteOptions, goalTiles: Set<Pair<Int, Int>>, isDone: (State) -> Boolean): Route? {
         val initial = State(start, movableTemplates.map { Movable(it.x, it.y, boulder = it.clearedBy == FieldMoveKind.STRENGTH, fallsInto = it.fallsInto) })
         val dist = HashMap<State, Int>()
         val previous = HashMap<State, Pair<State, Edge>>()
@@ -52,7 +68,7 @@ class PushPlanner(private val area: Area, private val overlay: Overlay, private 
         while (queue.isNotEmpty()) {
             val (state, d) = queue.poll()
             if (d > (dist[state] ?: Int.MAX_VALUE)) continue
-            if (state != initial && isGoal(state.node)) return Route(path(previous, initial, state), emptyList())
+            if (state != initial && isDone(state)) return Route(path(previous, initial, state), emptyList())
             if (++expanded > maxStates) return null
             for ((edge, next) in moves(state, options, goalTiles)) {
                 val cost = d + edge.cost
@@ -160,11 +176,10 @@ class PushPlanner(private val area: Area, private val overlay: Overlay, private 
         val target = area.tile(tx, ty) ?: return null
         val falls = state.movables[index].fallsInto == (tx to ty)
         if (!falls && !boulderCanEnter(target, tx, ty, state)) return null
-        val here = area.tile(node.x, node.y) ?: return null
-        val level = levelOf(boulderTile, here.heights.getOrNull(node.level))
+        if (area.tile(node.x, node.y) == null) return null
         val moved = state.movables.mapIndexed { i, m -> if (i == index) m.copy(x = tx, y = ty, gone = falls) else m }
-        val to = Node(bx, by, level)
-        return PushEdge(to, dir, bx to by, tx to ty, needsStrength = true) to State(to, moved)
+        // The player stays where they are (the boulder slides away alone): following it is a plain step afterwards.
+        return PushEdge(node, dir, bx to by, tx to ty, needsStrength = true) to State(node, moved)
     }
 
     /**
@@ -179,11 +194,6 @@ class PushPlanner(private val area: Area, private val overlay: Overlay, private 
         }
         if (state.movables.any { it.x == x && it.y == y && !it.gone }) return false
         return others.none { !it.isFollower && it.x == x && it.y == y }
-    }
-
-    private fun levelOf(tile: TileInfo, fromHeight: Int?): Int {
-        if (tile.heights.size <= 1 || fromHeight == null) return 0
-        return tile.heights.indices.minBy { kotlin.math.abs(tile.heights[it] - fromHeight) }
     }
 
     companion object {

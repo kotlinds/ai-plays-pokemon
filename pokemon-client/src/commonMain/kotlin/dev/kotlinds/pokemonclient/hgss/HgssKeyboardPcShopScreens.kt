@@ -545,16 +545,24 @@ internal object HgssMart {
                 max = mem.u16(mart + K.MART_MAX_QUANTITY),
             )
             K.MART_STATE_YES_NO -> yesNo(mem, fs, mart)
-            else -> when (printerWaiting(mem, mart)) {
-                true -> Screen.PressToContinue(ContinueReason.MESSAGE, message(mem, mart))
-                false -> Screen.Animation(AnimationKind.TRANSITION)
-                // Printer done: states 13-15 wait for A / B / touch (ov03_02257F24 / FF8 / 8078), the others run alone.
-                null -> if (st in K.MART_STATES_MESSAGE) Screen.PressToContinue(ContinueReason.MESSAGE, message(mem, mart)) else Screen.Animation(AnimationKind.TRANSITION)
+            else -> {
+                val reason = if (st == K.MART_STATE_BONUS) ContinueReason.SHOP_BONUS else ContinueReason.MESSAGE
+                when (printerWaiting(mem, mart)) {
+                    true -> Screen.PressToContinue(reason, message(mem, mart))
+                    false -> Screen.Animation(AnimationKind.TRANSITION)
+                    // Printer done: states 13-15 wait for A / B / touch (ov03_02257F24 / FF8 / 8078), the others run alone.
+                    null -> if (st in K.MART_STATES_MESSAGE) Screen.PressToContinue(reason, message(mem, mart)) else Screen.Animation(AnimationKind.TRANSITION)
+                }
             }
         }
     }
 
     /** The clerk's last message (`MartData.string`, expanded before printing). */
+    /**
+     * The clerk's message when `MartData.string` still holds it. The purchase and bonus lines aren't readable there
+     * (the string is empty and the printer gone while they wait for A): their content reaches the agent as events
+     * (items received, `ShopBonus`) and as `buy`'s result.
+     */
     private fun message(mem: HgssMemory, mart: Long): String? = mem.gameString(mem.ptr(mart + K.MART_STRING))?.takeIf { it.isNotBlank() }
 
     /**

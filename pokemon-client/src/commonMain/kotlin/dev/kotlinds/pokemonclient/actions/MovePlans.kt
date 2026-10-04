@@ -22,6 +22,7 @@ import dev.kotlinds.pokemonclient.world.PushEdge
 import dev.kotlinds.pokemonclient.world.PushPlanner
 import dev.kotlinds.pokemonclient.world.Route
 import dev.kotlinds.pokemonclient.world.LiveObject
+import dev.kotlinds.pokemonclient.world.NeedsMechanism
 import dev.kotlinds.pokemonclient.world.Node
 import dev.kotlinds.pokemonclient.world.Overlay
 import dev.kotlinds.pokemonclient.world.Pathfinder
@@ -112,11 +113,26 @@ internal object MovePlans {
             is WalkSegments.Result.Elsewhere -> ActionOutcome.Done("moved to ${walked.field.x},${walked.field.y} (not a straight walk: slid, pushed, or another map)")
             is WalkSegments.Result.Refused -> {
                 val done = kotlin.math.abs(walked.from.x - start.x) + kotlin.math.abs(walked.from.y - start.y)
+                // Walking into a boulder (Strength used) pushes it while the player stays: that's what the step did.
+                pushedAhead(context, start, walked.from.x + d.dx, walked.from.y + d.dy)?.let { return@ActionPlan ActionOutcome.Done(it) }
                 ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.NO_PATH,
                     "blocked after $done tile(s) at ${walked.from.x},${walked.from.y}: can't go ${d.name.lowercase()} from there"))
             }
             is WalkSegments.Result.Stopped -> ActionOutcome.Failed(ActionError.Interrupted(cause(walked.state), "${walked.walked} tile(s)"))
         }
+    }
+
+    /**
+     * When the object that stood at ([x], [y]) before [start] (a boulder) has moved since: what the step did to it
+     * (the game pushed it, the player staying behind), for the agent. Null when nothing moved there.
+     */
+    private fun pushedAhead(context: PlanContext, start: FieldState, x: Int, y: Int): String? {
+        val before = start.objects.firstOrNull { it.x == x && it.y == y && it.obstacle != null } ?: return null
+        val now = context.navigator.settle().field ?: return null
+        val after = now.objects.firstOrNull { it.id == before.id }
+        if (after != null && after.x == x && after.y == y) return null
+        return "pushed ${before.id} from $x,$y " + (after?.let { "to ${it.x},${it.y}" } ?: "(it is gone: fell through a hole)") +
+            "; you stay at ${now.x},${now.y}"
     }
 
     /** Most tiles one [GameAction.Step] walks. */
@@ -202,9 +218,11 @@ internal object MovePlans {
             "item" -> field.objects.firstOrNull { it.kind == FieldObjectKind.ITEM_BALL && it.id == "person:$id" }?.let { Target(target, it.x, it.y, adjacent = true) }
             "warp" -> area.warps.firstOrNull { it.zone == field.mapId && it.id == number }?.let { Target(target, it.x, it.y, warp = true, exit = it.exitDirection) }
             "hole" -> area.triggerWarps.firstOrNull { it.zone == field.mapId && it.trigger == number }?.let { Target(target, it.x, it.y, warp = true) }
-            // `sign:N` also reaches a hidden item (older ids); `hidden_item:N` only items not picked up yet.
-            "sign" -> area.signs.firstOrNull { it.zone == field.mapId && it.id == number }?.let { Target(target, it.x, it.y, adjacent = true) }
-            "hidden_item" -> area.signs.firstOrNull { it.zone == field.mapId && it.id == number && it.kind == SignKind.HIDDEN_ITEM && target !in field.pickedUp }
+            // `sign:N` also reaches a hidden item (older ids); `hidden_item:N` only items not picked up yet. Hidden items
+            // are walkthrough knowledge: unknown targets unless the application reveals them ([ActionSettings.revealHidden]).
+            "sign" -> area.signs.firstOrNull { it.zone == field.mapId && it.id == number && (it.kind == SignKind.SIGN || context.settings.revealHidden) }
+                ?.let { Target(target, it.x, it.y, adjacent = true) }
+            "hidden_item" -> area.signs.firstOrNull { it.zone == field.mapId && it.id == number && it.kind == SignKind.HIDDEN_ITEM && target !in field.pickedUp && context.settings.revealHidden }
                 ?.let { Target(target, it.x, it.y, adjacent = true) }
             else -> null
         }
@@ -227,7 +245,8 @@ internal object MovePlans {
                 area.warps.filter { it.zone == field.mapId }.forEach { add("warp:${it.id}") }
                 area.triggerWarps.filter { it.zone == field.mapId }.forEach { add("hole:${it.trigger}") }
                 area.signs.filter { it.zone == field.mapId }.forEach { s ->
-                    if (s.kind == SignKind.SIGN) add("sign:${s.id}") else if ("hidden_item:${s.id}" !in field.pickedUp) add("hidden_item:${s.id}")
+                    if (s.kind == SignKind.SIGN) add("sign:${s.id}")
+                    else if ("hidden_item:${s.id}" !in field.pickedUp && context.settings.revealHidden) add("hidden_item:${s.id}")
                 }
             }
             addAll(extra)
@@ -299,12 +318,18 @@ internal object MovePlans {
             // A tile target may be entered whatever it is (a warp, a scene trigger); targets reached with A never are.
             val enterable = if (target.adjacent) emptySet() else goalTiles
             // Moving platforms (Blackthorn Gym): plan the rides; a plain route would never step on a trigger knowingly.
-            val ridden = field.puzzle?.mechanics?.let { PlatformPlanner(area, overlay(context, field, refused), it).route(start, routeOptions, enterable, isGoal) }
+            // Movement puzzles left to the agent ([ActionSettings.solvePuzzles] off): only walk, and say what to operate.
+            val solve = context.settings.solvePuzzles
+            val ridden = if (!solve) null else field.puzzle?.mechanics?.let { PlatformPlanner(area, overlay(context, field, refused), it).route(start, routeOptions, enterable, isGoal) }
             val route = ridden ?: when (val result = pathfinder.route(start, routeOptions, enterable, isGoal)) {
                 is Pathfinder.Result.Found -> result.route
                 // No plain route: maybe one moving boulders / ice blocks out of the way.
-                is Pathfinder.Result.Failed -> pushRoute(area, overlay(context, field, refused), start, routeOptions, enterable, isGoal)
-                    ?: return Walk.NoRoute(result.failure, "no way to ${target.id} from ${field.x},${field.y}", access)
+                is Pathfinder.Result.Failed -> (if (solve) pushRoute(area, overlay(context, field, refused), start, routeOptions, enterable, isGoal) else null)
+                    ?: return Walk.NoRoute(
+                        (if (solve) null else PuzzleSolving.diagnose(area, field, overlay(context, field, refused, solve = true), start, routeOptions, enterable, isGoal))
+                            ?: result.failure,
+                        "no way to ${target.id} from ${field.x},${field.y}" + if (solve) "" else " by walking only", access,
+                    )
             }
             avoidanceNotes(route, options).forEach { if (it !in notes) notes += it }
             var from = start
@@ -325,6 +350,10 @@ internal object MovePlans {
                         }
                         is WalkSegments.Result.Elsewhere -> {
                             if (changedArea(context, walked.field, field)) return Walk.Arrived(walked.field)
+                            // The destination was a mechanism (a platform trigger) that carried the player away: done.
+                            if (!target.adjacent && segment.tiles.any { (it.x to it.y) in goalTiles && PuzzleSolving.isMechanism(field, it.x, it.y) }) {
+                                return Walk.Arrived(walked.field)
+                            }
                             return@repeat
                         }
                         is WalkSegments.Result.Refused -> {
@@ -379,7 +408,9 @@ internal object MovePlans {
                 val slide = (edge as? Edge.Slide)?.tiles?.size ?: (edge as? PushEdge)?.takeIf { !it.needsStrength }?.tiles?.size ?: 0
                 val intoGoalWarp = target.warp == true && (edge.to.x to edge.to.y) in goalTiles
                 val long = edge is Edge.Jump || intoWarp || (edge as? PushEdge)?.needsStrength == true
-                when (val step = stepOnce(context, edge.direction, edge.to, options, long = long, slide = slide)) {
+                val step = if (edge is PushEdge && edge.needsStrength) FieldMoveWalk.push(context, edge, options)
+                else stepOnce(context, edge.direction, edge.to, options, long = long, slide = slide)
+                when (step) {
                     is StepResult.Moved -> {
                         steps++
                         if (edge is PushEdge && step.field.x == edge.to.x && step.field.y == edge.to.y) {
@@ -387,6 +418,9 @@ internal object MovePlans {
                         }
                         // Entering a door / warp changes the map: the walk is over.
                         if (step.field.mapId != field.mapId) return Walk.Arrived(step.field)
+                        // The destination was a mechanism (a platform trigger) that carried the player away: done.
+                        if ((step.field.x != edge.to.x || step.field.y != edge.to.y) && !target.adjacent && (edge.to.x to edge.to.y) in goalTiles &&
+                            PuzzleSolving.isMechanism(field, edge.to.x, edge.to.y)) return Walk.Arrived(step.field)
                         // Slid, pushed or overshot elsewhere than planned: compute the route again from where the
                         // player really is.
                         if (step.field.x != edge.to.x || step.field.y != edge.to.y) return@repeat
@@ -461,7 +495,16 @@ internal object MovePlans {
         }.toSet()
     }
 
-    internal fun overlay(context: PlanContext, field: FieldState, refused: Set<Pair<Node, Direction>>): Overlay {
+    /**
+     * The live overlay of [field]'s map; unless [solve] (by default [ActionSettings.solvePuzzles]), one where routes
+     * only walk ([PuzzleSolving.walkOnly]: no lift, no platform trigger, no ice block pushed).
+     */
+    internal fun overlay(context: PlanContext, field: FieldState, refused: Set<Pair<Node, Direction>>, solve: Boolean = context.settings.solvePuzzles): Overlay {
+        val live = liveOverlay(context, field, refused)
+        return if (solve) live else PuzzleSolving.walkOnly(live, field)
+    }
+
+    private fun liveOverlay(context: PlanContext, field: FieldState, refused: Set<Pair<Node, Direction>>): Overlay {
         val templates = context.game.world?.areaOf(field.mapId)?.people.orEmpty().filter { it.zone == field.mapId }
         return Overlay(
             objects = field.objects.map { o ->
@@ -654,7 +697,7 @@ internal object MovePlans {
 
     internal fun Walk.toOutcome(context: PlanContext, done: (FieldState) -> String): ActionOutcome = when (this) {
         is Walk.Arrived -> ActionOutcome.Done(done(field))
-        is Walk.NoRoute -> ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.NO_PATH, detail,
+        is Walk.NoRoute -> ActionOutcome.Failed(ActionError.Unavailable(if (failure is NeedsMechanism) UnavailableReason.PUZZLE_LEFT_TO_AGENT else UnavailableReason.NO_PATH, detail,
             (failure as? RouteFailure.NeedsFieldMove)?.let { FieldMoveWalk.hint(it, access[it.move]) } ?: failure.hint(context.state().field)))
         is Walk.Stuck -> ActionOutcome.Failed(ActionError.Timeout(detail))
         is Walk.Failed -> ActionOutcome.Failed(error)
@@ -697,6 +740,7 @@ internal object MovePlans {
             "a closed shutter${barrier?.let { " (${it.id})" } ?: ""} blocks the only way at $x,$y: flip the switches of this map's puzzle to open it"
         }
         is RouteFailure.NeedsFieldMove -> FieldMoveWalk.hint(this, null)
+        is NeedsMechanism -> PuzzleSolving.hint(this, field)
     }
 
     private fun cause(state: GameState): InterruptionCause = when {

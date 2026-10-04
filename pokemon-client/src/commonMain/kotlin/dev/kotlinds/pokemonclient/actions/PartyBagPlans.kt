@@ -8,6 +8,7 @@ import dev.kotlinds.pokemonclient.state.Entry
 import dev.kotlinds.pokemonclient.state.GameState
 import dev.kotlinds.pokemonclient.state.MenuKind
 import dev.kotlinds.pokemonclient.state.MonId
+import dev.kotlinds.pokemonclient.state.MovementMode
 import dev.kotlinds.pokemonclient.state.PartyPurpose
 import dev.kotlinds.pokemonclient.state.Screen
 
@@ -219,13 +220,52 @@ internal object PartyBagPlans {
         }
     }
 
-    /** Uses a key item (Bicycle, Itemfinder, a rod...): see [activateKeyItem]. */
+    /**
+     * Uses a key item (Bicycle, Itemfinder, a rod...): see [activateKeyItem]. The Bicycle is checked on the player's
+     * movement: where the map forbids cycling (indoors...) or while surfing it's refused without pressing anything,
+     * and when the game still says no ("There's a time and place for everything!", mud, tall grass...) the movement
+     * hasn't changed: the message is closed and the refusal is a typed error, never Done.
+     */
     val useKeyItem = ActionPlan<GameAction.UseKeyItem> { action, context ->
+        val before = context.navigator.settle()
+        val bicycle = isBicycle(context, before, action.item)
+        val field = before.field
+        if (bicycle && field != null && field.movement != MovementMode.BIKE) {
+            val why = when {
+                field.bikeAllowed == false -> "cycling isn't allowed on ${field.mapName}"
+                field.movement == MovementMode.SURF -> "the player is surfing"
+                else -> null
+            }
+            if (why != null) return@ActionPlan ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.CANNOT_USE_HERE, "${action.item.raw} can't be used here: $why", "walk, or ride outdoors"))
+        }
         activateKeyItem(context, action.item).then { how ->
-            val state = context.navigator.settle()
+            var state = context.navigator.settle()
+            if (bicycle && field != null) {
+                // Mounting or dismounting changes the movement; the game's refusal is only a message.
+                var polls = 0
+                while (state.field?.movement == field.movement && state.screen !is Screen.Dialogue && polls++ < BIKE_WAITS) {
+                    context.scope.step(BIKE_POLL_FRAMES)
+                    state = context.navigator.settle()
+                }
+                if (state.field?.movement == field.movement) {
+                    closeToOverworld(context)
+                    return@then ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.CANNOT_USE_HERE, "the game refused ${action.item.raw} here (used $how)", "walk, or ride where cycling is allowed"))
+                }
+            }
             ActionOutcome.Done("used $how, now: ${state.screen.kind}" + (state.field?.let { ", ${it.movement.name.lowercase()}" } ?: ""))
         }
     }
+
+    /** True when [item] is the game's bicycle ([dev.kotlinds.pokemonclient.PokemonGame.bicycleItem]). */
+    private fun isBicycle(context: PlanContext, state: GameState, item: ItemRef): Boolean {
+        val id = context.game.bicycleItem ?: return false
+        val name = state.bag.orEmpty().flatMap { it.items }.firstOrNull { it.item.id.value == id }?.item?.name ?: ""
+        return matchesRef(item.raw, "item", id, name)
+    }
+
+    /** Polls of [BIKE_POLL_FRAMES] frames to wait for the bicycle's effect (the mount, or the refusal message). */
+    private const val BIKE_WAITS = 15
+    private const val BIKE_POLL_FRAMES = 4
 
     /**
      * Starts using a key item and returns as soon as the game reacts (without waiting for what follows: a rod's

@@ -267,6 +267,14 @@ sealed interface GameAction {
     data class Note(val text: String) : GameAction {
         override val key get() = "note"
     }
+
+    /**
+     * Pushes the Strength boulder [boulder] (`person:N`) into its own hole (Ice Path B1F: it drops to the floor below),
+     * planning the pushes; the agent's explicit act, so done even when movement puzzles are left to the agent.
+     */
+    data class Push(val boulder: String) : GameAction {
+        override val key get() = "push($boulder)"
+    }
 }
 
 /** One line of a [GameAction.Buy]: an item and how many (1-99). */

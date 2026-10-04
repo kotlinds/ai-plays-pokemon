@@ -59,13 +59,15 @@ import kotlin.io.path.writeBytes
  * - `shot:<name>`: PNG of both screens; `state`: prints the decoded GameState; `screen`: prints the screen only;
  *   `puzzle`: prints the position and the map puzzle (switches, shutters, teleports);
  * - `act:<json>`: executes a typed action through the action registry (e.g. `act:{"type":"choose","entry":"option:6"}`);
- *   `actions`: lists the actions available now;
+ *   `actions`: lists the actions available now; `solve:on|off`: whether walks solve movement puzzles by themselves
+ *   (ActionSettings.solvePuzzles); `reveal:on|off`: whether actions may use hidden items (ActionSettings.revealHidden);
  * - `log`: prints the events recorded since the previous `log` (texts shown, screen changes, level ups...);
  * - `ram:<name>`: writes the full main RAM; `fixture:<name>`: writes a sparse RAM fixture (only the bytes the
  *   decoders read) for unit tests.
  * - `watch:on|off`: after every frame, prints the raw party reading and what the state shows when they change
  *   (`BENCH_WATCH_HEX=1` adds the raw bytes; `BENCH_WATCH_FIXTURE=<prefix>` [+ `BENCH_WATCH_FIXTURE_SLOT=n`] saves
- *   fixtures of frames where a party slot is mid-rewrite); `rawmon`: raw party bytes; `box:<n>`: PC box n;
+ *   fixtures of frames where a party slot is mid-rewrite; `BENCH_WATCH_FRAMES=<from>-<to>[:prefix]` saves a fixture of
+ *   every frame in that range); `rawmon`: raw party bytes; `box:<n>`: PC box n;
  * - `pace:<n>`: walks one tile left then right, n times, until the phone rings (or the overworld is left);
  * - `record:on|off`: runs the app's Recorder on every frame; `events`: prints its events (screen changes left out).
  * - `msgtrace:<n>` / `mashtrace:<n>`: steps n frames (mashing A one frame in four) printing every change of the battle
@@ -122,6 +124,9 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
         recorder.onFrame(console.frame) { scope.memory() }
     })
     private val registry = ActionRegistry.of()
+
+    /** What `act` lets the recipes do by themselves (`solve:on|off`, `reveal:on|off`), like the app's settings. */
+    private var settings = dev.kotlinds.pokemonclient.actions.ActionSettings()
 
     /** Walks back and forth (one tile left, one right) up to [times] times, until the phone rings or the overworld is left. */
     private fun pace(times: Int) {
@@ -237,7 +242,7 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
                     return
                 }
                 val startFrame = console.frame
-                val outcome = registry.execute(action, scope, game)
+                val outcome = registry.execute(action, scope, game, settings)
                 val actFrames = console.frame - startFrame
                 // Like the app (GameSession.SETTLE_FRAMES): the game settles after every action.
                 Navigator(scope, game).settle(maxFrames = 1800)
@@ -248,6 +253,8 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
                 recorder.log.since(logCursor).forEach { println("  $it") }
                 logCursor = recorder.log.lastSeq
             }
+            "solve" -> settings = settings.copy(solvePuzzles = arg != "off")
+            "reveal" -> settings = settings.copy(revealHidden = arg != "off")
             "actions" -> registry.available(game.state(scope.memory()), ActionMode.ASSISTED).forEach { println("  $it") }
             else -> error("unknown command $command")
         }
@@ -305,6 +312,11 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
         if (line != lastWatch) println("  [${console.frame}] $line")
         lastWatch = line
         saveTornFixture(memory)
+        // `BENCH_WATCH_FRAMES=<from>-<to>[:prefix]`: a fixture of every frame in that range (a short glitch to replay in a test).
+        System.getenv("BENCH_WATCH_FRAMES")?.let { spec ->
+            val (from, to) = spec.substringBefore(':').split('-').map { it.toLong() }
+            if (console.frame in from..to) fixture("${spec.substringAfter(':', "frame")}_f${console.frame}")
+        }
         if (System.getenv("BENCH_WATCH_HEX") == "1") {
             val bytes = HgssReader(memory, HgssVersion.HEARTGOLD_US).partyRaw().map { b -> b.joinToString("") { "%02x".format(it) } }
             bytes.forEachIndexed { i, h -> if (lastHex.getOrNull(i) != h) println("    hex $i: $h") }

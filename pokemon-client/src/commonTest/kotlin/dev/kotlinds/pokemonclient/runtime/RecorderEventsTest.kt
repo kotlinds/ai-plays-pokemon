@@ -7,6 +7,7 @@ import dev.kotlinds.pokemonclient.PokemonGame
 import dev.kotlinds.pokemonclient.state.Awaiting
 import dev.kotlinds.pokemonclient.state.BagItem
 import dev.kotlinds.pokemonclient.state.BagPocket
+import dev.kotlinds.pokemonclient.state.ContinueReason
 import dev.kotlinds.pokemonclient.state.ItemId
 import dev.kotlinds.pokemonclient.state.GameEvent
 import dev.kotlinds.pokemonclient.state.GameState
@@ -18,6 +19,7 @@ import dev.kotlinds.pokemonclient.state.SpeciesId
 import kotlinx.serialization.json.JsonObject
 import dev.kotlinds.pokemonclient.state.BattleState
 import dev.kotlinds.pokemonclient.state.BattleKind
+import dev.kotlinds.pokemonclient.state.TextSource
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -84,6 +86,26 @@ class RecorderEventsTest {
         assertEquals(emptyList(), record(states).filterIsInstance<GameEvent.ItemReceived>())
     }
 
+    /** A purchase at the Poké Mart: [pokeBalls] Poké Balls and [premier] Premier Balls, on [screen]. */
+    private fun mart(pokeBalls: Int, premier: Int, screen: Screen) = GameState(
+        0, screen, null, emptyList(),
+        listOf(BagPocket("balls", listOf(BagItem(Named(ItemId(4), "Poké Ball"), pokeBalls), BagItem(Named(ItemId(12), "Premier Ball"), premier)).filter { it.quantity > 0 })), null, null,
+    )
+
+    /** Live (mart.state, buy 10 Poké Balls): "Here you are!" with the balls, then the bonus message with the Premier Ball. */
+    @Test
+    fun thePremierBallGivenWithTenPokeBallsIsAShopBonus() {
+        val thanks = Screen.PressToContinue(ContinueReason.MESSAGE, "Here you are! Thank you!")
+        val bonus = Screen.PressToContinue(ContinueReason.SHOP_BONUS, "I'll throw in a Premier Ball as an added bonus.")
+        // As live: the balls just before the thanks, the Premier Ball when it's dismissed, its message printing ~45 frames.
+        val printing = Screen.Animation(dev.kotlinds.pokemonclient.state.AnimationKind.TRANSITION)
+        val states = listOf(mart(5, 0, printing), mart(15, 0, printing)) + List(6) { mart(15, 0, thanks) } +
+            List(44) { mart(15, 1, printing) } + List(20) { mart(15, 1, bonus) }
+        val events = record(states)
+        assertEquals(listOf("Poké Ball" to 10, "Premier Ball" to 1), events.filterIsInstance<GameEvent.ItemReceived>().map { it.item to it.quantity })
+        assertEquals(listOf(Triple("Premier Ball", 1, ItemId(12))), events.filterIsInstance<GameEvent.ShopBonus>().map { Triple(it.item, it.quantity, it.itemId) })
+    }
+
     @Test
     fun aLastingIncreaseIsRecordedOnce() {
         val states = listOf(bag(6)) + List(20) { bag(9) }
@@ -107,6 +129,16 @@ class RecorderEventsTest {
         // Out of battle, the same new Egg is obtained (the Day-Care, a gift).
         val field = List(SEED_POLLS + 1) { state(party, inBattle = false) } + state(party + egg, inBattle = false)
         assertEquals(1, record(field).filterIsInstance<GameEvent.PokemonObtained>().size)
+    }
+
+    @Test
+    fun anAppMessageWaitingForAIsRecordedOnceButNotAPanel() {
+        fun screen(s: Screen) = GameState(0, s, null, emptyList(), null, null, null)
+        val states = listOf(screen(Screen.Overworld(awaiting = Awaiting.INPUT))) +
+            List(3) { screen(Screen.PressToContinue(ContinueReason.MESSAGE, "Here you are! Thank you!")) } +
+            List(3) { screen(Screen.PressToContinue(ContinueReason.LEVEL_UP_STATS, "FEAROW Lv39: Attack 90 (+3)")) }
+        val texts = record(states).filterIsInstance<GameEvent.TextShown>()
+        assertEquals(listOf(TextSource.MENU to "Here you are! Thank you!"), texts.map { it.source to it.text })
     }
 
     @Test

@@ -28,8 +28,17 @@ object MapView {
     /**
      * Renders the [width] × [height] tiles around the player (the DS screen shows about 15 × 11). [zoneName] names the
      * map a warp leads to, when known; [world] gives the arrival tiles of warps (and the other zones' maps).
+     * [showHidden]: show the hidden items (never seen by the player: walkthrough knowledge, see [Sightings]).
      */
-    fun render(area: Area, field: FieldState, zoneName: (Int) -> String? = { null }, width: Int = 15, height: Int = 11, world: WorldSource? = null): JsonObject {
+    fun render(
+        area: Area,
+        field: FieldState,
+        zoneName: (Int) -> String? = { null },
+        width: Int = 15,
+        height: Int = 11,
+        world: WorldSource? = null,
+        showHidden: Boolean = true,
+    ): JsonObject {
         val left = field.x - width / 2
         val top = field.y - height / 2
         val warps = area.warps.filter { it.zone == field.mapId || area.zoneAt(it.x, it.y) == field.mapId }
@@ -38,7 +47,8 @@ object MapView {
         val holes = links.filter { it.kind == ZoneLink.Kind.HOLE }
         val connections = WorldLinks.connections(area, field.mapId)
         val signs = area.signs.filter { it.zone == field.mapId && it.kind == SignKind.SIGN }
-        val hiddenItems = area.signs.filter { it.zone == field.mapId && it.kind == SignKind.HIDDEN_ITEM && "hidden_item:${it.id}" !in field.pickedUp }
+        val hiddenItems = if (!showHidden) emptyList()
+        else area.signs.filter { it.zone == field.mapId && it.kind == SignKind.HIDDEN_ITEM && "hidden_item:${it.id}" !in field.pickedUp }
         fun shown(x: Int, y: Int) = x in left until left + width && y in top until top + height
         val objects = field.objects.filter { shown(it.x, it.y) }
         // The live puzzle: closed gates / shutters, and the tiles that start a teleport, a ride or a lift.

@@ -57,6 +57,9 @@ class HgssStateMapper {
     /** The last rejected reading of each personality and how many times in a row it was read the same. */
     private val rejected = mutableMapOf<Long, Pair<PartyMon, Int>>()
 
+    /** The save's older party right after a battle, before the game writes its copy back ([HgssPartyWriteBack]). */
+    private val writeBack = HgssPartyWriteBack()
+
     /**
      * True for a reading rejected only because its level or stats don't match the species data, but read the same
      * [STABLE_READS] times in a row: a reading caught mid-rewrite changes from frame to frame, a real one doesn't
@@ -88,13 +91,15 @@ class HgssStateMapper {
         }
         if (message != null && message == panelLeftover) return null
         panelLeftover = null
+        // A cell of the panel ("26", "+ 3") caught outside the panel's states: a battle message always has words.
+        if (message != null && PANEL_NUMBER.matches(message)) return null
         return message
     }
 
     /** Maps [state]; with [memory], the screen decoders ([HgssScreens]) read the screens [HgssState] doesn't cover. */
     fun map(state: HgssState, memory: HgssMemory? = null): GameState {
         val warnings = state.warnings.map { ReadWarning(ReadWarning.Kind.OTHER, it) }.toMutableList()
-        val party = state.party.mapNotNull { mon ->
+        val party = writeBack.party(state).mapNotNull { mon ->
             if (mon.plausible || stableDespiteData(mon)) return@mapNotNull mon.toCommon().also { lastGood[it.id] = it }
             // The personality is stored outside the encrypted data: it tells which Pokémon the slot holds even while
             // the rest is being rewritten.
@@ -433,6 +438,9 @@ class HgssStateMapper {
         val SHUTTER_SPRITES = setOf("GATE_LEFT", "GATE_RIGHT", "GATE_TOP", "GATE_BOTTOM")
         /** Identical readings in a row after which a reading failing only the species-data checks is trusted. */
         const val STABLE_READS = 30
+
+        /** A level-up panel cell: a number, maybe signed ("26", "+ 3"), whatever the language. */
+        val PANEL_NUMBER = Regex("\\s*[+-]?\\s*[0-9]+\\s*")
 
         val FIELD_MODES = setOf(GameMode.OVERWORLD, GameMode.FIELD_BUSY, GameMode.SCRIPT, GameMode.DIALOGUE, GameMode.START_MENU)
 

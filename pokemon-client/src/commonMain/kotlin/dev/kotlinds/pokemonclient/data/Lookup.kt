@@ -20,8 +20,11 @@ enum class KnowledgeLevel(val description: String) {
     /** Plus the Pokédex: species and move sheets, the type chart, estimated effectiveness in battle. */
     POKEDEX("Plus Pokémon and move sheets, the type chart and estimated effectiveness in battle."),
 
-    /** Plus a walkthrough: trainers' teams, encounters, map events, the next goal and why a way is blocked. */
-    POKEDEX_PLUS_WALKTHROUGH("Plus trainers' teams, encounters, the next goal and why a way is blocked."),
+    /**
+     * Plus a walkthrough: trainers' teams, encounters, map events, the next goal and why a way is blocked, and what the
+     * player hasn't seen (hidden items, teleport tiles never on screen, hidden switches: see view.Sightings).
+     */
+    POKEDEX_PLUS_WALKTHROUGH("Plus trainers' teams, encounters, the next goal and why a way is blocked, hidden items and unseen teleports."),
     ;
 
     /** True when this level shows what [required] shows. */

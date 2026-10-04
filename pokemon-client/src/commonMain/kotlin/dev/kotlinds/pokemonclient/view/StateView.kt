@@ -158,9 +158,10 @@ object StateView {
 
     /**
      * The full compact state: screen, party, battle, position, money and badges, warnings. [showHidden]: show what the
-     * game hides (a puzzle's hidden switches), for agents allowed a walkthrough.
+     * game hides or the player hasn't seen (a puzzle's hidden switches, teleports never on screen), for agents allowed a
+     * walkthrough; without it, [sightings] (what was seen so far) decides which teleports are listed.
      */
-    fun state(state: GameState, showHidden: Boolean = true): JsonObject = buildJsonObject {
+    fun state(state: GameState, showHidden: Boolean = true, sightings: Sightings? = null): JsonObject = buildJsonObject {
         put("screen", screen(state.screen))
         state.battle?.let { put("battle", battle(it)) }
         state.field?.let { f ->
@@ -172,7 +173,10 @@ object StateView {
                 put("movement", f.movement.name.lowercase())
                 put("height", f.height)
             }
-            f.puzzle?.let { put("puzzle", puzzle(it, showHidden)) }
+            f.puzzle?.let { p ->
+                val shown = if (showHidden) p else p.copy(teleports = p.teleports.filter { t -> sightings?.seen(f, t) ?: t.from.any { Sightings.onScreen(f, it) } })
+                put("puzzle", puzzle(shown, showHidden))
+            }
         }
         if (state.party.isNotEmpty()) put("team", buildJsonArray { state.party.forEach { add(mon(it)) } })
         state.player?.let { p ->

@@ -144,6 +144,14 @@ enum class UnavailableReason {
 
     /** Giving Mail opens the mail editor, which wants a written message (not supported). */
     MAIL_NEEDS_WRITING,
+
+    /** The game refuses to use it where the player stands (the Bicycle indoors or while surfing...). */
+    CANNOT_USE_HERE,
+    /**
+     * The way needs a movement-puzzle mechanism operated (a boulder or ice block pushed, a platform or lift ridden)
+     * and the application left movement puzzles to the agent ([ActionSettings.solvePuzzles] off): do it yourself.
+     */
+    PUZZLE_LEFT_TO_AGENT,
 }
 
 /** What interrupted an action. */

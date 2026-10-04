@@ -24,7 +24,12 @@ class AgentSession(
     recorder: Recorder,
     val settings: () -> PlayerSettings,
 ) {
-    val gameSession = GameSession(host, game, recorder, mode = { settings().mode.actionMode })
+    val gameSession = GameSession(
+        host, game, recorder, mode = { settings().mode.actionMode },
+        // The knowledge level chosen in the app, like the MCP agents get (walkthrough: hidden items, puzzle plans...).
+        knowledge = { settings().knowledge },
+        solvePuzzles = { settings().solvePuzzles },
+    )
     val memory = AgentMemory()
 
     /** Number of actions carried out. */

@@ -48,6 +48,9 @@ class FakeGame(var screen: Screen, var state: (Screen) -> GameState = { GameStat
 
     override val name = "Fake"
 
+    /** The bicycle's item id (none by default). */
+    override var bicycleItem: Int? = null
+
     /** The game's data, when a test needs some (see [StubGameData]). */
     override var data: GameData? = null
     override fun observe(memory: Memory) = Observation(GameMode.UNKNOWN, null, "", JsonObject(emptyMap()))

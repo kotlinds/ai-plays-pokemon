@@ -73,6 +73,11 @@ data class HgssState(
     val registeredItems: List<Int> = emptyList(),
     /** Anything that looked inconsistent while reading (the rest of the snapshot is still usable). */
     val warnings: List<String> = emptyList(),
+    /**
+     * The save's party while [party] comes from the battle's copy (null otherwise): the older party the save still
+     * holds until the game writes the copy back, a few frames after the battle ends (see [HgssPartyWriteBack]).
+     */
+    val partyBeforeWriteBack: List<PartyMon>? = null,
 )
 
 @Serializable

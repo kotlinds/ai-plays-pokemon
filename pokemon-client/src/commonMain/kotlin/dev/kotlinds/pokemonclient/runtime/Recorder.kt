@@ -3,6 +3,7 @@ package dev.kotlinds.pokemonclient.runtime
 import dev.kotlinds.pokemonclient.Memory
 import dev.kotlinds.pokemonclient.PokemonGame
 import dev.kotlinds.pokemonclient.state.BattleKind
+import dev.kotlinds.pokemonclient.state.ContinueReason
 import dev.kotlinds.pokemonclient.state.Awaiting
 import dev.kotlinds.pokemonclient.state.EventLog
 import dev.kotlinds.pokemonclient.state.GameEvent
@@ -69,6 +70,14 @@ class Recorder(
     /** An increase of [delta] to [quantity] of [name] first seen at [since]. */
     private data class PendingItem(val name: String, val delta: Int, val quantity: Int, val since: Long)
 
+    /** Bag increases first seen lately (item, name, delta, frame), for [recordShopBonus]. */
+    private val recentIncreases = mutableListOf<RecentIncrease>()
+
+    private data class RecentIncrease(val item: ItemId, val name: String, val delta: Int, val since: Long)
+
+    /** First frame of the last shop message ("Here you are! Thank you!"): the clerk's bonus is added after it. */
+    private var shopMessageStart: Long? = null
+
     /** The last state decoded by the recorder (null before the first one). */
     val latest: GameState? get() = previous
 
@@ -99,14 +108,25 @@ class Recorder(
             lastText = screen.text
             log.append { GameEvent.TextShown(it, frame, screen.source, screen.speaker, screen.text) }
         }
+        // A message an app shows and waits on (the clerk's "Here you are! Thank you!", the bonus line): once, like a
+        // dialogue page. Not the panels that carry their own data (level-up stats, Pokédex page).
+        val pressed = screen as? Screen.PressToContinue
+        val pressedText = pressed?.text?.takeIf { it.isNotBlank() && pressed.reason in RECORDED_MESSAGES }
+        if (pressedText != null && pressedText != lastText) {
+            lastText = pressedText
+            log.append { GameEvent.TextShown(it, frame, TextSource.MENU, null, pressedText) }
+        }
         // A sign's text shows in a banner while the player can still walk (read with A, or walking into the sign).
         val banner = (screen as? Screen.Overworld)?.banner?.takeIf { it.isNotBlank() && screen.awaiting == Awaiting.INPUT }
         if (banner != null && banner != lastText) {
             lastText = banner
             log.append { GameEvent.TextShown(it, frame, TextSource.SIGN, null, banner) }
         }
-        // A short transition (a fade while the box stays up) doesn't end the text: it isn't recorded twice.
-        if (screen !is Screen.Dialogue && banner == null && screen !is Screen.Animation) lastText = null
+        // A short transition (a fade while the box stays up) doesn't end the text: it isn't recorded twice. Nor does
+        // the yes/no menu shown over that text: once answered, the box shows the question again for a few frames
+        // (the nurse's "Would you like to rest your Pokémon?").
+        val askingLastText = screen is Screen.YesNo && lastText?.let { sameText(it, screen.question) } == true
+        if (screen !is Screen.Dialogue && pressedText == null && banner == null && screen !is Screen.Animation && !askingLastText) lastText = null
         recordBattleMessage(frame, message)
         if (now.battle == null) lastBattleMessage = null
 
@@ -130,6 +150,7 @@ class Recorder(
 
         // Bag: quantities that went up, once they stay up for a moment (see [recordItems]).
         recordItems(frame, before, now)
+        recordShopBonus(frame, before.screen, screen)
 
         // Badges.
         val oldBadges = before.player?.badges.orEmpty().toSet()
@@ -137,6 +158,9 @@ class Recorder(
             if (before.player != null) log.append { GameEvent.BadgeReceived(it, frame, badge) }
         }
     }
+
+    /** The same text, whatever its line breaks (a menu's question and the box's page are wrapped differently). */
+    private fun sameText(a: String, b: String?): Boolean = b != null && a.split(WHITESPACE).filter { it.isNotEmpty() } == b.split(WHITESPACE).filter { it.isNotEmpty() }
 
     /**
      * Records each battle message once (from `bs->msgBuffer`, read every [every] frames). The emulated frame can end
@@ -185,10 +209,32 @@ class Recorder(
                 quantity < pending.quantity -> iterator.remove()
                 frame - pending.since >= ITEM_CONFIRM_FRAMES -> {
                     log.append { GameEvent.ItemReceived(it, pending.since, pending.name, pending.delta) }
+                    recentIncreases += RecentIncrease(id, pending.name, pending.delta, pending.since)
                     iterator.remove()
                 }
             }
         }
+    }
+
+    /**
+     * The clerk's bonus ([ContinueReason.SHOP_BONUS], a Premier Ball for 10 Poké Balls): when its message shows, the
+     * items received since the purchase's "Here you are! Thank you!" started are the bonus (the game adds the bought
+     * items before that message, the bonus when it's dismissed, src/overlay_03/shop_menu.c:978). Recorded as
+     * [GameEvent.ShopBonus], after their [GameEvent.ItemReceived].
+     */
+    private fun recordShopBonus(frame: Long, before: Screen, now: Screen) {
+        recentIncreases.removeAll { frame - it.since > RECENT_INCREASE_FRAMES }
+        val reason = (now as? Screen.PressToContinue)?.reason
+        val wasReason = (before as? Screen.PressToContinue)?.reason
+        if (reason == ContinueReason.MESSAGE && wasReason != ContinueReason.MESSAGE) shopMessageStart = frame
+        if (reason != ContinueReason.SHOP_BONUS || wasReason == ContinueReason.SHOP_BONUS) return
+        val start = shopMessageStart ?: return
+        // A bonus still pending (not yet lasted long enough) is the bonus too.
+        val pending = pendingItems.map { (id, p) -> RecentIncrease(id, p.name, p.delta, p.since) }
+        (recentIncreases + pending).filter { it.since >= start }.groupBy { it.item }.forEach { (id, increases) ->
+            log.append { GameEvent.ShopBonus(it, frame, increases.first().name, increases.sumOf { i -> i.delta }, id) }
+        }
+        shopMessageStart = null
     }
 
     /**
@@ -291,11 +337,20 @@ class Recorder(
         (mon.isEgg && inBattle) || known.keys.any { it.personality == mon.id.personality && it != mon.id }
 }
 
+/** Spaces and line breaks, for [Recorder] text comparisons. */
+private val WHITESPACE = Regex("\\s+")
+
+/** The [Screen.PressToContinue] messages recorded as text (the others are panels with their own data). */
+private val RECORDED_MESSAGES = setOf(ContinueReason.MESSAGE, ContinueReason.SHOP_BONUS)
+
 /** Readings with a party during which the recorder only learns the party (see [Recorder.recordParty]). */
 internal const val SEED_POLLS = 30
 
 /** More new boxed Pokémon than this at once is another save loaded, not a Pokémon sent to the PC. */
 private const val MAX_NEW_STORED = 2
+
+/** How long a bag increase is remembered for [Recorder.recordShopBonus] (the bonus message prints for ~45 frames). */
+private const val RECENT_INCREASE_FRAMES = 300L
 
 /** Frames a bag increase must last before it is recorded as items received. */
 private const val ITEM_CONFIRM_FRAMES = 8L

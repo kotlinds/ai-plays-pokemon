@@ -166,6 +166,8 @@ object HgssKeyboardPcShopAddresses {
     const val MART_STATE_YES_NO = 11
     /** "Here you are! Thank you!", "You don't have enough money.", "...a Premier Ball as an added bonus.": A / B / touch. */
     val MART_STATES_MESSAGE = setOf(13, 14, 15)
+    /** `TASK_MART_15`: "...a Premier Ball as an added bonus." (ov03_02257F24 adds it to the bag, shop_menu.c:978). */
+    const val MART_STATE_BONUS = 15
     const val MART_PAGE_SIZE = 6
     const val MART_CURSOR_CANCEL = 8
     const val MART_BUY = 0

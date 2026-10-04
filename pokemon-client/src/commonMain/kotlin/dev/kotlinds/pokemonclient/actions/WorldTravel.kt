@@ -189,7 +189,7 @@ internal object WorldTravel {
                 ?: return Trip(
                     // A field move needed on this very map: the local failure knows where to use it from and what the
                     // party lacks; keep it over the less precise cross-map one.
-                    localFailure?.takeIf { it.failure is RouteFailure.NeedsFieldMove || it.failure is RouteFailure.BlockedByBarrier || it.failure == RouteFailure.DifferentLevel }
+                    localFailure?.takeIf { it.failure is RouteFailure.NeedsFieldMove || it.failure is RouteFailure.BlockedByBarrier || it.failure == RouteFailure.DifferentLevel || it.failure is dev.kotlinds.pokemonclient.world.NeedsMechanism }
                         ?: blocked(context, world, field, area, goalArea, goal, options) ?: localFailure
                         ?: MovePlans.Walk.NoRoute(RouteFailure.Unreachable, "no way to ${goal.target.id} from ${field.x},${field.y} (${field.mapName})"),
                     taken, triggers,

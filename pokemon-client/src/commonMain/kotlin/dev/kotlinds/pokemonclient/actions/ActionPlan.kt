@@ -20,6 +20,8 @@ class PlanContext(
     val scope: ActionScope,
     val game: PokemonGame,
     val navigator: Navigator = Navigator(scope, game),
+    /** What the application allows the recipes to do by themselves ([ActionSettings]). */
+    val settings: ActionSettings = ActionSettings(),
 ) {
     /** The current state (decoded from this frame). */
     fun state(): GameState = navigator.state()

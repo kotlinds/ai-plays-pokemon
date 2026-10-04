@@ -66,6 +66,12 @@ sealed interface GameEvent {
 
     /** A Pokémon learned [move] (level up, TM / HM, tutor), forgetting [forgot] when it already knew four. */
     data class LearnedMove(override val seq: Long, override val frame: Long, val mon: MonId, val name: String, val move: String, val forgot: String? = null) : GameEvent
+
+    /**
+     * The clerk added [quantity] [item] to a purchase as a bonus (a Premier Ball for 10 Poké Balls bought at once),
+     * recorded when the bonus message shows, after the [ItemReceived] of that item.
+     */
+    data class ShopBonus(override val seq: Long, override val frame: Long, val item: String, val quantity: Int, val itemId: ItemId? = null) : GameEvent
 }
 
 /**

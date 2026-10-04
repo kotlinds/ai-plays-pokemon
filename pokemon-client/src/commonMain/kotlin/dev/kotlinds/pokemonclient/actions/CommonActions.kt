@@ -313,7 +313,8 @@ object CommonActions {
             "Uses field moves by itself when the party can (a Pokémon knows the move and the badge is owned; a fainted Pokémon " +
             "can still use its field moves outside battle): Surf from the shore, " +
             "Waterfall, Whirlpool, Cut, Rock Smash, Strength (boulders pushed as needed) and ice blocks; otherwise the error says " +
-            "which move or badge is missing and the tile and direction to use it from.",
+            "which move or badge is missing and the tile and direction to use it from. Movement puzzles (boulders, ice blocks, " +
+            "moving platforms, lifts) are solved by itself unless the state says movement_puzzles are left to you.",
         parameters = listOf(
             Parameter("x", ParameterType.INTEGER, "Tile x (with y).", required = false),
             Parameter("y", ParameterType.INTEGER, "Tile y (with x).", required = false),
@@ -648,7 +649,7 @@ object CommonActions {
     /** Every common action, in the order they are listed to agents. */
     val definitions: List<ActionDefinition<*>> get() =
         listOf(advanceDialogue, choose, enterText, attack, switch, throwBall, learnMove, run, keepBattling, goTo, interact, step, findEncounter, heal, fly, fish, buy, setQuantity, deposit, withdraw, pc, reorderParty, useItem, giveItem, takeItem, teach, useKeyItem, registerItem, saveGame, softReset, setOptions, chooseStarter, press, touch, wait) +
-            MoreActions.definitions
+            MoreActions.definitions + PuzzleActions.definitions
 
     // region Helpers
 

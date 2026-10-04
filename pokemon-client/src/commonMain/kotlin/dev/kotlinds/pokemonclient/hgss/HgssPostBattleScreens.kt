@@ -64,8 +64,12 @@ internal object HgssPostBattleAddresses {
     const val EXP_STATE_PANEL_DIFF = 11
     const val EXP_STATE_PANEL_TOTALS = 13
 
-    /** From `STATE_GET_EXP_LEVEL_UP_SUMMARY_PRINT_DIFF` (10) to `..._LEVEL_UP_CLEAR` (14): the panel is drawn / shown. */
-    val EXP_STATES_PANEL = 10..14
+    /**
+     * From `STATE_GET_EXP_LEVEL_UP_SUMMARY_LOAD_ICON` (8) to `..._LEVEL_UP_CLEAR` (14): the panel is drawn / shown. State
+     * 8 writes the nameplate of a Pokémon that isn't the active battler ("X ♂ Lv. 26", BattleSystem_LoadLevelUpNameplate)
+     * into the battle message buffer too.
+     */
+    val EXP_STATES_PANEL = 8..14
 
     /** Catch task states: 12 dex page loading, 13 dex page shown (waits for A or touch only, B does nothing). */
     const val CATCH_STATE_DEX_LOADING = 12

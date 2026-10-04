@@ -40,6 +40,11 @@ data class PlayerSettings(
     val hybridConfidenceThreshold: Double = 0.5,
     /** Hybrid mode: ask the planner at least every N decisions. */
     val hybridPlannerEvery: Int = 30,
+    /**
+     * `go_to` solves movement puzzles by itself (pushes Strength boulders and ice blocks, rides the Blackthorn
+     * platforms and the Violet lift); off, it only walks and the AI operates them itself (to compare both).
+     */
+    val solvePuzzles: Boolean = true,
 )
 
 enum class ControlMode(val label: String, val description: String) {

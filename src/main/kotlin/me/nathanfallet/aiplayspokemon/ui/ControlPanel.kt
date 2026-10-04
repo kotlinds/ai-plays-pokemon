@@ -202,6 +202,8 @@ private fun ExperimentSettings(controller: AppController, backend: DecisionBacke
         Triple("Reasoning (LLM)", settings.reasoning) { s: PlayerSettings, v: Boolean -> s.copy(reasoning = v) }.takeIf { llmInLoop },
         Triple("Notes (LLM)", settings.modelNotes) { s: PlayerSettings, v: Boolean -> s.copy(modelNotes = v) }.takeIf { llmInLoop },
         Triple("Explored map", settings.exploredMap) { s: PlayerSettings, v: Boolean -> s.copy(exploredMap = v) },
+        Triple("Solve movement puzzles", settings.solvePuzzles) { s: PlayerSettings, v: Boolean -> s.copy(solvePuzzles = v) }
+            .takeIf { settings.mode != ControlMode.PURE },
         Triple("Sample probabilities", settings.sampleProbabilities) { s: PlayerSettings, v: Boolean -> s.copy(sampleProbabilities = v) }
             .takeIf { backend == DecisionBackend.JEV },
     )

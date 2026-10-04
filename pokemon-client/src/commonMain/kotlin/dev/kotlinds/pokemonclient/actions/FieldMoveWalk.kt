@@ -2,6 +2,7 @@ package dev.kotlinds.pokemonclient.actions
 
 import dev.kotlinds.pokemonclient.Direction
 import dev.kotlinds.pokemonclient.console.Button
+import dev.kotlinds.pokemonclient.console.InputFrame
 import dev.kotlinds.pokemonclient.state.FieldState
 import dev.kotlinds.pokemonclient.state.GameState
 import dev.kotlinds.pokemonclient.state.MovementMode
@@ -78,11 +79,44 @@ internal object FieldMoveWalk {
     }
 
     /**
-     * Walks into the boulder of [edge] (Strength active): the boulder moves one tile and the player onto its tile.
-     * Checked on the player's position (the walk re-plans with the boulders' live positions otherwise).
+     * Walks into the boulder of [edge] (Strength active): the boulder slides one tile while the player stays where they
+     * are (HGSS: an animation, the player never moves; holding on afterwards would walk into the freed tile). The
+     * direction is held until the boulder leaves its tile (or the player moves), then let go, and the game is left to
+     * end the animation (a boulder dropping through its hole too). [MovePlans.StepResult.Refused] when nothing moved.
+     * An ice block ([PushEdge.needsStrength] false) is pushed by the slide itself: a plain step.
      */
-    fun push(context: PlanContext, edge: PushEdge, options: MoveOptions): MovePlans.StepResult =
-        MovePlans.stepOnce(context, edge.direction, edge.to, options, long = true)
+    fun push(context: PlanContext, edge: PushEdge, options: MoveOptions): MovePlans.StepResult {
+        if (!edge.needsStrength) return MovePlans.stepOnce(context, edge.direction, edge.to, options, long = true)
+        // The last step may have started something (a wild encounter's intro): only push from a free player.
+        val ready = context.navigator.settle()
+        if (ready.screen !is Screen.Overworld || ready.battle != null) return MovePlans.StepResult.Stopped(ready)
+        // Face the boulder first: a press while facing elsewhere only turns the player.
+        repeat(MAX_TURN_TRIES) {
+            val field = context.state().field ?: return MovePlans.StepResult.Stopped(context.state())
+            if (field.facing == edge.direction) return@repeat
+            context.scope.tap(edge.direction.button)
+            context.scope.step(TURN_FRAMES)
+        }
+        val start = context.state().field ?: return MovePlans.StepResult.Stopped(context.state())
+        val (bx, by) = edge.objectFrom
+        var frames = 0
+        var started = false
+        while (frames < PUSH_START_FRAMES && !started) {
+            context.scope.step(1, InputFrame(setOf(edge.direction.button)))
+            frames++
+            val state = context.state()
+            val field = state.field ?: return MovePlans.StepResult.Stopped(state)
+            if (state.battle != null || state.screen is Screen.Dialogue || state.screen is Screen.Selectable) return MovePlans.StepResult.Stopped(state)
+            started = field.objects.none { it.x == bx && it.y == by } || field.x != start.x || field.y != start.y
+        }
+        if (!started) {
+            val after = context.navigator.settle()
+            return if (after.screen !is Screen.Overworld || after.battle != null) MovePlans.StepResult.Stopped(after) else MovePlans.StepResult.Refused
+        }
+        val end = context.navigator.settle()
+        if (end.screen !is Screen.Overworld) return MovePlans.StepResult.Stopped(end)
+        return end.field?.let { MovePlans.StepResult.Moved(it) } ?: MovePlans.StepResult.Stopped(end)
+    }
 
     /**
      * Faces [direction] (turning without stepping: the tile ahead is water or an obstacle), presses A, and answers
@@ -179,6 +213,9 @@ internal object FieldMoveWalk {
         }
 
     private const val TURN_FRAMES = 8
+
+    /** Longest hold into a boulder before its push starts (a turn first, then the push: about 30 frames). */
+    private const val PUSH_START_FRAMES = 64
     private const val MAX_TURN_TRIES = 3
 
     /** Messages before the question ("The water is dyed a deep blue..."): a few pages at most. */

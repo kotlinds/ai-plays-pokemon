@@ -78,12 +78,13 @@ class ActionRegistry(private val definitions: List<ActionDefinition<*>>) {
 
     /**
      * Executes [action] with the console leased to [scope]: checks it is available now, runs its recipe, and
-     * reports interruptions (a battle starting, the human taking over...) as typed errors.
+     * reports interruptions (a battle starting, the human taking over...) as typed errors. [settings]: what the
+     * application lets the recipes do by themselves (solve movement puzzles, use hidden knowledge).
      */
-    fun execute(action: GameAction, scope: ActionScope, game: PokemonGame): ActionOutcome {
+    fun execute(action: GameAction, scope: ActionScope, game: PokemonGame, settings: ActionSettings = ActionSettings()): ActionOutcome {
         val def = definitions.firstOrNull { it.type.isInstance(action) }
             ?: return ActionOutcome.Failed(ActionError.Unsupported(action.key))
-        val context = PlanContext(scope, game)
+        val context = PlanContext(scope, game, settings = settings)
         when (val availability = def.spec.availability(context.state())) {
             is Availability.Unavailable -> {
                 // Fly refused here: name the nearest place where it works (computed only when asked, it routes).

@@ -26,8 +26,8 @@ data class FieldMoveEdge(
 /**
  * Walk into a movable object at [to] going [direction], which pushes it to [objectTo]: a Strength boulder (one tile;
  * Strength must have been used on this map first, [needsStrength]) or an ice block slid into from the ice (it slides
- * until a wall, a tile that isn't ice, or another block). The player ends on [to] for a boulder, and stays on the
- * ice tile before the block ([to] is then that tile) for an ice block.
+ * until a wall, a tile that isn't ice, or another block). The player doesn't follow: for a boulder they stay where they
+ * pushed from ([to] is that tile: the boulder slides away alone, HGSS), for an ice block on the ice tile before it.
  */
 data class PushEdge(
     override val to: Node,

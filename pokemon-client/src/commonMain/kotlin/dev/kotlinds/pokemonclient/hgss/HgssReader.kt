@@ -231,9 +231,9 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
         // Outside the battle proper (intro, end of battle, evolutions after it) the battle app's setup holds the party
         // the game works on; the save's is only updated when the app ends.
         val setupParty = if (battleParty.isNullOrEmpty() && !demo) battleSetup?.let { ptr(it + A.SETUP_PARTY) }?.let { runCatching { readPartyAt(ctx, it) }.getOrNull() } else null
-        val party = battleParty?.takeIf { it.isNotEmpty() }
-            ?: setupParty?.takeIf { it.isNotEmpty() }
-            ?: saveData?.let { runCatching { readParty(ctx, it) }.getOrNull() } ?: emptyList()
+        val copiedParty = battleParty?.takeIf { it.isNotEmpty() } ?: setupParty?.takeIf { it.isNotEmpty() }
+        val saveParty = saveData?.let { runCatching { readParty(ctx, it) }.getOrNull() }
+        val party = copiedParty ?: saveParty ?: emptyList()
         // Same for the bag: balls thrown and items used in battle come out of the setup's copy.
         val bag = (if (demo) null else battleSystem?.let { ptr(it + A.BS_BAG) } ?: battleSetup?.let { ptr(it + A.SETUP_BAG) })
             ?.let { runCatching { readBagAt(it) }.getOrNull() }
@@ -282,6 +282,7 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             bag = bag,
             registeredItems = registered,
             warnings = ctx.warnings,
+            partyBeforeWriteBack = if (copiedParty != null) saveParty else null,
         )
     }
 

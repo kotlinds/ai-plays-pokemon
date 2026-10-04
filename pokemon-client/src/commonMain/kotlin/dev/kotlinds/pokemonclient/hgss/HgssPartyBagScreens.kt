@@ -358,6 +358,8 @@ internal object HgssBagScreen {
             P.BAG_STATE_MESSAGE -> message(mem, work)
             P.BAG_STATE_TM_MESSAGE -> when (mem.u8(work + P.BAG_TM_STEP)) {
                 P.BAG_TM_STEP_YES_NO -> yesNoPrompt(mem, mem.ptr(work + P.BAG_YES_NO_PROMPT), bagText(mem, work))
+                // Step 0 hasn't written "Booted up a TM." yet: the buffer still holds the TM's power ("100", "---").
+                P.BAG_TM_STEP_START -> Screen.Animation(AnimationKind.TRANSITION)
                 else -> message(mem, work)
             }
             in P.BAG_BUSY_STATES -> Screen.Animation(AnimationKind.TRANSITION)
@@ -706,6 +708,7 @@ internal object HgssPartyBagAddresses {
     const val BAG_ACTION_LABELS = 0x300L        // String *[16], one per action id (msg_0010)
     const val BAG_MESSAGE = 0x5E4L              // String *: text of the bag's message box
     const val BAG_TM_STEP = 0x67BL              // u8 step of the TM / HM "Booted up a TM" sequence (state 13)
+    const val BAG_TM_STEP_START = 0             // writes "Booted up a TM." into BAG_MESSAGE (ov15_021FB830 case 0)
     const val BAG_TM_STEP_YES_NO = 3            // "Teach X to a Pokémon?" yes / no waiting
     const val BAG_YES_NO_PROMPT = 0x804L        // YesNoPrompt *
     const val BAG_CURSOR = 0x644L               // int main cursor: 0-7 tabs, 8-13 items, 14/15 page arrows, 16 CANCEL

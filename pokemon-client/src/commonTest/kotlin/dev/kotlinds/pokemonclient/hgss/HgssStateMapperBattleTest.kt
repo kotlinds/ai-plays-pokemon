@@ -39,6 +39,16 @@ class HgssStateMapperBattleTest {
         assertTrue("left out" in after.warnings.single().detail)
     }
 
+    /** A level-up stats panel cell left in the message buffer ("26", "+ 3") is never a battle message. */
+    @Test
+    fun aLevelUpPanelNumberIsNotABattleMessage() {
+        val mapper = HgssStateMapper()
+        fun message(text: String) = mapper.map(state(xatu).let { it.copy(battle = it.battle!!.copy(message = text)) }).battle!!.message
+        assertEquals(null, message("26"))
+        assertEquals(null, message("+ 3"))
+        assertEquals("CYNDAQUIL grew to\nLv. 26!", message("CYNDAQUIL grew to\nLv. 26!"))
+    }
+
     @Test
     fun checksCoverSpeciesLevelHpAndMoves() {
         assertEquals(emptyList(), HgssBattlerCheck.problems(xatu))

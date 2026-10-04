@@ -190,6 +190,37 @@ class FieldRecipesTest {
     }
 
     @Test
+    fun theBicycleWhereCyclingIsForbiddenIsRefusedWithoutPressingAnything() {
+        val ui = keyItemsUi()
+        ui.game.bicycleItem = 450
+        ui.field = ui.field!!.copy(bikeAllowed = false)
+        val failed = assertIs<ActionOutcome.Failed>(PartyBagPlans.useKeyItem.run(GameAction.UseKeyItem(ItemRef("Bicycle")), ui.context()))
+        assertEquals(UnavailableReason.CANNOT_USE_HERE, assertIs<ActionError.Unavailable>(failed.error).reason)
+        assertTrue(ui.game.presses.isEmpty(), ui.game.presses.toString())
+    }
+
+    /** Live (League Center, sf bench run): USE → "Oak's words echoed... There's a time and place for everything!". */
+    @Test
+    fun theGamesRefusalOfTheBicycleIsATypedErrorAndTheMessageIsClosed() {
+        val ui = keyItemsUi()
+        ui.game.bicycleItem = 450
+        val keyPocket = bag("key_items", listOf(Entry("item:446", "Good Rod"), Entry("item:450", "Bicycle")), pockets = listOf("items", "key_items"))
+        ui.onA = { screen, id ->
+            when {
+                isStart(screen) && id == "option:bag" -> keyPocket
+                screen is Screen.Bag && id == "item:450" -> menu("option:use", "option:register", "option:cancel", item = ItemId(450))
+                screen is Screen.ContextMenu && id == "option:use" -> dialogue("Oak's words echoed... There's a time and place for everything! But not now.")
+                screen is Screen.Dialogue -> keyPocket
+                else -> screen
+            }
+        }
+        val failed = assertIs<ActionOutcome.Failed>(PartyBagPlans.useKeyItem.run(GameAction.UseKeyItem(ItemRef("Bicycle")), ui.context()))
+        assertEquals(UnavailableReason.CANNOT_USE_HERE, assertIs<ActionError.Unavailable>(failed.error).reason)
+        assertIs<Screen.Overworld>(ui.game.screen)
+        assertEquals(MovementMode.WALK, ui.field!!.movement)
+    }
+
+    @Test
     fun registeringASecondKeyItemSaysYStillUsesTheFirst() {
         val ui = keyItemsUi()
         ui.registered = listOf(ItemId(446), null)

@@ -9,6 +9,7 @@ import dev.kotlinds.pokemonclient.actions.ActionMode
 import dev.kotlinds.pokemonclient.actions.ActionChains
 import dev.kotlinds.pokemonclient.actions.ActionOutcome
 import dev.kotlinds.pokemonclient.actions.ActionRegistry
+import dev.kotlinds.pokemonclient.actions.ActionSettings
 import dev.kotlinds.pokemonclient.actions.GameAction
 import dev.kotlinds.pokemonclient.actions.Navigator
 import dev.kotlinds.pokemonclient.runtime.ActionInterruptedException
@@ -17,6 +18,7 @@ import dev.kotlinds.pokemonclient.runtime.Recorder
 import dev.kotlinds.pokemonclient.state.GameEvent
 import dev.kotlinds.pokemonclient.state.GameState
 import dev.kotlinds.pokemonclient.state.Screen
+import dev.kotlinds.pokemonclient.view.Sightings
 import dev.kotlinds.pokemonclient.view.StateView
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -48,7 +50,21 @@ class GameSession(
      * on the way (client timeout) is given again with the next one. Our own loop can't lose responses (false).
      */
     confirmDelivery: Boolean = false,
+    /**
+     * Whether the walks solve movement puzzles by themselves (boulders, ice blocks, platforms, lifts:
+     * [ActionSettings.solvePuzzles]); when false the agent operates them itself.
+     */
+    private val solvePuzzles: () -> Boolean = { true },
 ) {
+    /** What the application lets the actions do by themselves: the settings of this session, read at each action. */
+    private fun actionSettings() = ActionSettings(
+        solvePuzzles = solvePuzzles(),
+        revealHidden = knowledge().allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH),
+    )
+
+    /** What the player has seen (teleport tiles once on screen), for agents without a walkthrough. */
+    private val sightings = Sightings()
+
     private val _blindUses = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
 
     /**
@@ -197,7 +213,7 @@ class GameSession(
                 if (action is GameAction.Press || action is GameAction.Touch) countBlind(game.state(memory()).screen)
                 // The game settles after the action, but one step never runs much past STEP_FRAMES in all (the agent's
                 // call must answer before its client gives up): a long action leaves less time to settle.
-                registry.execute(action, this, game).also {
+                registry.execute(action, this, game, actionSettings()).also {
                     Navigator(this, game).settle(maxFrames = (STEP_FRAMES - framesUsed).coerceIn(MIN_SETTLE_FRAMES.toLong(), SETTLE_FRAMES.toLong()).toInt())
                 }
             }
@@ -227,7 +243,9 @@ class GameSession(
         }
         val other = events.mapNotNull(::describeEvent).distinct()
         if (other.isNotEmpty()) put("events_since_last_call", JsonArray(other.map(::JsonPrimitive)))
-        val view = StateView.state(state, showHidden = knowledge().allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH))
+        val walkthrough = knowledge().allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH)
+        sightings.observe(state.field)
+        val view = StateView.state(state, showHidden = walkthrough, sightings = sightings)
         val (viewEntries, moved) = compactView.take(view, compact)
         viewEntries.forEach { (k, v) -> put(k, v) }
         // get_state lists the bag (one line per pocket); act answers leave it out.
@@ -258,9 +276,12 @@ class GameSession(
             val field = state.field
             val area = field?.let { game.world?.areaOf(it.mapId) }
             if (compact && !moved) put("map", "unchanged (you haven't moved)")
-            else if (field != null && area != null) MapView.render(area, field, game::zoneName, world = game.world).forEach { (k, v) -> put(k, v) }
+            else if (field != null && area != null) MapView.render(area, field, game::zoneName, world = game.world, showHidden = walkthrough).forEach { (k, v) -> put(k, v) }
             else MAP_KEYS.forEach { key -> legacy[key]?.let { put(key, it) } }
         }
+        // Movement puzzles left to the agent: say so where it matters (a puzzle here, or the full state).
+        val here = state.field
+        if (!solvePuzzles() && here != null && (full || here.puzzle != null)) put("movement_puzzles", PUZZLES_LEFT_TO_AGENT)
         val story = state.story
         if (story != null && knowledge().allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH)) {
             story.goal?.let { put("story_goal", it.description) }
@@ -296,6 +317,7 @@ class GameSession(
         is GameEvent.Evolved -> "${event.from} evolved into ${event.to}"
         is GameEvent.LevelUp -> "${event.name?.let { "$it (${event.mon})" } ?: event.mon} reached level ${event.level}"
         is GameEvent.ItemReceived -> "received ${event.item} x${event.quantity}"
+        is GameEvent.ShopBonus -> "the clerk added ${event.item} x${event.quantity} as a bonus"
         is GameEvent.BadgeReceived -> "received the ${event.badge} badge"
         is GameEvent.HumanInput -> "the human pressed buttons"
         is GameEvent.Caught -> "caught ${event.name}" + (if (event.name != event.species) " (${event.species})" else "") +
@@ -306,6 +328,10 @@ class GameSession(
     }
 
     private companion object {
+        const val PUZZLES_LEFT_TO_AGENT = "left to you: go_to and interact only walk (they never push a boulder or an ice block, " +
+            "never step on a platform trigger or a lift unless it is the destination you gave); a way that needs one fails with " +
+            "PUZZLE_LEFT_TO_AGENT naming it. Operate them yourself: step into a boulder after using Strength on it (interact), " +
+            "slide into an ice block, go_to / step onto a trigger or a lift; push moves a boulder into its hole"
         val MAP_KEYS = listOf("map", "legend", "adjacent", "exits", "people", "objects", "nearby_areas")
         const val SETTLE_FRAMES = 1800
 

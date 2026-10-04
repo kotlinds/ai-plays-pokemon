@@ -121,6 +121,16 @@ data class Overlay(
      * still blocked by people and closed barriers.
      */
     val openTiles: Set<Pair<Int, Int>> = emptySet(),
+    /**
+     * Tiles never entered unless they are the destination: mechanisms the route must not operate by itself (a lift's
+     * or a moving platform's trigger, when movement puzzles are left to the agent).
+     */
+    val forbiddenTiles: Set<Pair<Int, Int>> = emptySet(),
+    /**
+     * Never slide on the ice into a movable ice block ([LiveObject.iceBlock]): the game would push it. Such slides
+     * are left out of the routes (movement puzzles left to the agent).
+     */
+    val avoidPushes: Boolean = false,
 )
 
 /**
@@ -510,6 +520,8 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
             val next = tile(nx, ny) ?: break
             val takenAway = (nx to ny) in warpTiles || (nx to ny) in overlay.activeTriggers
             if (takenAway && (nx to ny) !in goalTiles) return null
+            // Stopping against a movable ice block pushes it: not a plain walk when pushes are avoided.
+            if (overlay.avoidPushes && overlay.objects.any { it.iceBlock && it.x == nx && it.y == ny }) return null
             if (next.kind is TileKind.Ledge || !walkable(next, nx, ny, options, goalTiles, relaxed)) break
             if ((nx to ny) in goalTiles && next.blocked && next.kind !is TileKind.Door) break
             val level = levelFrom(next, tile.heights.getOrNull(at.level), options) ?: break
@@ -648,6 +660,7 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
         ignoreBarriers: Boolean = false,
     ): Boolean {
         if ((x to y) in goalTiles) return true
+        if ((x to y) in overlay.forbiddenTiles) return false
         if (gate(tile, x, y, options) != null) return relaxed
         if ((x to y) in overlay.openTiles) return (ignorePeople || (x to y) !in occupied) && (ignoreBarriers || (x to y) !in overlay.blockedTiles)
         if (tile.blocked || (!ignorePeople && (x to y) in occupied) || (!ignoreBarriers && (x to y) in overlay.blockedTiles)) return false

@@ -411,6 +411,9 @@ enum class ContinueReason {
     /** Something bit the fishing line: A now (within about a second) hooks it. */
     FISHING_BITE,
     OTHER,
+
+    /** The clerk gives a bonus with the purchase (a Premier Ball for 10 Poké Balls): the item is already in the bag. */
+    SHOP_BONUS,
 }
 
 /** What a [Screen.PcBox] was opened for. */

@@ -75,6 +75,26 @@ class RecorderTest {
         assertEquals(listOf(TextSource.FIELD to found, TextSource.FIELD to put), fieldTexts(screens))
     }
 
+    /** Live (Cherrygrove Center, heal): the question, its yes/no menu, then the box shows the question again once answered. */
+    @Test
+    fun `the nurse's question is recorded once around its yes-no menu`() {
+        val question = "Would you like to rest your\nPokémon?"
+        val yesNo = Screen.YesNo(question, listOf(dev.kotlinds.pokemonclient.state.Entry("option:yes", "YES"), dev.kotlinds.pokemonclient.state.Entry("option:no", "NO")),
+            dev.kotlinds.pokemonclient.state.Cursor.At(0), dev.kotlinds.pokemonclient.state.Topology.vertical(2))
+        val ok = "OK, I'll take your Pokémon for a few\nseconds."
+        val screens = listOf(
+            Screen.Dialogue(TextSource.FIELD, "nurse", question, Awaiting.INPUT),
+            Screen.Animation(AnimationKind.TRANSITION),
+            Screen.Dialogue(TextSource.FIELD, "nurse", question, Awaiting.INPUT),
+            yesNo,
+            yesNo,
+            Screen.Dialogue(TextSource.FIELD, "nurse", question, Awaiting.INPUT),
+            Screen.Dialogue(TextSource.FIELD, "nurse", ok, Awaiting.TEXT_PRINTING),
+            Screen.Dialogue(TextSource.FIELD, "nurse", ok, Awaiting.INPUT),
+        )
+        assertEquals(listOf(TextSource.FIELD to question, TextSource.FIELD to ok), fieldTexts(screens))
+    }
+
     @Test
     fun `a sign banner is recorded once`() {
         val sign = "Goldenrod City Game Corner"
