@@ -28,12 +28,19 @@ data class PartyMon(
     val displayName: String get() = if (isEgg) "Egg" else nickname ?: species.name
 }
 
-/** A move a Pokémon knows, with its remaining PP. */
+/**
+ * A move a Pokémon knows, with its remaining PP. In battle, also its battle data (from the game's move table):
+ * [power] (0: no fixed power), [accuracy] in percent (0: never misses), [category] and [priority] (0 for most moves).
+ */
 data class KnownMove(
     val move: Named<MoveId>,
     val pp: Int,
     val maxPp: Int,
     val type: String? = null,
+    val power: Int? = null,
+    val accuracy: Int? = null,
+    val category: dev.kotlinds.pokemonclient.data.MoveCategory? = null,
+    val priority: Int? = null,
 )
 
 /** The persistent ("major") status conditions, shown next to a Pokémon. */

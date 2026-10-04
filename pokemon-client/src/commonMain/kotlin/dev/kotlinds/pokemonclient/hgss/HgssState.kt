@@ -87,6 +87,8 @@ data class PlayerInfo(
     val badgeCount: Int,
     /** Play time (PLAYERDATA.igt, include/igt.h): hours, minutes, seconds. */
     val playTime: Triple<Int, Int, Int>? = null,
+    /** The badges owned by id: bit n of the Johto byte is n, bit n of the Kanto byte is 8 + n. */
+    val badgeIds: Set<Int> = emptySet(),
 )
 
 @Serializable

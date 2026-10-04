@@ -70,6 +70,20 @@ class Lookup(private val data: GameData, private val level: KnowledgeLevel) {
         }
         putJsonArray("abilities") { info.abilities.mapNotNull(data::abilityName).forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } }
         put("catch_rate", info.catchRate)
+        info.growthRate?.let { rate ->
+            putJsonObject("growth_rate") {
+                put("curve", rate.name.lowercase())
+                put("exp_to_level_50", ExpCurves.expForLevel(rate, 50))
+                put("exp_to_level_100", ExpCurves.expForLevel(rate, ExpCurves.MAX_LEVEL))
+            }
+        }
+        // The TMs / HMs it can learn, with their moves.
+        putJsonArray("machines") {
+            info.machines.sortedBy { it.number }.forEach { machine ->
+                val move = data.machineMove(machine)
+                add(kotlinx.serialization.json.JsonPrimitive(machine.label + (move?.let { " " + (data.move(it)?.name ?: "move:${it.value}") } ?: "")))
+            }
+        }
         putJsonArray("evolutions") {
             info.evolutions.forEach { evo ->
                 add(buildJsonObject {

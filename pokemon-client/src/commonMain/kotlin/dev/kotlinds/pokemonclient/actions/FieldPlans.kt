@@ -97,7 +97,12 @@ internal object FieldPlans {
         var frames = 0
         while (frames < FISH_FRAMES) {
             val state = context.state()
-            if (state.battle != null) return@ActionPlan ActionOutcome.Done("hooked a wild Pokémon")
+            if (state.battle != null) {
+                // What bit: the wild Pokémon, read once the battle is ready (its data is filled as it starts).
+                val ready = context.navigator.settle(maxFrames = BATTLE_START_FRAMES)
+                val foe = ready.battle?.battlers?.firstOrNull { !it.ref.isPlayerSide }
+                return@ActionPlan ActionOutcome.Done("hooked a wild " + (foe?.let { "${it.species.name} Lv${it.level}" } ?: "Pokémon"))
+            }
             val screen = state.screen
             when {
                 (screen as? Screen.PressToContinue)?.reason == ContinueReason.FISHING_BITE -> {
@@ -116,6 +121,9 @@ internal object FieldPlans {
     }
 
     private const val FISH_FRAMES = 60 * 30
+
+    /** The battle's intro, up to the command menu. */
+    private const val BATTLE_START_FRAMES = 900
     /** The cast animation: before it ends, the overworld still shows. */
     private const val CAST_FRAMES = 90
 
@@ -141,7 +149,7 @@ internal object FieldPlans {
             }
             Step.Failed(ActionError.Unavailable(UnavailableReason.NO_POKEMON_KNOWS_MOVE, "No Pokémon in the party can use Fly"))
         }.andThen { awaitFlyMap(context) }
-            .andThen { state -> flyTarget(context, action.destination, state) }.andThen { target ->
+            .andThen { state -> flyTarget(context, action.destination, state, startMap) }.andThen { target ->
                 context.scope.touch(target)
                 context.navigator.awaitChange(context.state().screen)
                 context.navigator.advanceUntil(FLY_WAITS) { it.screen is Screen.YesNo }
@@ -206,13 +214,14 @@ internal object FieldPlans {
      * The touch point of [destination] on the fly map (`fly:<map id>` or the town's name), moving the map with the
      * D-pad when it's off screen (each press re-read). Fails for towns not visited yet.
      */
-    private fun flyTarget(context: PlanContext, destination: String, start: GameState): Step<dev.kotlinds.pokemonclient.console.TouchPoint> {
+    private fun flyTarget(context: PlanContext, destination: String, start: GameState, startMap: Int?): Step<dev.kotlinds.pokemonclient.console.TouchPoint> {
         fun find(state: GameState) = (state.screen as? Screen.FlyMap)?.entries?.firstOrNull { e ->
             e.id == destination || (e.id.startsWith("fly:") && matchesRef(destination, "fly", e.id.removePrefix("fly:").toInt(), e.label))
         }
-        val entry = find(start) ?: return Step.Failed(ActionError.InvalidParameter("destination", destination,
-            (start.screen as? Screen.FlyMap)?.entries?.filter { it.selectable && it.id.startsWith("fly:") }?.map { "${it.id} (${it.label})" }.orEmpty()))
-        if (!entry.selectable) return Step.Failed(ActionError.Unavailable(UnavailableReason.NOT_VISITED, "${entry.label} hasn't been visited yet"))
+        val entry = find(start)
+            ?: return Step.Failed(FlyHints.otherRegion(context, destination, startMap) ?: ActionError.InvalidParameter("destination", destination,
+                (start.screen as? Screen.FlyMap)?.entries?.filter { it.selectable && it.id.startsWith("fly:") }?.map { "${it.id} (${it.label})" }.orEmpty()))
+        if (!entry.selectable) return Step.Failed(FlyHints.notSelectable(context, entry, start.screen, startMap))
         entry.touch?.let { return Step.Done(it) }
         // Off screen: steer the cursor towards the town's cell, one press at a time (the map scrolls with it), until
         // the town can be touched. Each press is read back.

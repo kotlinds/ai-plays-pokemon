@@ -48,7 +48,7 @@ class ViewsTest {
         val exits = view["exits"]!!.jsonArray.single().jsonPrimitive.content
         assertTrue(exits.startsWith("warp:0 at 0,2 (2 west, 1 south) → Route 1"), exits)
         assertTrue("press south" in exits)
-        assertEquals("person:4 nurse at 3,1 (1 east) [nurse]", view["people"]!!.jsonArray.single().jsonPrimitive.content)
+        assertEquals("person:4 nurse at 3,1 (1 east) facing south [nurse]", view["people"]!!.jsonArray.single().jsonPrimitive.content)
         assertEquals("sign:3 at 3,0 (1 east, 1 north)", view["signs"]!!.jsonArray.single().jsonPrimitive.content)
         assertTrue("tall grass" in view["legend"]!!.jsonPrimitive.content)
     }

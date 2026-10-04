@@ -16,8 +16,18 @@ import dev.kotlinds.pokemonclient.Direction
  */
 class PushPlanner(private val area: Area, private val overlay: Overlay, private val maxStates: Int = DEFAULT_MAX_STATES) {
 
-    /** One movable object in a configuration: where it is, and whether it can still move. */
-    private data class Movable(val x: Int, val y: Int, val boulder: Boolean, val frozen: Boolean = false)
+    /**
+     * One movable object in a configuration: where it is, and whether it can still move. [fallsInto]: the hole a
+     * boulder drops through; [gone] once it did.
+     */
+    private data class Movable(
+        val x: Int,
+        val y: Int,
+        val boulder: Boolean,
+        val frozen: Boolean = false,
+        val fallsInto: Pair<Int, Int>? = null,
+        val gone: Boolean = false,
+    )
 
     private data class State(val node: Node, val movables: List<Movable>)
 
@@ -32,7 +42,7 @@ class PushPlanner(private val area: Area, private val overlay: Overlay, private 
 
     /** The cheapest route from [start] to a node satisfying [isGoal], pushing objects on the way; null when none. */
     fun route(start: Node, options: RouteOptions, goalTiles: Set<Pair<Int, Int>> = emptySet(), isGoal: (Node) -> Boolean): Route? {
-        val initial = State(start, movableTemplates.map { Movable(it.x, it.y, boulder = it.clearedBy == FieldMoveKind.STRENGTH) })
+        val initial = State(start, movableTemplates.map { Movable(it.x, it.y, boulder = it.clearedBy == FieldMoveKind.STRENGTH, fallsInto = it.fallsInto) })
         val dist = HashMap<State, Int>()
         val previous = HashMap<State, Pair<State, Edge>>()
         val queue = PriorityQueue<Pair<State, Int>> { a, b -> a.second - b.second }
@@ -68,7 +78,7 @@ class PushPlanner(private val area: Area, private val overlay: Overlay, private 
     }
 
     private fun pathfinder(movables: List<Movable>): Pathfinder = pathfinders.getOrPut(movables) {
-        val objects = others + movables.map { m ->
+        val objects = others + movables.filterNot { it.gone }.map { m ->
             LiveObject(m.x, m.y, null, clearedBy = if (m.boulder) FieldMoveKind.STRENGTH else null, iceBlock = !m.boulder && !m.frozen)
         }
         Pathfinder(area, overlay.copy(objects = objects))
@@ -105,7 +115,7 @@ class PushPlanner(private val area: Area, private val overlay: Overlay, private 
         while (true) {
             val nx = x + dir.dx
             val ny = y + dir.dy
-            val other = state.movables.indexOfFirst { it.x == nx && it.y == ny }
+            val other = state.movables.indexOfFirst { it.x == nx && it.y == ny && !it.gone }
             if (other >= 0) {
                 if (!state.movables[other].boulder) joined = other
                 break
@@ -141,29 +151,33 @@ class PushPlanner(private val area: Area, private val overlay: Overlay, private 
         val node = state.node
         val bx = node.x + dir.dx
         val by = node.y + dir.dy
-        val index = state.movables.indexOfFirst { it.x == bx && it.y == by && it.boulder }
+        val index = state.movables.indexOfFirst { it.x == bx && it.y == by && it.boulder && !it.gone }
         if (index < 0) return null
         val boulderTile = area.tile(bx, by) ?: return null
         if (boulderTile.blocked) return null
         val tx = bx + dir.dx
         val ty = by + dir.dy
         val target = area.tile(tx, ty) ?: return null
-        if (!boulderCanEnter(target, tx, ty, state)) return null
+        val falls = state.movables[index].fallsInto == (tx to ty)
+        if (!falls && !boulderCanEnter(target, tx, ty, state)) return null
         val here = area.tile(node.x, node.y) ?: return null
         val level = levelOf(boulderTile, here.heights.getOrNull(node.level))
-        val moved = state.movables.mapIndexed { i, m -> if (i == index) m.copy(x = tx, y = ty) else m }
+        val moved = state.movables.mapIndexed { i, m -> if (i == index) m.copy(x = tx, y = ty, gone = falls) else m }
         val to = Node(bx, by, level)
         return PushEdge(to, dir, bx to by, tx to ty, needsStrength = true) to State(to, moved)
     }
 
-    /** A boulder moves onto plain free floor only (no wall, water, ledge, warp, person or other object). */
+    /**
+     * A boulder moves onto plain free floor only (no wall, water, ledge, warp, active trigger such as another
+     * boulder's hole, person or other object).
+     */
     private fun boulderCanEnter(tile: TileInfo, x: Int, y: Int, state: State): Boolean {
-        if (tile.blocked || (x to y) in warpTiles || (x to y) in overlay.blockedTiles) return false
+        if (tile.blocked || (x to y) in warpTiles || (x to y) in overlay.blockedTiles || (x to y) in overlay.activeTriggers) return false
         when (tile.kind) {
             TileKind.Floor, TileKind.Cave, TileKind.Sand, TileKind.TallGrass -> Unit
             else -> return false
         }
-        if (state.movables.any { it.x == x && it.y == y }) return false
+        if (state.movables.any { it.x == x && it.y == y && !it.gone }) return false
         return others.none { !it.isFollower && it.x == x && it.y == y }
     }
 

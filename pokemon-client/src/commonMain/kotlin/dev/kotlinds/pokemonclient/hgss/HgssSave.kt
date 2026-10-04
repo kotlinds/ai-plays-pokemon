@@ -43,6 +43,13 @@ internal class HgssSave(private val mem: HgssMemory) {
         return mem.u8(vf + A.FLAGS_OFFSET + id / 8) shr (id % 8) and 1 == 1
     }
 
+    /** Save script variable [id] (`0x4000` until `0x4170`, `Save_VarsFlags_GetVarAddr`), null when unreadable. */
+    fun variable(id: Int): Int? {
+        if (id !in A.VAR_BASE until A.VAR_BASE + NUM_SAVE_VARS) return null
+        val vf = flags ?: return null
+        return mem.u16(vf + 2L * (id - A.VAR_BASE))
+    }
+
     /** Whether trainer [trainerId] was beaten (`TrainerFlagCheck`, src/fieldmap.c: flag `TRAINER_FLAG_BASE + id`). */
     fun trainerDefeated(trainerId: Int): Boolean? = flag(TRAINER_FLAG_BASE + trainerId)
 
@@ -76,6 +83,9 @@ internal class HgssSave(private val mem: HgssMemory) {
     companion object {
         /** `FLAG_GOT_BAG` (include/constants/flags.h); the next three unlock TRAINER CARD, SAVE and OPTIONS. */
         const val FLAG_GOT_BAG = 0x11B
+
+        /** `NUM_VARS` (include/constants/vars.h). */
+        const val NUM_SAVE_VARS = 0x170
 
         /** `TRAINER_FLAG_BASE` (include/constants/flags.h). */
         const val TRAINER_FLAG_BASE = 0x550

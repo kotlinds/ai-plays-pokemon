@@ -141,6 +141,9 @@ enum class UnavailableReason {
 
     /** It would leave the party without a Pokémon able to battle. */
     LAST_POKEMON,
+
+    /** Giving Mail opens the mail editor, which wants a written message (not supported). */
+    MAIL_NEEDS_WRITING,
 }
 
 /** What interrupted an action. */

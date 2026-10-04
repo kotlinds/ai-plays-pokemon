@@ -68,6 +68,42 @@ class HgssServicesRomTest {
     }
 
     @Test
+    fun leadersEliteFourAndElderLiAreBeatenThroughWhatTheirScriptRecords() {
+        rom()
+        val badge = { b: Int -> HgssTrainers.WonCondition.Badge(b) }
+        val flag = { f: Int -> HgssTrainers.WonCondition.Flag(f) }
+        // (map, trainer) -> what the win records. Gym leaders: the badge given right after CheckBattleWon
+        // (scr_seq_T22GYM0101_001 for Falkner). Elder Li (scr_seq_D15R0103_002): a message and TM70 come before
+        // SetFlag FLAG_UNK_076, the flag his script checks before the battle. Whitney and Clair don't give the badge
+        // after the battle (she cries, Clair sends you to the Dragon's Den): the var / flag their script checks first.
+        val expected = mapOf(
+            (156 to 290) to flag(0x76), // Elder Li, Sprout Tower 3F
+            (135 to 20) to badge(0), // Falkner
+            (180 to 21) to badge(1), // Bugsy
+            (137 to 30) to HgssTrainers.WonCondition.VarAtLeast(0x410A, 1), // Whitney (cries: the badge comes later)
+            (80 to 31) to badge(3), // Morty
+            (139 to 34) to badge(4), // Chuck
+            (138 to 33) to badge(5), // Jasmine
+            (140 to 32) to badge(6), // Pryce
+            (141 to 35) to flag(0xD1), // Clair
+            (473 to 253) to badge(8), // Brock
+            (427 to 254) to badge(9), // Misty
+            (365 to 255) to badge(10), // Lt. Surge
+            (395 to 256) to badge(11), // Erika
+            (480 to 257) to badge(12), // Janine
+            (410 to 258) to badge(13), // Sabrina
+            (457 to 259) to badge(14), // Blaine
+            (496 to 261) to badge(15), // Blue
+            (MAP_WILL_ROOM to 245) to flag(0xE4),
+            (302 to 247) to flag(0xE5), // Koga
+            (303 to 418) to flag(0xE6), // Bruno
+            (MAP_KAREN_ROOM to 246) to flag(0xE7),
+        )
+        val actual = expected.keys.associateWith { (map, trainer) -> HgssTrainers.wonCondition(map, trainer) }
+        assertEquals(expected, actual)
+    }
+
+    @Test
     fun clerkCatalogsComeFromTheirScripts() {
         rom()
         // The Indigo Plateau clerk (scr_seq_T10R0101_004): special mart 13.
@@ -115,7 +151,11 @@ class HgssPeopleLabelsTest {
         assertEquals("Kimono Girl", HgssLabels.person("DANCER"))
         assertEquals("Will (Elite Four)", HgssLabels.person("GSBIGFOUR1"))
         assertEquals("little boy", HgssLabels.person("BABYBOY1"))
-        assertEquals("object", HgssLabels.person("BABYBOY1_11"))
+        // Placeholder sprites: a League door (BABYBOY1_11) is a door, other placeholders scenery objects.
+        assertEquals("door", HgssLabels.person("BABYBOY1_11"))
+        assertEquals("object", HgssLabels.person("BABYBOY1_5"))
+        assertEquals("shutter", HgssLabels.person("GATE_LEFT"))
+        assertEquals("Apricorn tree", HgssLabels.person("BONGURI"))
     }
 
 }

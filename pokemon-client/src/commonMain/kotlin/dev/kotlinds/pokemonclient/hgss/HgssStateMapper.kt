@@ -119,13 +119,13 @@ class HgssStateMapper {
             frame = state.frame,
             screen = screen,
             player = state.player?.let { p ->
-                PlayerInfo(p.name, p.money, p.badges, p.trainerId, p.playTime?.let { (h, m, s) -> PlayTime(h, m, s) })
+                PlayerInfo(p.name, p.money, p.badges, p.trainerId, p.playTime?.let { (h, m, s) -> PlayTime(h, m, s) }, badgeIds = p.badgeIds)
             },
             party = party,
             bag = state.bag?.map { pocket ->
                 CommonBagPocket(pocket.pocket, pocket.items.map { BagItem(Named(ItemId(it.id), it.name), it.quantity) })
             },
-            battle = state.battle?.let { battle(it, party, (screen as? Screen.BattleCommand)?.actor).copy(message = battleMessage(it, memory)) },
+            battle = state.battle?.let { battle(it, party, (screen as? Screen.BattleCommand)?.actor, warnings).copy(message = battleMessage(it, memory), ballShakes = memory?.let(HgssPostBattleScreens::catchShakes)) },
             field = state.location?.takeIf { state.mode in FIELD_MODES }?.let { l ->
                 FieldState(
                     mapId = l.mapId,
@@ -157,12 +157,16 @@ class HgssStateMapper {
                             role = when (o.sprite) {
                                 "PCWOMAN1" -> PersonRole.NURSE
                                 "SHOPM1", "SHOPM1_2", "SHOPW1" -> PersonRole.CLERK
+                                in GATE_SPRITES -> PersonRole.GATE
+                                in SHUTTER_SPRITES -> PersonRole.SHUTTER
                                 else -> null
                             },
                             obstacle = when (o.sprite) {
                                 "TREE" -> ObstacleKind.CUT_TREE
                                 "BREAKROCK" -> ObstacleKind.SMASH_ROCK
-                                "ROCK" -> ObstacleKind.BOULDER
+                                // Only boulders running the Strength script move (the Ice Path B2F rocks that fell
+                                // from B1F don't: Strength doesn't work there, field_move.c FieldMove_CheckStrength).
+                                "ROCK" -> ObstacleKind.BOULDER.takeIf { o.scriptId == STD_FIELD_STRENGTH }
                                 "ICE" -> ObstacleKind.ICE_BLOCK
                                 else -> null
                             },
@@ -173,7 +177,15 @@ class HgssStateMapper {
             warnings = warnings,
             registeredItems = state.registeredItems.map { id -> id.takeIf { it != 0 }?.let(::ItemId) },
             story = story(state),
-        )
+        ).withBlockerRoles()
+    }
+
+    /** People the story blockers name ([HgssBlockers]) get the [PersonRole.BLOCKER] role (when they have no other). */
+    private fun GameState.withBlockerRoles(): GameState {
+        val blockers = story?.blockers.orEmpty().map { it.target }.toSet()
+        val field = field ?: return this
+        if (blockers.isEmpty()) return this
+        return copy(field = field.copy(objects = field.objects.map { o -> if (o.role == null && o.id in blockers) o.copy(role = PersonRole.BLOCKER) else o }))
     }
 
     // region Story
@@ -344,10 +356,35 @@ class HgssStateMapper {
         isEgg = isEgg,
     )
 
+    /** The last valid reading of each battle position, with the personality it belongs to (see [HgssBattlerCheck]). */
+    private val lastGoodBattlers = mutableMapOf<BattlerRef, Pair<Long, BattlerState>>()
+
+    /** A battler's move with its battle data (power, accuracy, category, priority) from the move table. */
+    private fun battleMove(move: MoveInfo): KnownMove {
+        val data = HgssData.moveData[move.id]
+        return KnownMove(
+            Named(MoveId(move.id), move.name), move.pp, move.maxPp, move.type,
+            power = data?.power, accuracy = data?.accuracy,
+            category = data?.category?.let { label -> dev.kotlinds.pokemonclient.data.MoveCategory.entries.firstOrNull { it.label.equals(label, ignoreCase = true) } },
+            priority = data?.priority,
+        )
+    }
+
     /** [commandActor]: who the command menu on screen is for (in doubles, the right Pokémon chooses second). */
-    private fun battle(b: BattleInfo, party: List<CommonPartyMon>, commandActor: BattlerRef?): BattleState {
-        val battlers = (b.player + b.opponents).map { battler ->
+    private fun battle(b: BattleInfo, party: List<CommonPartyMon>, commandActor: BattlerRef?, warnings: MutableList<ReadWarning> = mutableListOf()): BattleState {
+        val battlers = (b.player + b.opponents).mapNotNull { battler ->
             val ref = HgssStatuses.battlerRef(battler.battlerId, b.isDoubles)
+            val problems = HgssBattlerCheck.problems(battler)
+            if (problems.isNotEmpty()) {
+                // A battler caught mid-rewrite: its last valid reading (the same Pokémon), else left out.
+                val kept = lastGoodBattlers[ref]?.takeIf { it.first == battler.personality }?.second
+                warnings += ReadWarning(
+                    ReadWarning.Kind.POKEMON_CHECKSUM,
+                    "battler ${ref.wire} is being rewritten by the game (${problems.joinToString()}): " +
+                        if (kept != null) "showing its last valid reading" else "left out until it reads correctly",
+                )
+                return@mapNotNull kept
+            }
             BattlerState(
                 ref = ref,
                 mon = if (ref.isPlayerSide) MonId(battler.personality, battler.otId) else null,
@@ -362,12 +399,12 @@ class HgssStateMapper {
                     STAGE_NAMES[name]?.takeIf { value != 0 }?.let { it to value }
                 }.toMap(),
                 types = battler.types,
-                moves = battler.moves.map { KnownMove(Named(MoveId(it.id), it.name), it.pp, it.maxPp, it.type) },
+                moves = battler.moves.map { battleMove(it) },
                 ability = battler.ability?.takeIf { battler.abilityId != 0 }?.let { Named(AbilityId(battler.abilityId), it) },
                 heldItem = battler.heldItem?.takeIf { battler.heldItemId != 0 }?.let { Named(ItemId(battler.heldItemId), it) },
                 abilityRevealed = HgssStatuses.abilityAnnounced(battler.announceFlags, battler.counters),
                 catchRate = if (b.isWild && !ref.isPlayerSide) HgssData.gameData?.species(SpeciesId(battler.species))?.catchRate else null,
-            )
+            ).also { lastGoodBattlers[ref] = battler.personality to it }
         }
         val bySlot = party.associateBy { it.slot }
         return BattleState(
@@ -389,6 +426,11 @@ class HgssStateMapper {
     // endregion
 
     private companion object {
+        /** Doors placed as objects: the League doors (LEAG_DOOR2, BABYBOY1_11), the 2-tile doors of the Radio Tower 3F and Rocket HQ B2F (BABYBOY1_9). */
+        val GATE_SPRITES = setOf("LEAG_DOOR2", "BABYBOY1_11", "BABYBOY1_9")
+
+        /** The shutters of the Goldenrod Tunnel B2F puzzle. */
+        val SHUTTER_SPRITES = setOf("GATE_LEFT", "GATE_RIGHT", "GATE_TOP", "GATE_BOTTOM")
         /** Identical readings in a row after which a reading failing only the species-data checks is trusted. */
         const val STABLE_READS = 30
 
@@ -422,3 +464,6 @@ class HgssStateMapper {
         )
     }
 }
+
+/** `std_field_strength` (include/constants/std_script.h): the script of the boulders Strength pushes. */
+private const val STD_FIELD_STRENGTH = 10002

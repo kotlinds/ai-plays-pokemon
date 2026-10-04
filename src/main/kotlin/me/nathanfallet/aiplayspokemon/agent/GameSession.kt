@@ -88,11 +88,15 @@ class GameSession(
     /** Notes the agent wrote with the `note` action, returned with every full state. */
     val notes = ArrayDeque<String>()
 
+    /** The moves of the player noticed so far: part of [version]. */
+    private val stateVersion = StateVersion()
+
     /**
-     * Version of the state: the sequence number of the last screen change seen by the recorder. An agent's action
-     * computed on version v is refused if the screen changed after v.
+     * Version of the state: the sequence number of the last screen change seen by the recorder, plus the player's
+     * moves noticed ([StateVersion]: walking keeps the same screen kind, but the map the agent saw is then outdated).
+     * An agent's action computed on version v is refused if the screen changed or the player moved after v.
      */
-    val version: Long get() = recorder.log.since(0).lastOrNull { it is GameEvent.ScreenChanged }?.seq ?: 0L
+    val version: Long get() = stateVersion.of(recorder.log.since(0).lastOrNull { it is GameEvent.ScreenChanged }?.seq ?: 0L)
 
     /** Decodes the current state (on the console thread). */
     suspend fun state(): GameState = host.observe { memory -> game.state(memory) }
@@ -181,6 +185,8 @@ class GameSession(
             addNote(action.text)
             return ActionOutcome.Done()
         }
+        // Where the player stands now (a human may have walked since the last answer): part of the version.
+        stateVersion.observe(host.observe { memory -> game.state(memory).field })
         val current = version
         if (expectedVersion != null && expectedVersion < current) return ActionOutcome.Failed(ActionError.StaleState(expectedVersion, current))
         // Only a human really pressing keys (or the Pause button) stops an agent; the free run doesn't.
@@ -189,7 +195,11 @@ class GameSession(
         return try {
             host.lease(action.key, game.inputProbe) {
                 if (action is GameAction.Press || action is GameAction.Touch) countBlind(game.state(memory()).screen)
-                registry.execute(action, this, game).also { Navigator(this, game).settle(maxFrames = SETTLE_FRAMES) }
+                // The game settles after the action, but one step never runs much past STEP_FRAMES in all (the agent's
+                // call must answer before its client gives up): a long action leaves less time to settle.
+                registry.execute(action, this, game).also {
+                    Navigator(this, game).settle(maxFrames = (STEP_FRAMES - framesUsed).coerceIn(MIN_SETTLE_FRAMES.toLong(), SETTLE_FRAMES.toLong()).toInt())
+                }
             }
         } catch (_: ActionInterruptedException) {
             ActionOutcome.Failed(ActionError.Interrupted(dev.kotlinds.pokemonclient.actions.InterruptionCause.HUMAN, action.key))
@@ -197,8 +207,7 @@ class GameSession(
     }
 
     /** The team and position last sent, for [compact] answers that only repeat what changed. */
-    private var lastTeam: kotlinx.serialization.json.JsonElement? = null
-    private var lastPosition: kotlinx.serialization.json.JsonElement? = null
+    private val compactView = CompactView()
 
     /**
      * The state for the agent. [compact] (default for `act` answers) leaves out what the agent already has: the team
@@ -206,6 +215,7 @@ class GameSession(
      * `get_state` gives them).
      */
     private fun describe(state: GameState, legacy: JsonObject, full: Boolean, compact: Boolean = false): JsonObject = buildJsonObject {
+        stateVersion.observe(state.field)
         val batch = feed.take()
         val events = batch.events
         if (batch.repeated) put("messages_repeated", "your previous call seems not to have received its answer (timeout?): what happened since the call before it is given again")
@@ -217,19 +227,11 @@ class GameSession(
         }
         val other = events.mapNotNull(::describeEvent).distinct()
         if (other.isNotEmpty()) put("events_since_last_call", JsonArray(other.map(::JsonPrimitive)))
-        val view = StateView.state(state)
-        val moved = view["position"] != lastPosition
-        val teamChanged = view["team"] != lastTeam
-        view.forEach { (k, v) ->
-            when {
-                !compact -> put(k, v)
-                k == "team" -> if (teamChanged) put(k, v) else put(k, "unchanged since your last call")
-                k == "money" || k == "badges" -> Unit
-                else -> put(k, v)
-            }
-        }
-        lastTeam = view["team"]
-        lastPosition = view["position"]
+        val view = StateView.state(state, showHidden = knowledge().allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH))
+        val (viewEntries, moved) = compactView.take(view, compact)
+        viewEntries.forEach { (k, v) -> put(k, v) }
+        // get_state lists the bag (one line per pocket); act answers leave it out.
+        if (!compact) state.bag?.takeIf { it.isNotEmpty() }?.let { put("bag", StateView.bag(it)) }
         if (full) {
             state.storage?.let { put("boxes", StateView.storage(it)) }
             state.options?.let { put("options", StateView.options(it)) }
@@ -296,12 +298,22 @@ class GameSession(
         is GameEvent.ItemReceived -> "received ${event.item} x${event.quantity}"
         is GameEvent.BadgeReceived -> "received the ${event.badge} badge"
         is GameEvent.HumanInput -> "the human pressed buttons"
+        is GameEvent.Caught -> "caught ${event.name}" + (if (event.name != event.species) " (${event.species})" else "") +
+            (event.level?.let { " Lv$it" } ?: "") + " (${event.mon})" + (event.boxName?.let { ", sent to $it (party full)" } ?: ", in the party")
+        is GameEvent.SentToBox -> "${event.name} (${event.mon}) was sent to the PC: ${event.boxName}"
+        is GameEvent.LearnedMove -> "${event.name} (${event.mon}) learned ${event.move}" + (event.forgot?.let { ", forgot $it" } ?: "")
         else -> null
     }
 
     private companion object {
         val MAP_KEYS = listOf("map", "legend", "adjacent", "exits", "people", "objects", "nearby_areas")
         const val SETTLE_FRAMES = 1800
+
+        /** About 30 s of game (real time): what one step may take, action and settling together. */
+        const val STEP_FRAMES = 1800L
+
+        /** Always let the game settle a little after an action (a menu closing, the next screen fading in). */
+        const val MIN_SETTLE_FRAMES = 120
         const val MAX_NOTES = 20
     }
 }

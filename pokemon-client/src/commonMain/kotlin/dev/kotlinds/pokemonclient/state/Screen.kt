@@ -159,6 +159,8 @@ sealed interface Screen {
         val cursorCell: MapCell? = null,
         /** The cell of each destination, by entry id: lets a recipe steer the cursor to one that is off screen. */
         val cells: Map<String, MapCell> = emptyMap(),
+        /** Destinations visited but in another region than the player's (not selectable for that reason), by entry id. */
+        val otherRegion: Set<String> = emptySet(),
     ) : Selectable
 
     /** A cell of a map screen's grid (the fly map), x to the east, y to the south. */
@@ -212,14 +214,29 @@ sealed interface Screen {
         override val awaiting get() = Awaiting.ANIMATION
     }
 
-    /** Walking around. [banner] is a sign banner shown while walking past a sign: information only. */
-    data class Overworld(val banner: String? = null, override val awaiting: Awaiting) : Screen
+    /**
+     * Walking around. [banner] is a sign banner shown while walking past a sign: information only. [incomingCall]: the
+     * phone rings (answering it opens the call; walking on ignores it).
+     */
+    data class Overworld(val banner: String? = null, override val awaiting: Awaiting, val incomingCall: IncomingCall? = null) : Screen
 
     /** A battle with no decision to make right now (animations, messages printing). */
     data class Battle(override val awaiting: Awaiting) : Screen
 
     /** Title screen, intro movie, loading. */
     data class Intro(val detail: String, override val awaiting: Awaiting) : Screen
+
+    /**
+     * A full-screen application to look at, with nothing to choose: the Pokédex, the trainer card, a Pokémon's
+     * summary, the Pokégear's map or radio, the Hall of Fame. [exit] says how to leave it; [details] what it shows
+     * that matters (the Hall of Fame: the team being registered).
+     */
+    data class Viewer(
+        val app: ViewerApp,
+        val exit: ViewerExit,
+        override val awaiting: Awaiting,
+        val details: List<String> = emptyList(),
+    ) : Screen
 
     /**
      * Not decoded yet. Actions refuse to act on it; the agent keeps raw buttons, touch and screenshots.
@@ -413,3 +430,17 @@ enum class StarterStage {
     /** The professor asks "do you want this one?": A takes it for good, B looks again. */
     CONFIRMING,
 }
+
+/** The applications shown as a [Screen.Viewer]. */
+enum class ViewerApp {
+    POKEDEX, TRAINER_CARD, SUMMARY, POKEGEAR_MAP, POKEGEAR_RADIO,
+
+    /** Registering the team in the Hall of Fame after becoming Champion (an animation, then A). */
+    HALL_OF_FAME_REGISTER,
+
+    /** Looking at the Hall of Fame (from a PC). */
+    HALL_OF_FAME,
+}
+
+/** How to leave a [Screen.Viewer]: a [button] (pressed until the viewer is left), or a [touch] of the bottom screen. */
+data class ViewerExit(val button: Button? = null, val touch: TouchPoint? = null)

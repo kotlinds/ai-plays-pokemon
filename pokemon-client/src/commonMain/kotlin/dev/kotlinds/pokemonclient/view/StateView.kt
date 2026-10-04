@@ -97,7 +97,21 @@ object StateView {
                 put("stage", screen.stage.name.lowercase())
                 put("hint", "use choose_starter with the species id: it turns the machine, looks, picks and confirms")
             }
-            is Screen.Overworld -> screen.banner?.let { put("sign", it) }
+            is Screen.Overworld -> {
+                screen.banner?.let { put("sign", it) }
+                screen.incomingCall?.let { call ->
+                    put("incoming_call", buildJsonObject {
+                        put("caller", call.caller)
+                        put("id", call.callerId)
+                        put("hint", "the phone rings: advance_dialogue answers and reads the call; walking on ignores it")
+                    })
+                }
+            }
+            is Screen.Viewer -> {
+                screen.exit.button?.let { put("exit", "press ${it.name.lowercase()}") }
+                screen.exit.touch?.let { put("exit", "touch ${it.x},${it.y}") }
+                if (screen.details.isNotEmpty()) put("details", JsonArray(screen.details.map(::JsonPrimitive)))
+            }
             is Screen.Unknown -> screen.hint?.let { put("hint", it) }
             is Screen.Intro -> put("detail", screen.detail)
             else -> Unit
@@ -139,11 +153,14 @@ object StateView {
         if (b.statStages.isNotEmpty()) putJsonObject("stat_stages") { b.statStages.forEach { (stat, v) -> put(stat.name.lowercase(), v) } }
         put("types", b.types.joinToString("/"))
         b.catchRate?.let { put("catch_rate", it) }
-        if (b.ref.isPlayerSide) put("moves", JsonArray(b.moves.map { JsonPrimitive("move:${it.move.id.value} ${it.move.name} (${it.type ?: "?"}) ${it.pp}/${it.maxPp}") }))
+        if (b.ref.isPlayerSide) put("moves", JsonArray(b.moves.map { JsonPrimitive("move:${it.move.id.value} ${it.move.name} (${battleData(it)}) ${it.pp}/${it.maxPp}") }))
     }
 
-    /** The full compact state: screen, party, battle, position, money and badges, warnings. */
-    fun state(state: GameState): JsonObject = buildJsonObject {
+    /**
+     * The full compact state: screen, party, battle, position, money and badges, warnings. [showHidden]: show what the
+     * game hides (a puzzle's hidden switches), for agents allowed a walkthrough.
+     */
+    fun state(state: GameState, showHidden: Boolean = true): JsonObject = buildJsonObject {
         put("screen", screen(state.screen))
         state.battle?.let { put("battle", battle(it)) }
         state.field?.let { f ->
@@ -153,8 +170,9 @@ object StateView {
                 put("y", f.y)
                 f.facing?.let { put("facing", it.name.lowercase()) }
                 put("movement", f.movement.name.lowercase())
+                put("height", f.height)
             }
-            f.puzzle?.let { put("puzzle", puzzle(it)) }
+            f.puzzle?.let { put("puzzle", puzzle(it, showHidden)) }
         }
         if (state.party.isNotEmpty()) put("team", buildJsonArray { state.party.forEach { add(mon(it)) } })
         state.player?.let { p ->
@@ -183,6 +201,15 @@ object StateView {
         if (empty > 0) put("empty_boxes", empty)
     }
 
+    /**
+     * The bag, compact: one line per non-empty pocket ("medicine": "item:17 Potion x3, item:26 Super Potion x1").
+     */
+    fun bag(pockets: List<dev.kotlinds.pokemonclient.state.BagPocket>): JsonObject = buildJsonObject {
+        pockets.filter { it.items.isNotEmpty() }.forEach { pocket ->
+            put(pocket.name, pocket.items.joinToString { "item:${it.item.id.value} ${it.item.name} x${it.quantity}" })
+        }
+    }
+
     /** The game's OPTIONS. */
     fun options(options: dev.kotlinds.pokemonclient.state.GameOptions): JsonObject = buildJsonObject {
         put("text_speed", options.textSpeed.name.lowercase())
@@ -190,13 +217,17 @@ object StateView {
         put("battle_style", options.battleStyle.name.lowercase())
     }
 
-    /** The map puzzle: its rule, switches (what they toggle), shutters (open or not, tiles) and teleports. */
-    fun puzzle(puzzle: PuzzleState): JsonObject = buildJsonObject {
+    /**
+     * The map puzzle: its rule, switches (what they toggle), shutters (open or not, tiles), teleports, what can be seen
+     * (lift floor, candles...) and the mechanism routes don't model. Hidden switches only with [showHidden].
+     */
+    fun puzzle(puzzle: PuzzleState, showHidden: Boolean = true): JsonObject = buildJsonObject {
         fun tiles(tiles: List<PuzzleTile>) = JsonArray(tiles.map { JsonPrimitive("${it.x},${it.y}") })
         put("kind", puzzle.kind.name.lowercase())
         put("rule", puzzle.rule)
-        if (puzzle.switches.isNotEmpty()) putJsonArray("switches") {
-            puzzle.switches.forEach { s ->
+        val switches = puzzle.switches.filter { showHidden || !it.hidden }
+        if (switches.isNotEmpty()) putJsonArray("switches") {
+            switches.forEach { s ->
                 add(buildJsonObject {
                     put("id", s.id)
                     put("interact", JsonArray(s.targets.map(::JsonPrimitive)))
@@ -204,6 +235,7 @@ object StateView {
                     s.flipped?.let { put("flipped", it) }
                     if (s.toggles.isNotEmpty()) put("toggles", JsonArray(s.toggles.map(::JsonPrimitive)))
                     if (s.oneShot) put("one_shot", if (s.used) "used" else "unused")
+                    if (s.hidden) put("hidden", "not visible in the game (walkthrough knowledge)")
                 })
             }
         }
@@ -223,14 +255,93 @@ object StateView {
                     put("kind", t.kind.name.lowercase())
                     put("from", tiles(t.from))
                     put("to", "${t.to.x},${t.to.y}")
+                    t.toHeight?.let { put("to_height", it) }
+                })
+            }
+        }
+        if (puzzle.indicators.isNotEmpty()) putJsonArray("indicators") {
+            puzzle.indicators.forEach { i ->
+                add(buildJsonObject {
+                    put("id", i.id)
+                    put("on", i.on)
+                    put("on_means", i.meaning)
+                    put("at", tiles(i.tiles))
+                })
+            }
+        }
+        puzzle.unmodeled?.let { put("unmodeled", it) }
+        if (puzzle.boulderHoles.isNotEmpty()) putJsonArray("boulder_holes") {
+            puzzle.boulderHoles.forEach { b ->
+                add(JsonPrimitive("${b.boulder} → hole at ${b.hole.x},${b.hole.y}: " + if (b.fallen) "fallen (on the floor below)" else "still to push in"))
+            }
+        }
+        if (puzzle.herds.isNotEmpty()) putJsonArray("herds") {
+            puzzle.herds.forEach { h ->
+                add(buildJsonObject {
+                    put("id", h.id)
+                    put("at", "${h.at.x},${h.at.y}")
+                    h.facing?.let { put("facing", it.name.lowercase()) }
+                    // How to catch it is the agent's to work out: the blind spot and the plan are a walkthrough's.
+                    if (showHidden) put("blind_spot", h.blindSpot)
+                    putJsonArray("twigs") {
+                        h.twigs.forEach { t -> add(buildJsonObject { put("id", t.id); put("tiles", tiles(t.tiles)); put("active", t.active) }) }
+                    }
+                    if (showHidden) putJsonArray("plan") {
+                        h.plan.forEach { step ->
+                            add(when (step) {
+                                is dev.kotlinds.pokemonclient.state.HerdStep.StepOnTwig -> JsonPrimitive("step on ${step.twig} at ${step.tile.x},${step.tile.y}")
+                                is dev.kotlinds.pokemonclient.state.HerdStep.TalkFrom -> JsonPrimitive(
+                                    "from ${step.tile.x},${step.tile.y} face ${step.facing.name.lowercase()} and press A: " + when (val o = step.outcome) {
+                                        is dev.kotlinds.pokemonclient.state.HerdOutcome.Flees -> "it runs to ${o.to.x},${o.to.y}"
+                                        dev.kotlinds.pokemonclient.state.HerdOutcome.Caught -> "caught"
+                                    },
+                                )
+                            })
+                        }
+                    }
+                })
+            }
+        }
+        if (puzzle.platforms.isNotEmpty()) putJsonArray("platforms") {
+            puzzle.platforms.forEach { p ->
+                add(buildJsonObject {
+                    put("id", p.id)
+                    put("pivot", "${p.pivot.x},${p.pivot.y}")
+                    put("rotation", p.rotation)
+                    put("tiles", tiles(p.tiles))
+                    putJsonArray("triggers") {
+                        p.triggers.forEach { t ->
+                            add(buildJsonObject {
+                                put("at", "${t.tile.x},${t.tile.y}")
+                                put("effect", when (val e = t.effect) {
+                                    dev.kotlinds.pokemonclient.state.PlatformEffect.RotateClockwise -> "rotate_clockwise"
+                                    is dev.kotlinds.pokemonclient.state.PlatformEffect.Slide -> "slide_${e.direction.name.lowercase()}_${e.tiles}"
+                                })
+                                put("possible_now", t.possible)
+                            })
+                        }
+                    }
                 })
             }
         }
     }
 
+    /**
+     * A move's battle data, compact: "Electric, special, power 40, accuracy 100%" (+ "priority +1" when not 0);
+     * "never misses" for an accuracy of 0, no power for status moves and variable damage.
+     */
+    internal fun battleData(move: dev.kotlinds.pokemonclient.state.KnownMove): String = buildList {
+        add(move.type ?: "?")
+        move.category?.let { add(it.name.lowercase()) }
+        move.power?.takeIf { it > 0 }?.let { add("power $it") }
+        move.accuracy?.let { add(if (it == 0) "never misses" else "accuracy $it%") }
+        move.priority?.takeIf { it != 0 }?.let { add("priority ${if (it > 0) "+$it" else "$it"}") }
+    }.joinToString(", ")
+
     private fun status(status: MajorStatus) = when (status) {
         is MajorStatus.Asleep -> "asleep(${status.turns})"
-        is MajorStatus.BadlyPoisoned -> "badly poisoned"
+        // In battle, the toxic counter: this turn's damage was counter/16 of the max HP, the next one (counter+1)/16.
+        is MajorStatus.BadlyPoisoned -> if (status.counter > 0) "badly poisoned(${status.counter}, next ${status.counter + 1}/16 HP)" else "badly poisoned"
         MajorStatus.Burned -> "burned"
         MajorStatus.Frozen -> "frozen"
         MajorStatus.Paralyzed -> "paralyzed"

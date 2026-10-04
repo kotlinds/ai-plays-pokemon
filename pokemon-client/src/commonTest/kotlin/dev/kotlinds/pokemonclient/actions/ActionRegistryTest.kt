@@ -74,7 +74,7 @@ class ActionRegistryTest {
     @Test
     fun pureModeOnlyOffersRawControls() {
         val names = registry.available(battleState(command), ActionMode.PURE).map { it.name }.toSet()
-        assertEquals(setOf("press", "touch", "wait"), names)
+        assertEquals(setOf("press", "touch", "wait", "drag"), names)
     }
 
     @Test

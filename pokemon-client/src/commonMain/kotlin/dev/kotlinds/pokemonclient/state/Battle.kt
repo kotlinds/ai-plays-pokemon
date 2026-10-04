@@ -18,7 +18,17 @@ data class BattleState(
     val message: String?,
     /** Turns played so far (0 on the first turn), when known: Quick Ball / Timer Ball depend on it. */
     val turn: Int? = null,
-)
+    /**
+     * While a thrown ball is being resolved: how it ends, known as soon as the ball lands (0..3: it breaks free after
+     * that many shakes, [CAUGHT_SHAKES]: caught). Null otherwise.
+     */
+    val ballShakes: Int? = null,
+) {
+    companion object {
+        /** [ballShakes] of a ball that catches the Pokémon. */
+        const val CAUGHT_SHAKES = 4
+    }
+}
 
 /** Kinds of battles. */
 enum class BattleKind {

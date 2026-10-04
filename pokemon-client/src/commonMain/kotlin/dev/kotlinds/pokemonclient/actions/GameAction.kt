@@ -29,9 +29,20 @@ sealed interface GameAction {
         override val key get() = "touch(${point.x},${point.y})"
     }
 
-    /** Lets the game run: [frames] frames, or until it expects input again when null. */
-    data class Wait(val frames: Int? = null) : GameAction {
-        override val key get() = "wait(${frames ?: "input"})"
+    /**
+     * Lets the game run: [frames] frames, or until it expects input again when null; with [untilChange], until the
+     * screen changes (a new screen, text, cursor...), at most [frames] frames (30 s when null).
+     */
+    data class Wait(val frames: Int? = null, val untilChange: Boolean = false) : GameAction {
+        override val key get() = "wait(" + listOfNotNull("change".takeIf { untilChange }, frames?.toString()).ifEmpty { listOf("input") }.joinToString(",") + ")"
+    }
+
+    /**
+     * Drags the stylus on the bottom screen from [from] to [to] over [frames] frames (held all along, moved a little
+     * every frame), then lifts it: the Ruins of Alph panels, sliders.
+     */
+    data class Drag(val from: TouchPoint, val to: TouchPoint, val frames: Int = 30) : GameAction {
+        override val key get() = "drag(${from.x},${from.y}→${to.x},${to.y})"
     }
 
     // endregion
@@ -169,6 +180,7 @@ sealed interface GameAction {
         ).joinToString(",") + ")"
     }
 
+    /** Sells [quantity] of [item] at this Poké Mart (talks to the clerk, SELL, picks the item in the bag). */
     data class Sell(val item: ItemRef, val quantity: Int) : GameAction {
         override val key get() = "sell(${item.raw}x$quantity)"
     }
@@ -206,6 +218,11 @@ sealed interface GameAction {
     /** Soft reset (L + R + START + SELECT), then CONTINUE: back to the last save, losing what came after. */
     data object SoftReset : GameAction {
         override val key = "soft_reset"
+    }
+
+    /** Opens the start menu (from the overworld) on [entry] (`option:bag`, `option:pokemon`...), checked by its id. */
+    data class OpenMenu(val entry: String) : GameAction {
+        override val key get() = "open_menu($entry)"
     }
 
     /** Heals the party at a Pokémon Center (talks to the nurse). */
@@ -286,6 +303,7 @@ data class MoveOptions(
     val avoidTrainers: Boolean = false,
     val acceptOneWay: Boolean = false,
     val run: Boolean = false,
+    /** Ride the bicycle (got on before walking, again after each warp, where cycling is allowed). */
     val bike: Boolean = false,
 )
 

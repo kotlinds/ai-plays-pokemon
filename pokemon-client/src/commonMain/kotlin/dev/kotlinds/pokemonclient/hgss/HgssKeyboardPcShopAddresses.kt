@@ -39,6 +39,11 @@ object HgssKeyboardPcShopAddresses {
     const val NS_PAGE = 0x460L
 
     const val NS_PAGE_SWITCH_IDLE = 4
+    /** The capture's "transferred to the PC" message printing / shown before the fade out. */
+    const val NS_PAGE_SWITCH_WAIT_BATTLE_MESSAGE = 6
+    const val NS_PAGE_SWITCH_DELAY_AND_FADE_OUT = 7
+    /** `String *battleMsgString`: that message (NamingScreenAppData, src/naming_screen.c:106). */
+    const val NS_BATTLE_MSG_STRING = 0x180L
     const val KEYBOARD_COLUMNS = 13
     const val KEYBOARD_ROWS = 6
     const val ENTRY_BUF_SIZE = 32

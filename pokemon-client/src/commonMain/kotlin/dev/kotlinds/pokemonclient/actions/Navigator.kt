@@ -106,12 +106,37 @@ class Navigator(
         }
     }
 
-    /** Selects then confirms: the common "pick this entry" step. */
+    /**
+     * Selects then confirms: the common "pick this entry" step. An entry the D-pad can't reach but that has a touch
+     * point (the Pokégear's Close, touch-only buttons) is touched instead, see [touchEntry].
+     */
     fun <S : Screen.Selectable> choose(expect: KClass<S>, description: String, target: (Entry) -> Boolean): Step<GameState> =
         when (val selected = select(expect, description, target)) {
-            is Step.Failed -> Step.Failed(selected.error)
+            is Step.Failed -> if (selected.error is ActionError.Unreachable) touchEntry(expect, description, target, selected.error) else Step.Failed(selected.error)
             is Step.Done -> confirm(description, target)
         }
+
+    /**
+     * Touches the entry matching [target] on a [S] screen (an entry only reachable by touch), then checks the touch
+     * did something: the screen must change. A touch the game ignored is tried again, at most
+     * [RetryPolicy.maxCorrections] times, then fails with an explicit error. Without a touch point, fails with
+     * [unreachable].
+     */
+    fun <S : Screen.Selectable> touchEntry(expect: KClass<S>, description: String, target: (Entry) -> Boolean, unreachable: ActionError): Step<GameState> {
+        repeat(retry.maxCorrections + 1) {
+            val screen = settle().screen
+            if (!expect.isInstance(screen)) return Step.Failed(ActionError.UnexpectedScreen(expect.simpleName ?: "?", screen.kind))
+            screen as Screen.Selectable
+            val entry = screen.entries.firstOrNull(target) ?: return Step.Failed(ActionError.NotOnScreen(description, screen.kind, screen.entries.map { it.label }))
+            if (!entry.selectable) return Step.Failed(ActionError.NotSelectable(description, entry.label))
+            val point = entry.touch ?: return Step.Failed(unreachable)
+            scope.touch(point)
+            awaitChange(screen)
+            val after = settle()
+            if (!after.screen.sameAs(screen)) return Step.Done(after)
+        }
+        return Step.Failed(ActionError.VerificationFailed(description, expected = "the screen to react to the touch", actual = "nothing changed", attempts = retry.maxCorrections + 1))
+    }
 
     /**
      * Presses A to advance messages until [stop] matches the state, stopping on ANY menu or choice it doesn't

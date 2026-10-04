@@ -7,6 +7,7 @@ import dev.kotlinds.pokemonclient.state.MenuKind
 import dev.kotlinds.pokemonclient.state.PersonRole
 import dev.kotlinds.pokemonclient.state.Screen
 import dev.kotlinds.pokemonclient.state.ShopItem
+import dev.kotlinds.pokemonclient.runtime.kind
 
 /**
  * Recipes of buying at a Poké Mart: get to the shop list (talk to the clerk and pick BUY — the first entry of the
@@ -66,7 +67,7 @@ internal object ShopPlans {
                 failure = ActionError.Timeout("the bag got $gained ${purchase.item.raw} instead of ${purchase.quantity}")
                 break
             }
-            bought += "$gained ${itemName(after, itemId)} (₽$paid)"
+            bought += "$gained ${itemName(after, itemId)} (₽$paid)" + bonus(before, after, itemId).joinToString("") { " + bonus: $it" }
         }
         PartyBagPlans.closeToOverworld(context, maxPresses = CLOSE_PRESSES)
         val money = context.state().player?.money
@@ -76,6 +77,82 @@ internal object ShopPlans {
             bought.isEmpty() -> ActionOutcome.Failed(failure)
             // Some lines were bought: say so, with why the rest wasn't.
             else -> ActionOutcome.Done("$summary; stopped: ${failure.code} ${failure.message}")
+        }
+    }
+
+    /**
+     * What the bag got besides the [bought] item during a purchase: the clerk's gift (a Premier Ball for 10 Poké
+     * Balls), as "1 Premier Ball (item:12)".
+     */
+    internal fun bonus(before: GameState, after: GameState, bought: Int): List<String> {
+        val old = before.bag.orEmpty().flatMap { it.items }.groupBy { it.item.id.value }.mapValues { (_, s) -> s.sumOf { it.quantity } }
+        return after.bag.orEmpty().flatMap { it.items }.groupBy { it.item.id.value }
+            .mapNotNull { (id, stacks) ->
+                val gained = stacks.sumOf { it.quantity } - (old[id] ?: 0)
+                if (id == bought || gained <= 0) null else "$gained ${stacks.first().item.name} (item:$id)"
+            }
+    }
+
+    /**
+     * Sells [GameAction.Sell.quantity] of an item: talk to the clerk, SELL (the second entry of the clerk's menu
+     * whatever the language), pick the item in the bag the game opens, set the number (read back after each press),
+     * A, YES to the price; then leave. Checked on the bag and the money.
+     */
+    val sell = ActionPlan<GameAction.Sell> { action, context ->
+        val start = context.state()
+        val stack = start.bag.orEmpty().flatMap { it.items }.firstOrNull { matchesRef(action.item.raw, "item", it.item.id.value, it.item.name) }
+            ?: return@ActionPlan ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.UNKNOWN_ITEM, "There's no ${action.item.raw} in the bag"))
+        if (action.quantity > stack.quantity) {
+            return@ActionPlan ActionOutcome.Failed(ActionError.InvalidParameter("quantity", action.quantity.toString(), listOf("1..${stack.quantity}")))
+        }
+        val price = context.game.data?.item(stack.item.id)?.price
+        if (price == 0) return@ActionPlan ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.NO_EFFECT, "${stack.item.name} can't be sold (no price: key items, ...)"))
+        val itemId = stack.item.id.value
+        val sold = openSellBag(context).andThen {
+            PartyBagPlans.bagItem(context, action.item)
+        }.andThen { entry ->
+            context.navigator.choose(Screen.Bag::class, entry.label) { it.id == entry.id }
+        }.andThen {
+            context.navigator.advanceUntil(SHOP_WAITS) { it.screen is Screen.Quantity || it.screen is Screen.YesNo }
+        }.andThen { asked ->
+            // A single item skips the number: the price question comes at once.
+            if (asked.screen is Screen.YesNo) return@andThen Step.Done(asked)
+            setQuantity(context, action.quantity).andThen { quantity ->
+                context.scope.tap(Button.A)
+                context.navigator.awaitChange(quantity.screen)
+                context.navigator.advanceUntil(SHOP_WAITS) { it.screen is Screen.YesNo }
+            }
+        }.andThen {
+            context.navigator.choose(Screen.YesNo::class, "YES (sell)") { it.id == "option:yes" }
+        }.andThen {
+            context.navigator.advanceUntil(SHOP_WAITS) { it.screen is Screen.Bag }
+        }
+        PartyBagPlans.closeToOverworld(context, maxPresses = CLOSE_PRESSES)
+        if (sold is Step.Failed) return@ActionPlan ActionOutcome.Failed(sold.error)
+        val after = context.state()
+        val gone = count(start, itemId) - count(after, itemId)
+        val earned = (after.player?.money ?: 0) - (start.player?.money ?: 0)
+        if (gone != action.quantity) return@ActionPlan ActionOutcome.Failed(ActionError.Timeout("the bag lost $gone ${stack.item.name} instead of ${action.quantity}"))
+        ActionOutcome.Done("sold $gone ${stack.item.name} for ₽$earned" + (after.player?.money?.let { ", ₽$it now" } ?: ""))
+    }
+
+    /** Talks to the clerk (unless the clerk's menu is open) and picks SELL, up to the bag the game opens for selling. */
+    private fun openSellBag(context: PlanContext): Step<GameState> {
+        var state = context.navigator.settle()
+        if (state.screen is Screen.Bag) return Step.Done(state)
+        if (stage(state) == Stage.OVERWORLD) {
+            val clerk = clerk(state) ?: return Step.Failed(ActionError.Unavailable(UnavailableReason.WRONG_SCREEN, "There is no shop clerk here", "go to a Poké Mart"))
+            when (val talk = MovePlans.interact.run(GameAction.Interact(clerk.id), context)) {
+                is ActionOutcome.Failed -> return Step.Failed(talk.error)
+                is ActionOutcome.Done -> Unit
+            }
+            val menu = context.navigator.advanceUntil(SHOP_WAITS) { (it.screen as? Screen.ListMenu)?.kind == MenuKind.MULTICHOICE }
+            if (menu is Step.Failed) return menu
+            state = (menu as Step.Done).value
+        }
+        if (stage(state) != Stage.CLERK_MENU) return Step.Failed(ActionError.UnexpectedScreen("the clerk's menu", state.screen.kind))
+        return context.navigator.choose(Screen.ListMenu::class, "SELL") { it.id == "option:$CLERK_SELL" }.andThen {
+            context.navigator.advanceUntil(SHOP_WAITS) { it.screen is Screen.Bag }
         }
     }
 
@@ -193,6 +270,7 @@ internal object ShopPlans {
 
     /** BUY / SELL / SEE YA!: BUY is always first. */
     private const val CLERK_BUY = 0
+    private const val CLERK_SELL = 1
     private const val CLERK_MENU_SIZE = 3
     private const val SHOP_WAITS = 40
     private const val MAX_QUANTITY_PRESSES = 60

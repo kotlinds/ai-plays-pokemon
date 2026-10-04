@@ -8,6 +8,7 @@ import dev.kotlinds.pokemonclient.state.Awaiting
 import dev.kotlinds.pokemonclient.state.FieldObjectKind
 import dev.kotlinds.pokemonclient.state.FieldState
 import dev.kotlinds.pokemonclient.state.ObstacleKind
+import dev.kotlinds.pokemonclient.state.PersonRole
 import dev.kotlinds.pokemonclient.state.GameState
 import dev.kotlinds.pokemonclient.state.PuzzleState
 import dev.kotlinds.pokemonclient.state.Screen
@@ -24,6 +25,7 @@ import dev.kotlinds.pokemonclient.world.LiveObject
 import dev.kotlinds.pokemonclient.world.Node
 import dev.kotlinds.pokemonclient.world.Overlay
 import dev.kotlinds.pokemonclient.world.Pathfinder
+import dev.kotlinds.pokemonclient.world.PlatformPlanner
 import dev.kotlinds.pokemonclient.world.RouteFailure
 import dev.kotlinds.pokemonclient.world.RouteOptions
 import dev.kotlinds.pokemonclient.world.TeleportLink
@@ -101,6 +103,7 @@ internal object MovePlans {
      * elsewhere, is part of the hold: no press is lost). Checked tile by tile; a refused step says where it stopped.
      */
     val step = ActionPlan<GameAction.Step> { action, context ->
+        BikeRide.mount(context, action.options)
         val start = context.state().field ?: return@ActionPlan notInField(context)
         val d = action.direction
         val tiles = (1..action.tiles).map { Node(start.x + d.dx * it, start.y + d.dy * it) }
@@ -295,12 +298,15 @@ internal object MovePlans {
             val routeOptions = routeOptions(field, options, FieldMoveWalk.usable(access))
             // A tile target may be entered whatever it is (a warp, a scene trigger); targets reached with A never are.
             val enterable = if (target.adjacent) emptySet() else goalTiles
-            val route = when (val result = pathfinder.route(start, routeOptions, enterable, isGoal)) {
+            // Moving platforms (Blackthorn Gym): plan the rides; a plain route would never step on a trigger knowingly.
+            val ridden = field.puzzle?.mechanics?.let { PlatformPlanner(area, overlay(context, field, refused), it).route(start, routeOptions, enterable, isGoal) }
+            val route = ridden ?: when (val result = pathfinder.route(start, routeOptions, enterable, isGoal)) {
                 is Pathfinder.Result.Found -> result.route
                 // No plain route: maybe one moving boulders / ice blocks out of the way.
                 is Pathfinder.Result.Failed -> pushRoute(area, overlay(context, field, refused), start, routeOptions, enterable, isGoal)
                     ?: return Walk.NoRoute(result.failure, "no way to ${target.id} from ${field.x},${field.y}", access)
             }
+            avoidanceNotes(route, options).forEach { if (it !in notes) notes += it }
             var from = start
             var index = -1
             var strengthActive = false
@@ -462,7 +468,7 @@ internal object MovePlans {
                 LiveObject(
                     o.x, o.y, o.facing,
                     isFollower = o.kind == FieldObjectKind.FOLLOWER,
-                    sightRange = templates.firstOrNull { "person:${it.id}" == o.id }?.sightRange ?: 0,
+                    sightRange = sightRange(o, templates),
                     clearedBy = when (o.obstacle) {
                         ObstacleKind.CUT_TREE -> FieldMoveKind.CUT
                         ObstacleKind.SMASH_ROCK -> FieldMoveKind.ROCK_SMASH
@@ -471,13 +477,34 @@ internal object MovePlans {
                     },
                     // An ice block facing north has frozen to another one: it no longer moves.
                     iceBlock = o.obstacle == ObstacleKind.ICE_BLOCK && o.facing == Direction.SOUTH,
+                    fallsInto = field.puzzle?.boulderHoles?.firstOrNull { it.boulder == o.id && !it.fallen }?.let { it.hole.x to it.hole.y },
                 )
             },
             refused = refused,
             activeTriggers = activeTriggers(context, field),
             blockedTiles = field.puzzle?.barriers.orEmpty().filterNot { it.open }.flatMap { b -> b.tiles.map { it.x to it.y } }.toSet(),
-            teleports = field.puzzle?.teleports.orEmpty().flatMap { t -> t.from.map { TeleportLink(it.x, it.y, t.to.x, t.to.y) } },
+            teleports = puzzleTeleports(field.puzzle),
+            surfaces = puzzleSurfaces(field.puzzle),
         )
+    }
+
+    /** The teleports of [puzzle] as route edges (heights converted to tile units). */
+    internal fun puzzleTeleports(puzzle: PuzzleState?): List<TeleportLink> = puzzle?.teleports.orEmpty().flatMap { t ->
+        t.from.map { TeleportLink(it.x, it.y, t.to.x, t.to.y, fromHeight = t.fromHeight?.times(HEIGHT_UNITS), toHeight = t.toHeight?.times(HEIGHT_UNITS)) }
+    }
+
+    /** The moving floors of [puzzle] (a lift platform) as live tile heights (tile units). */
+    internal fun puzzleSurfaces(puzzle: PuzzleState?): Map<Pair<Int, Int>, List<Int>> =
+        puzzle?.surfaces.orEmpty().flatMap { s -> s.tiles.map { (it.x to it.y) to s.heights.map { h -> h * HEIGHT_UNITS } } }.toMap()
+
+    /**
+     * How far [o] watches for the player: 0 once beaten (a beaten trainer never stops the player again), else its
+     * live reading ([dev.kotlinds.pokemonclient.state.FieldTrainer.sightRange]) or the map's template.
+     */
+    internal fun sightRange(o: dev.kotlinds.pokemonclient.state.FieldObject, templates: List<dev.kotlinds.pokemonclient.world.PersonTemplate>): Int {
+        val trainer = o.trainer
+        if (trainer?.defeated == true) return 0
+        return trainer?.sightRange ?: templates.firstOrNull { "person:${it.id}" == o.id }?.sightRange ?: 0
     }
 
     /**
@@ -485,7 +512,8 @@ internal object MovePlans {
      * (the Ecruteak Gym pits while the puzzle is unsolved, story events...). Avoided unless targeted.
      */
     internal fun activeTriggers(context: PlanContext, field: FieldState): Set<Pair<Int, Int>> {
-        val triggers = context.game.world?.areaOf(field.mapId)?.triggers.orEmpty().filter { it.zone == field.mapId }
+        // Placeholder triggers (an empty script) start nothing: walked like floor.
+        val triggers = context.game.world?.areaOf(field.mapId)?.triggers.orEmpty().filter { it.zone == field.mapId && !it.inert }
         if (triggers.isEmpty()) return emptySet()
         val memory = context.scope.memory()
         return triggers.filter { context.game.scriptVariable(memory, it.variable) == it.value }
@@ -517,6 +545,17 @@ internal object MovePlans {
         if (a.mapId == b.mapId) return false
         val world = context.game.world ?: return true
         return world.areaOf(a.mapId)?.id != world.areaOf(b.mapId)?.id
+    }
+
+    /** What the agent should know when the options asked to avoid something the only way crosses anyway. */
+    private fun avoidanceNotes(route: Route, options: MoveOptions): List<String> = route.warnings.mapNotNull { w ->
+        when {
+            w is dev.kotlinds.pokemonclient.world.RouteWarning.CrossesTallGrass && options.avoidTallGrass ->
+                "no way without tall grass here: the way crosses ${w.tiles} grass tile(s)"
+            w is dev.kotlinds.pokemonclient.world.RouteWarning.PassesTrainerSight && options.avoidTrainers ->
+                "no way around an unbeaten trainer's line of sight here"
+            else -> null
+        }
     }
 
     /** What one step did. */
@@ -585,6 +624,8 @@ internal object MovePlans {
         val start = context.state().field ?: return StepResult.Stopped(context.state())
         val step = stepOnce(context, edge.direction, edge.via, options, long = true)
         if (step is StepResult.Refused) return step
+        // A lift keeps the player on its tile: its end is the height change.
+        val viaHeight = (step as? StepResult.Moved)?.field?.height
         // The script starts at the end of the step: wait until it has moved the player (or for a while), then until
         // the player can walk again.
         var waited = 0
@@ -596,7 +637,8 @@ internal object MovePlans {
             val field = state.field
             val awaiting = state.screen.awaiting
             if (state.battle != null || state.screen is Screen.Dialogue || state.screen is Screen.Selectable) return StepResult.Stopped(state)
-            val arrived = field != null && (field.mapId != start.mapId || field.x != edge.via.x || field.y != edge.via.y)
+            val arrived = field != null && (field.mapId != start.mapId || field.x != edge.via.x || field.y != edge.via.y ||
+                (edge.to.x == edge.via.x && edge.to.y == edge.via.y && viaHeight != null && field.height != viaHeight))
             val idle = field != null && state.screen is Screen.Overworld && awaiting == Awaiting.INPUT && !field.moving
             still = if (idle) still + 1 else 0
             // Ready once idle for a while after moving away, or idle long enough on the source tile (didn't fire).
@@ -620,9 +662,20 @@ internal object MovePlans {
     }
 
     /** Why there is no route, for the agent: what blocks and what to do about it. */
-    internal fun RouteFailure.hint(field: FieldState?): String? = when (this) {
+    internal fun RouteFailure.hint(field: FieldState?): String? {
+        // A mechanism of the map the routes don't model may be what closes the way: say so rather than "walls".
+        val unmodeled = field?.puzzle?.unmodeled
+        if (unmodeled != null && (this == RouteFailure.Unreachable || this == RouteFailure.DifferentLevel)) {
+            return "no route found, but this map has a mechanism the route planner doesn't model ($unmodeled): the way " +
+                "probably goes through it. Work it out from field.puzzle and the map, and move step by step"
+        }
+        return plainHint(field)
+    }
+
+    private fun RouteFailure.plainHint(field: FieldState?): String? = when (this) {
         RouteFailure.OnlyOneWay -> "only by jumping down ledges (one way, no way back): retry with accept_one_way if that's fine"
-        RouteFailure.DifferentLevel -> "it's on another floor or level: find the stairs"
+        RouteFailure.DifferentLevel -> "it's on another height level (a walkway, a platform, a bridge above or below): " +
+            "find the stairs, ladder or lift that leads there"
         RouteFailure.StartUnknown, RouteFailure.TargetUnknown -> null
         RouteFailure.Unreachable -> "not connected to where you stand by walking on this map (walls, heights), nor through its warps and holes"
         is RouteFailure.BlockedByPerson -> {
@@ -630,9 +683,18 @@ internal object MovePlans {
             when {
                 person == null -> "someone stands in the only way at $x,$y (on another floor or map): they may move, or step aside once spoken to"
                 person.kind == FieldObjectKind.ITEM_BALL -> "an item ball lies in the only way at $x,$y: pick it up (interact ${objectTargetId(person)})"
+                person.role == PersonRole.SHUTTER -> "a closed shutter (${person.id}) blocks the only way at $x,$y: flip the switches of this map's puzzle to open it"
+                person.role == PersonRole.GATE -> "a closed door (${person.id}) blocks the only way at $x,$y: it opens after an event (a key, a battle...)"
+                person.role == PersonRole.BLOCKER -> "${person.id} (${person.label}) blocks the only way at $x,$y until a story event moves them: " +
+                    "follow the story (talk to them to learn what they wait for)"
                 else -> "${person.id} (${person.label}) stands in the only way at $x,$y: talk to them (interact ${person.id}); " +
-                    "some step aside once spoken to, others move by themselves"
+                    "some step aside once spoken to, others move by themselves; or leave the map and come back " +
+                    "(people walking around go back to their place)"
             }
+        }
+        is RouteFailure.BlockedByBarrier -> {
+            val barrier = field?.puzzle?.barriers?.firstOrNull { b -> b.tiles.any { it.x == x && it.y == y } }
+            "a closed shutter${barrier?.let { " (${it.id})" } ?: ""} blocks the only way at $x,$y: flip the switches of this map's puzzle to open it"
         }
         is RouteFailure.NeedsFieldMove -> FieldMoveWalk.hint(this, null)
     }

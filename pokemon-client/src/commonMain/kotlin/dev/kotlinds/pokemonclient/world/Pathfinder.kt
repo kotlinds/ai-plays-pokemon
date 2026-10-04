@@ -53,9 +53,12 @@ data class RouteOptions(
     val mode: MovementMode = MovementMode.WALK,
     /** The party can use Surf (a Pokémon knows it and the badge allows it): routes may cross surfable water. */
     val canSurf: Boolean = false,
-    /** Make tall grass expensive (avoids wild battles when another way exists). */
+    /**
+     * Avoid tall grass whenever a way without it exists (each grass tile outweighs any detour of the same area), and
+     * cross as little of it as possible otherwise.
+     */
     val avoidTallGrass: Boolean = false,
-    /** Make tiles in the line of sight of undefeated trainers expensive. */
+    /** Avoid the line of sight of undefeated trainers whenever another way exists (it outweighs tall grass too). */
     val avoidTrainers: Boolean = false,
     /** Allow routes that can't be walked back (ledges): refused by default, with a [RouteWarning]. */
     val acceptOneWay: Boolean = false,
@@ -93,6 +96,11 @@ data class LiveObject(
      * ice pushes it ([PushPlanner]).
      */
     val iceBlock: Boolean = false,
+    /**
+     * For a Strength boulder: the hole it drops through when pushed onto it (Ice Path B1F: it disappears from this
+     * floor and lands on the one below). Other holes refuse it.
+     */
+    val fallsInto: Pair<Int, Int>? = null,
 )
 
 /** What changes on the map, read live: people, tiles refused by the game, active triggers. */
@@ -106,10 +114,29 @@ data class Overlay(
     val blockedTiles: Set<Pair<Int, Int>> = emptySet(),
     /** Teleports usable right now: stepping on a source tile takes the player elsewhere on the map. */
     val teleports: List<TeleportLink> = emptyList(),
+    /** Tiles with live walkable heights (a lift platform's floors), added to [TileInfo.heights] (same units). */
+    val surfaces: Map<Pair<Int, Int>, List<Int>> = emptyMap(),
+    /**
+     * Tiles walkable right now whatever the ROM says (the Blackthorn Gym's platforms over the lava, [MovingPlatforms]):
+     * still blocked by people and closed barriers.
+     */
+    val openTiles: Set<Pair<Int, Int>> = emptySet(),
 )
 
-/** Stepping on ([fromX], [fromY]) takes the player to ([toX], [toY]) on the same map (warp pad, cart ride). */
-data class TeleportLink(val fromX: Int, val fromY: Int, val toX: Int, val toY: Int, val cost: Int = DEFAULT_COST) {
+/**
+ * Stepping on ([fromX], [fromY]) takes the player to ([toX], [toY]) on the same map (warp pad, cart ride). A lift sets
+ * [fromHeight] (it starts only for a player entering at that height) and [toHeight] (the height it lands at), in
+ * [TileInfo.heights] units.
+ */
+data class TeleportLink(
+    val fromX: Int,
+    val fromY: Int,
+    val toX: Int,
+    val toY: Int,
+    val cost: Int = DEFAULT_COST,
+    val fromHeight: Int? = null,
+    val toHeight: Int? = null,
+) {
     companion object {
         /** A teleport takes a few seconds (fade, ride): worth about this many steps. */
         const val DEFAULT_COST = 8
@@ -161,6 +188,9 @@ sealed interface RouteFailure {
 
     /** The only way is through ([x], [y]), where a person stands (they may move, or step aside once talked to). */
     data class BlockedByPerson(val x: Int, val y: Int) : RouteFailure
+
+    /** The only way is through ([x], [y]), closed right now by the map's live state (a shutter: [Overlay.blockedTiles]). */
+    data class BlockedByBarrier(val x: Int, val y: Int) : RouteFailure
 }
 
 /**
@@ -184,6 +214,13 @@ sealed interface RouteFailure {
  */
 class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay()) {
 
+    /** The tile at (x, y) with its live heights ([Overlay.surfaces]) when a moving floor is there. */
+    private fun tile(x: Int, y: Int): TileInfo? {
+        val tile = area.tile(x, y) ?: return null
+        val live = overlay.surfaces[x to y] ?: return tile
+        return tile.copy(heights = (tile.heights + live).distinct().sorted())
+    }
+
     private val occupied = overlay.objects.filter { !it.isFollower }.map { it.x to it.y }.toSet()
     private val warpTiles = area.warps.map { it.x to it.y }.toSet()
     private val obstacles = overlay.objects.mapNotNull { o -> o.clearedBy?.let { (o.x to o.y) to it } }.toMap()
@@ -196,14 +233,14 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
 
     /** The level (height index) at (x, y) closest to [height], or 0 on flat tiles. */
     fun levelAt(x: Int, y: Int, height: Int): Int {
-        val heights = area.tile(x, y)?.heights.orEmpty()
+        val heights = tile(x, y)?.heights.orEmpty()
         if (heights.size <= 1) return 0
         return heights.indices.minBy { kotlin.math.abs(heights[it] - height) }
     }
 
     /** Cheapest route from [start] to any node satisfying [isGoal] (goal tiles may be warps or triggers). */
     fun route(start: Node, options: RouteOptions = RouteOptions(), goalTiles: Set<Pair<Int, Int>> = emptySet(), isGoal: (Node) -> Boolean): Result {
-        if (area.tile(start.x, start.y) == null) return Result.Failed(RouteFailure.StartUnknown)
+        if (tile(start.x, start.y) == null) return Result.Failed(RouteFailure.StartUnknown)
         // Active triggers (scenes) only when there is no other way.
         var triggers = false
         val found = search(start, options, goalTiles, isGoal, allowJumps = true)
@@ -242,7 +279,7 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
         for (edge in relaxed.orEmpty()) {
             var before = from
             for (node in edge.tiles) {
-                val tile = area.tile(node.x, node.y)
+                val tile = tile(node.x, node.y)
                 val move = tile?.let { gate(it, node.x, node.y, options) }
                 if (move != null) return RouteFailure.NeedsFieldMove(move, node.x, node.y, before, directionBetween(before, node) ?: edge.direction)
                 before = node
@@ -252,6 +289,14 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
         // A person standing in the only way (a guard in front of a door...).
         val throughPeople = search(start, options, goalTiles, isGoal, allowJumps = true, allowTriggers = true, ignorePeople = true)
         throughPeople?.flatMap { it.tiles }?.firstOrNull { (it.x to it.y) in occupied }?.let { return RouteFailure.BlockedByPerson(it.x, it.y) }
+        // A closed shutter in the only way.
+        if (overlay.blockedTiles.isNotEmpty()) {
+            val throughBarriers = search(start, options, goalTiles, isGoal, allowJumps = true, allowTriggers = true, ignoreBarriers = true)
+            throughBarriers?.flatMap { it.tiles }?.firstOrNull { (it.x to it.y) in overlay.blockedTiles }?.let { return RouteFailure.BlockedByBarrier(it.x, it.y) }
+        }
+        // Reachable only by climbing more than the game allows: on another height level (a walkway, a platform).
+        val anyHeight = options.copy(maxClimb = Int.MAX_VALUE / 2)
+        if (search(start, anyHeight, goalTiles, isGoal, allowJumps = true, allowTriggers = true) != null) return RouteFailure.DifferentLevel
         return RouteFailure.Unreachable
     }
 
@@ -260,16 +305,17 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
      * ([RouteFailure.NeedsFieldMove]) or a person standing there ([RouteFailure.BlockedByPerson]). Null otherwise.
      */
     fun blockerAt(x: Int, y: Int, options: RouteOptions): RouteFailure? {
-        val tile = area.tile(x, y) ?: return null
+        val tile = tile(x, y) ?: return null
         gate(tile, x, y, options)?.let { return RouteFailure.NeedsFieldMove(it, x, y) }
         if ((x to y) in occupied) return RouteFailure.BlockedByPerson(x, y)
+        if ((x to y) in overlay.blockedTiles) return RouteFailure.BlockedByBarrier(x, y)
         return null
     }
 
     private fun route(edges: List<Edge>, options: RouteOptions, oneWay: Boolean = false): Route {
         val crossed = edges.flatMap { it.tiles }
         val warnings = buildList {
-            val grass = crossed.count { area.tile(it.x, it.y)?.kind == TileKind.TallGrass }
+            val grass = crossed.count { tile(it.x, it.y)?.kind == TileKind.TallGrass }
             if (grass > 0) add(RouteWarning.CrossesTallGrass(grass))
             if (crossed.any { (it.x to it.y) in inSight }) add(RouteWarning.PassesTrainerSight)
             if (oneWay) add(RouteWarning.OneWay)
@@ -287,6 +333,7 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
         relaxed: Boolean = false,
         allowTriggers: Boolean = false,
         ignorePeople: Boolean = false,
+        ignoreBarriers: Boolean = false,
     ): List<Edge>? {
         val dist = HashMap<Node, Int>()
         val previous = HashMap<Node, Pair<Node, Edge>>()
@@ -298,7 +345,7 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
             if (d > (dist[node] ?: Int.MAX_VALUE)) continue
             if (node != start && isGoal(node)) return path(previous, start, node)
             val heading = previous[node]?.second?.direction
-            for (edge in neighbours(node, options, goalTiles, allowJumps, relaxed, allowTriggers, ignorePeople)) {
+            for (edge in neighbours(node, options, goalTiles, allowJumps, relaxed, allowTriggers, ignorePeople, ignoreBarriers)) {
                 val next = d + edge.cost
                 val known = dist[edge.to] ?: Int.MAX_VALUE
                 // Between routes of the same cost, prefer going on straight: fewer turns walk faster (each turn ends
@@ -362,14 +409,15 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
         relaxed: Boolean = false,
         allowTriggers: Boolean = false,
         ignorePeople: Boolean = false,
+        ignoreBarriers: Boolean = false,
     ): List<Edge> {
-        val here = area.tile(node.x, node.y) ?: return emptyList()
+        val here = tile(node.x, node.y) ?: return emptyList()
         val hereHeight = here.heights.getOrNull(node.level)
         return Direction.entries.mapNotNull { dir ->
             if ((node to dir) in overlay.refused) return@mapNotNull null
             val x = node.x + dir.dx
             val y = node.y + dir.dy
-            val tile = area.tile(x, y) ?: return@mapNotNull null
+            val tile = tile(x, y) ?: return@mapNotNull null
             if (railingBlocks(here, tile, dir)) return@mapNotNull null
             // A bridge over water is floor only for a player already on the bridge (water to surf otherwise).
             if ((tile.kind as? TileKind.Bridge)?.overWater == true && options.mode != MovementMode.SURF && here.kind !is TileKind.Bridge) {
@@ -384,12 +432,17 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
                 if (!allowJumps || kind.jump != dir) return@mapNotNull null
                 val lx = x + dir.dx
                 val ly = y + dir.dy
-                val landing = area.tile(lx, ly) ?: return@mapNotNull null
+                val landing = tile(lx, ly) ?: return@mapNotNull null
                 if (!walkable(landing, lx, ly, options, goalTiles, relaxed)) return@mapNotNull null
                 return@mapNotNull Edge.Jump(Node(lx, ly, 0), dir)
             }
-            if (!isGoalTile) teleportsFrom[x to y]?.let { return@mapNotNull teleport(it.first(), tile, x, y, dir, hereHeight, options) }
-            if (!isGoalTile && !walkable(tile, x, y, options, goalTiles, relaxed, allowTriggers, ignorePeople)) return@mapNotNull null
+            if (!isGoalTile) teleportsFrom[x to y]?.let { links ->
+                // A lift only starts for a player entering at its height; any other teleport whatever the height.
+                val entering = levelFrom(tile, hereHeight, options)?.let { tile.heights.getOrNull(it) }
+                val link = links.firstOrNull { l -> l.fromHeight == null || (entering != null && kotlin.math.abs(l.fromHeight - entering) <= options.maxClimb) }
+                if (link != null) return@mapNotNull teleport(link, tile, x, y, dir, hereHeight, options)
+            }
+            if (!isGoalTile && !walkable(tile, x, y, options, goalTiles, relaxed, allowTriggers, ignorePeople, ignoreBarriers)) return@mapNotNull null
             if (isGoalTile && tile.blocked && kind !is TileKind.Door) {
                 // A blocked goal (a person, a sign, a counter) can't be entered: the plan stops next to it.
                 return@mapNotNull null
@@ -402,7 +455,8 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
             }
             val sceneCost = if (allowTriggers && !isGoalTile && (x to y) in overlay.activeTriggers) TRIGGER_COST else 0
             val personCost = if (ignorePeople && !isGoalTile && (x to y) in occupied) FIELD_MOVE_COST else 0
-            Edge.Step(entered, dir, cost(tile, x, y, options, relaxed) + sceneCost + personCost)
+            val barrierCost = if (ignoreBarriers && !isGoalTile && (x to y) in overlay.blockedTiles) FIELD_MOVE_COST else 0
+            Edge.Step(entered, dir, cost(tile, x, y, options, relaxed, diagnosing = ignorePeople || ignoreBarriers) + sceneCost + personCost + barrierCost)
         }
     }
 
@@ -437,7 +491,7 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
         var pushed = false
         var cost = 0
         while (true) {
-            val tile = area.tile(at.x, at.y) ?: break
+            val tile = tile(at.x, at.y) ?: break
             cost += cost(tile, at.x, at.y, options, relaxed)
             when (val kind = tile.kind) {
                 is TileKind.Spinner -> {
@@ -453,7 +507,7 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
             if (!seen.add(at to dir)) return null
             val nx = at.x + dir.dx
             val ny = at.y + dir.dy
-            val next = area.tile(nx, ny) ?: break
+            val next = tile(nx, ny) ?: break
             val takenAway = (nx to ny) in warpTiles || (nx to ny) in overlay.activeTriggers
             if (takenAway && (nx to ny) !in goalTiles) return null
             if (next.kind is TileKind.Ledge || !walkable(next, nx, ny, options, goalTiles, relaxed)) break
@@ -536,7 +590,7 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
         }
         val height = tile.heights.getOrNull(node.level) ?: return false
         return Direction.entries.any { d ->
-            val next = area.tile(node.x + d.dx, node.y + d.dy) ?: return@any false
+            val next = tile(node.x + d.dx, node.y + d.dy) ?: return@any false
             next.kind is TileKind.Water && next.heights.any { kotlin.math.abs(it - height) <= DEFAULT_WATER_CLIMB }
         }
     }
@@ -550,13 +604,13 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
         val tiles = mutableListOf<Node>()
         var cx = x
         var cy = y
-        while (area.tile(cx, cy)?.kind == over) {
+        while (tile(cx, cy)?.kind == over) {
             tiles += Node(cx, cy, 0)
             cx += dir.dx
             cy += dir.dy
             if (tiles.size > MAX_CROSSING) return null
         }
-        val landing = area.tile(cx, cy) ?: return null
+        val landing = tile(cx, cy) ?: return null
         if (landing.blocked || (cx to cy) in occupied || tiles.isEmpty()) return null
         val to = Node(cx, cy, waterLevel(landing, cx, cy))
         if (!onWater(to, landing)) return null
@@ -572,8 +626,13 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
         if (tile.blocked || (x to y) in occupied || (x to y) in overlay.blockedTiles) return null
         // The trigger fires on entering the tile whatever its surface (a pit is lower than the floor around it).
         val level = levelFrom(tile, hereHeight, options) ?: 0
-        val landing = area.tile(teleport.toX, teleport.toY) ?: return null
-        val landingLevel = if (landing.heights.size <= 1) 0 else levelFrom(landing, tile.heights.getOrNull(level), options) ?: 0
+        val landing = tile(teleport.toX, teleport.toY) ?: return null
+        val landingLevel = when {
+            landing.heights.size <= 1 -> 0
+            // A lift lands on its other floor.
+            teleport.toHeight != null -> landing.heights.indices.minBy { kotlin.math.abs(landing.heights[it] - teleport.toHeight) }
+            else -> levelFrom(landing, tile.heights.getOrNull(level), options) ?: 0
+        }
         return Edge.Teleport(Node(teleport.toX, teleport.toY, landingLevel), dir, Node(x, y, level), teleport.cost)
     }
 
@@ -586,10 +645,12 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
         relaxed: Boolean = false,
         allowTriggers: Boolean = false,
         ignorePeople: Boolean = false,
+        ignoreBarriers: Boolean = false,
     ): Boolean {
         if ((x to y) in goalTiles) return true
         if (gate(tile, x, y, options) != null) return relaxed
-        if (tile.blocked || (!ignorePeople && (x to y) in occupied) || (x to y) in overlay.blockedTiles) return false
+        if ((x to y) in overlay.openTiles) return (ignorePeople || (x to y) !in occupied) && (ignoreBarriers || (x to y) !in overlay.blockedTiles)
+        if (tile.blocked || (!ignorePeople && (x to y) in occupied) || (!ignoreBarriers && (x to y) in overlay.blockedTiles)) return false
         if ((x to y) in warpTiles || (!allowTriggers && (x to y) in overlay.activeTriggers) || tile.kind == TileKind.Ladder) return false
         val kind = tile.kind
         if (kind is TileKind.Water) return kind.surfable
@@ -603,19 +664,28 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
         return best.takeIf { kotlin.math.abs(tile.heights[it] - fromHeight) <= options.maxClimb }
     }
 
-    private fun cost(tile: TileInfo, x: Int, y: Int, options: RouteOptions, relaxed: Boolean = false): Int {
+    /**
+     * The cost of entering [tile]. The avoid options don't apply while [relaxed] or [diagnosing] (looking for what
+     * blocks a route: only passability matters there, and their large costs would outweigh the field moves counted).
+     */
+    private fun cost(tile: TileInfo, x: Int, y: Int, options: RouteOptions, relaxed: Boolean = false, diagnosing: Boolean = false): Int {
         var cost = 1
         if (relaxed && gate(tile, x, y, options) != null) cost += FIELD_MOVE_COST
         // Starting to surf takes a prompt: prefer land when it's not much longer (without auto-Surf, every water
         // tile counts it; with it, only the edge entering the water does, see fieldMoveEdge).
         if (tile.kind is TileKind.Water && options.mode != MovementMode.SURF && !canUse(FieldMoveKind.SURF, options)) cost += SURF_START_COST
+        if (relaxed || diagnosing) return cost
         if (options.avoidTallGrass && tile.kind == TileKind.TallGrass) cost += GRASS_COST
         if (options.avoidTrainers && (x to y) in inSight) cost += SIGHT_COST
         return cost
     }
 
     private companion object {
-        const val GRASS_COST = 20
+        /**
+         * Strict avoidance: a grass tile costs more than any detour on a map (a few hundred tiles), a tile in a
+         * trainer's sight more than a long walk through grass (a sure battle against a likely one).
+         */
+        const val GRASS_COST = 1_000
         const val SURF_START_COST = 5
 
         /** Using a field move (A, the question, the animation) takes a few seconds: worth about this many steps. */
@@ -626,7 +696,7 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
 
         /** Longest waterfall or row of whirlpools crossed by one field move. */
         const val MAX_CROSSING = 16
-        const val SIGHT_COST = 50
+        const val SIGHT_COST = 50_000
 
         /** Walking onto an active trigger starts a scene: only when nothing else works. */
         const val TRIGGER_COST = 10_000

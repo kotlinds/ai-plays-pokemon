@@ -198,11 +198,16 @@ internal object HgssScriptScreens {
 
     /**
      * The person talked to (`ScriptEnvironment.lastInteracted`): a trainer is named like the battle names it
-     * ("Psychic Eli", from its trainer script); anyone else from its sprite (display only).
+     * ("Psychic Eli", from its trainer script, or from the battle its map's script runs for it: Kimono Girls); anyone
+     * else from its sprite (display only).
      */
     private fun speaker(mem: HgssMemory, env: Long): String? {
         val obj = mem.ptr(env + A.SE_LAST_INTERACTED) ?: return null
-        trainerOfScript(mem.u16(obj + A.MO_SCRIPT_ID))?.let { trainer -> HgssData.gameData?.trainerLabel(trainer)?.let { return it } }
+        val script = mem.u16(obj + A.MO_SCRIPT_ID)
+        // A common trainer script, else a trainer its map's own scripts battle (Kimono Girls, Elite Four...).
+        val trainer = trainerOfScript(script)
+            ?: mem.s32(obj + A.MO_MAP_ID).takeIf { it >= 0 }?.let { zone -> HgssTrainers.trainerOf(zone, mem.u16(obj + A.MO_ID), script) }
+        trainer?.let { HgssData.gameData?.trainerLabel(it)?.let { label -> return label } }
         val sprite = mem.s32(obj + A.MO_SPRITE_ID)
         return HgssLabels.person(HgssData.spriteName(sprite))
     }

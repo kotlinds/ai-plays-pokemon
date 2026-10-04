@@ -1,5 +1,6 @@
 package dev.kotlinds.pokemonclient.hgss
 
+import dev.kotlinds.pokemonclient.state.BlockerCause
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -46,6 +47,18 @@ class HgssBlockersTest {
     }
 
     @Test
+    fun theDragonsDenGuardBlocksUntilClairIsBeaten() {
+        // Blackthorn (map 89), obj_T30_gsoldman1 at (672,133): its hide flag and FLAG_UNK_0D1 (BEAT_CLAIR) are set
+        // together when Clair loses (scr_seq_0943_T30GYM0101.s). Checked live with the Rising Badge: no blocker.
+        val guard = person(1, 672, 133, mapId = 89, eventFlag = 0x202)
+        val blockers = HgssBlockers.of(state(89, listOf(guard)))
+        assertEquals(listOf("person:1"), blockers.map { it.target })
+        assertTrue("Clair" in blockers.single().reason)
+        val beaten = StoryInfo(flags = setOf(HgssStoryTable.Flags.BEAT_CLAIR))
+        assertTrue(HgssBlockers.of(state(89, listOf(guard), story = beaten)).isEmpty())
+    }
+
+    @Test
     fun aPersonInAOneTilePassageThatWillLeaveIsAGenericBlocker() {
         // Corridor running north-south at x 11; the person stands in it.
         val grid = LocalGrid(10, 10, 3, 3, listOf("#.#", "#.#", "#.#"))
@@ -70,5 +83,67 @@ class HgssBlockersTest {
         assertEquals(listOf("trigger:0"), generic.map { it.target })
         // Fifteen armed pits (Ecruteak Gym): a mechanism, not story blockers.
         assertTrue(HgssBlockers.of(state(80, triggers = (0 until 15).map { trigger(it, true) })).isEmpty())
+    }
+
+    @Test
+    fun whitneyCriesUntilTheLassCameThenGivesTheBadge() {
+        // After the battle VAR_UNK_410A = 1 arms the trigger at (13,11).
+        val armed = listOf(TriggerInfo(index = 0, x = 13, z = 11, width = 1, height = 1, scriptId = 2, active = true, variable = 0x410A, value = 1))
+        val crying = HgssBlockers.of(state(137, triggers = armed))
+        assertEquals(listOf("trigger:0"), crying.map { it.target })
+        assertTrue("Whitney" in crying.single().reason && "person:0" in crying.single().reason)
+        // Once the Lass came (FLAG_UNK_0B7), or with the badge, nothing blocks any more (the trigger stays armed).
+        assertTrue(HgssBlockers.of(state(137, triggers = armed, story = StoryInfo(flags = setOf(0xB7)))).isEmpty())
+        assertTrue(HgssBlockers.of(state(137, triggers = armed, story = StoryInfo(badges = setOf(HgssStoryTable.PLAIN)))).isEmpty())
+    }
+
+    @Test
+    fun chuckTrainsUnderTheWaterfallUntilTheWinchIsTurned() {
+        val chuck = person(0, 13, 10, mapId = 139, eventFlag = 0x2EB)
+        val waiting = HgssBlockers.of(state(139, listOf(chuck)))
+        assertEquals(listOf("person:0"), waiting.map { it.target })
+        assertTrue(waiting.single().reason.startsWith("Chuck under the waterfall: turn the winch"))
+        val turned = StoryInfo(flags = setOf(HgssGymPuzzles.FLAG_WATERFALL_DISABLE))
+        assertTrue(HgssBlockers.of(state(139, listOf(chuck), story = turned)).isEmpty())
+        // The flag is read with the story's flags.
+        assertTrue(HgssGymPuzzles.FLAG_WATERFALL_DISABLE in HgssBlockers.flagIds)
+    }
+
+    @Test
+    fun theVioletGymLiftIsAMechanismNotAStoryScene() {
+        val lift = TriggerInfo(index = 0, x = 15, z = 20, width = 1, height = 1, scriptId = 5, active = true, variable = 0x4000, value = 0)
+        assertTrue(HgssBlockers.of(state(135, triggers = listOf(lift))).isEmpty())
+    }
+
+    @Test
+    fun theRocketHqPasswordDoorsBlockWhileClosedAndSayWhoKnowsThePassword() {
+        // B3F: the two door objects on (23,15)-(24,15) until the door is told the two passwords.
+        val door = listOf(person(10, 23, 15, mapId = 249), person(11, 24, 15, mapId = 249))
+        val closed = HgssBlockers.of(state(249, door))
+        assertEquals(listOf("person:10", "person:11"), closed.map { it.target })
+        assertEquals(BlockerCause.PasswordDoor(listOf("person:3", "person:4"), known = false), closed.first().cause)
+        // Both grunts beaten (trainer flags 0x550 + 222 / 404): the passwords are known, talking opens the door.
+        val heard = StoryInfo(flags = setOf(0x550 + 222, 0x550 + 404))
+        assertEquals(BlockerCause.PasswordDoor(listOf("person:3", "person:4"), known = true), HgssBlockers.of(state(249, door, story = heard)).first().cause)
+        assertTrue(0x550 + 222 in HgssBlockers.flagIds, "the trainer flags are read with the story flags")
+        // Open: the objects slid west onto (22,15) (scr_seq_D35R0104_008), the doorway is free.
+        assertTrue(HgssBlockers.of(state(249, listOf(person(10, 22, 15, mapId = 249), person(11, 22, 15, mapId = 249)))).isEmpty())
+    }
+
+    @Test
+    fun theRocketHqVoiceDoorAndTheElectrodesAreTypedBlockers() {
+        // B2F: the voice-recognition door on (30,22)-(31,22), opened by the Murkrow (FLAG_UNK_0D3).
+        val door = listOf(person(5, 31, 22, mapId = 248), person(6, 30, 22, mapId = 248))
+        val blockers = HgssBlockers.of(state(248, door))
+        assertEquals(listOf("person:5", "person:6"), blockers.map { it.target })
+        assertEquals(false, (blockers.first().cause as BlockerCause.PasswordDoor).known)
+        val heard = StoryInfo(flags = setOf(0xD3))
+        assertEquals(true, (HgssBlockers.of(state(248, door, story = heard)).first().cause as BlockerCause.PasswordDoor).known)
+        // Open (live, completed hideout: both objects on 29,22): nothing blocks.
+        assertTrue(HgssBlockers.of(state(248, listOf(person(5, 29, 22, mapId = 248), person(6, 29, 22, mapId = 248)))).isEmpty())
+        // The transmitter's Electrode: battle each; gone once its FLAG_REMOVED_..._ELECTRODE_n is set.
+        val electrode = person(10, 21, 14, mapId = 248)
+        assertEquals(BlockerCause.WildPokemon(101), HgssBlockers.of(state(248, listOf(electrode))).single().cause)
+        assertTrue(HgssBlockers.of(state(248, listOf(electrode), story = StoryInfo(flags = setOf(0xCC)))).isEmpty())
     }
 }

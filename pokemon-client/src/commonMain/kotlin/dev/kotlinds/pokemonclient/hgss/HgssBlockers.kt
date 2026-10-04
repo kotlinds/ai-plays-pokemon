@@ -1,6 +1,7 @@
 package dev.kotlinds.pokemonclient.hgss
 
 import dev.kotlinds.pokemonclient.state.Blocker
+import dev.kotlinds.pokemonclient.state.BlockerCause
 import dev.kotlinds.pokemonclient.state.StoryCondition
 
 /**
@@ -32,8 +33,32 @@ object HgssBlockers {
         data class Trigger(override val mapId: Int, val index: Int) : Target
     }
 
-    /** A known blocker: [reason] says why it blocks and how to lift it; it stops blocking once [liftedWhen] holds. */
-    data class Curated(val target: Target, val reason: String, val liftedWhen: StoryCondition? = null)
+    /**
+     * A known blocker: [reason] says why it blocks and how to lift it; it stops blocking once [liftedWhen] holds.
+     * [closedAt]: for a door object that slides aside when it opens, the tiles it stands on while closed (it blocks
+     * only there). [cause]: the typed mechanism.
+     */
+    data class Curated(
+        val target: Target,
+        val reason: String,
+        val liftedWhen: StoryCondition? = null,
+        val closedAt: Set<Pair<Int, Int>>? = null,
+        val cause: Cause? = null,
+    )
+
+    /** The typed mechanism of a [Curated] blocker, turned into a [BlockerCause] with the live story state. */
+    sealed interface Cause {
+        /** A door opening with A once [knownWhen] holds (the password heard), told by [from]. */
+        data class Password(val from: List<String>, val knownWhen: StoryCondition) : Cause
+
+        /** A Pokémon of species [speciesId] battled with A. */
+        data class Battle(val speciesId: Int) : Cause
+
+        fun toBlockerCause(story: StoryInfo): BlockerCause = when (this) {
+            is Password -> BlockerCause.PasswordDoor(from, knownWhen.holds(story))
+            is Battle -> BlockerCause.WildPokemon(speciesId)
+        }
+    }
 
     /** The blockers of the map the player stands on. Empty outside the field. */
     fun of(state: HgssState): List<Blocker> {
@@ -46,7 +71,9 @@ object HgssBlockers {
             val zone = o.mapId.takeIf { it >= 0 } ?: mapId
             val known = byPerson[Target.Person(zone, o.id)]
             if (known != null) {
-                if (known.liftedWhen?.holds(story) != true) out += Blocker("person:${o.id}", known.reason)
+                // A door object slid aside is open.
+                if (known.closedAt != null && (o.x to o.z) !in known.closedAt) continue
+                if (known.liftedWhen?.holds(story) != true) out += Blocker("person:${o.id}", known.reason, known.cause?.toBlockerCause(story))
             } else if (zone == mapId && o.eventFlag != 0 && o.type !in HgssZoneEvents.TRAINER_TYPES && standsInPassage(around.grid, o.x, o.z)) {
                 out += Blocker(
                     "person:${o.id}",
@@ -54,9 +81,15 @@ object HgssBlockers {
                 )
             }
         }
-        val active = around.triggers.filter { it.active == true }
+        // Mechanisms (a lift's tile...) are puzzles, never story blockers; placeholder triggers (an empty script,
+        // Trigger.inert) start no scene: not blockers either.
+        val inert = HgssData.world?.areaOf(mapId)?.triggers.orEmpty().filter { it.zone == mapId && it.inert }.map { it.id }.toSet()
+        val active = around.triggers.filter { it.active == true && it.index !in inert && Target.Trigger(mapId, it.index) !in mechanisms }
         val (known, unknown) = active.partition { Target.Trigger(mapId, it.index) in byTrigger }
-        for (t in known) out += Blocker("trigger:${t.index}", byTrigger.getValue(Target.Trigger(mapId, t.index)).reason)
+        for (t in known) {
+            val curated = byTrigger.getValue(Target.Trigger(mapId, t.index))
+            if (curated.liftedWhen?.holds(story) != true) out += Blocker("trigger:${t.index}", curated.reason)
+        }
         // Many armed triggers on one map are a mechanism (gym pits, hideout traps, puzzle tiles), not story gates.
         if (unknown.size <= MAX_GENERIC_TRIGGERS) for (t in unknown) {
             out += Blocker(
@@ -109,6 +142,32 @@ object HgssBlockers {
     private const val MAP_ROUTE_24 = 28
     private const val MAP_VIRIDIAN = 50
     private const val MAP_LEAGUE_GATE = 299
+    private const val MAP_VIOLET_GYM = 135
+    private const val MAP_GOLDENROD_GYM = 137
+    private const val MAP_CIANWOOD_GYM = 139
+
+    /** Coordinate triggers that are a map mechanism (see [HgssGymPuzzles]), not a story scene. */
+    private val mechanisms: Set<Target.Trigger> = setOf(
+        // The Violet Gym lift (scr_seq_T22GYM0101_004, always armed): field.puzzle.
+        Target.Trigger(MAP_VIOLET_GYM, 0),
+    )
+
+    /** `FLAG_UNK_0B7`: set once the Lass came to say Whitney stopped crying (scr_seq_T25GYM0101_001). */
+    private const val FLAG_WHITNEY_CALMED = 0xB7
+    private const val MAP_ROCKET_HQ_B2F = 248
+    private const val MAP_ROCKET_HQ_B3F = 249
+
+    /** `SPECIES_ELECTRODE`. */
+    private const val ELECTRODE = 101
+
+    /** `FLAG_UNK_0D3`: set when the Murkrow screams Petrel's password at the B2F door (scr_seq_D35R0103_011). */
+    private const val FLAG_HQ_B2F_PASSWORD = 0xD3
+
+    /** `FLAG_REMOVED_ROCKET_HIDEOUT_B3F_ELECTRODE_1..3` (include/constants/flags.h; the B2F transmitter room). */
+    private const val FLAG_HQ_ELECTRODE_1 = 0xCB
+
+    /** Grunts telling the B3F door's two passwords: `TRAINER_TEAM_ROCKET_GRUNT_19`, `TRAINER_TEAM_ROCKET_F_GRUNT_5`. */
+    private val HQ_B3F_PASSWORD_TRAINERS = listOf(222, 404)
 
     /** The well-known blockers, from the decomp's scripts and zone events (files/fielddata). */
     val curated: List<Curated> = listOf(
@@ -231,6 +290,53 @@ object HgssBlockers {
             Target.Trigger(MAP_NEW_BARK, 3),
             "Your friend stops you at the east exit: the Kimono Girls' story must be finished first (Clear Bell, then Ho-Oh at the top of the Bell Tower).",
         ),
+        // Goldenrod Gym: beaten, Whitney cries and gives no badge (VAR_UNK_410A = 1 arms this trigger) until the Lass
+        // comes to the player on (13,11) (FLAG_UNK_0B7); then talking to Whitney again gives the Plain Badge.
+        Curated(
+            Target.Trigger(MAP_GOLDENROD_GYM, 0),
+            "Whitney cries after losing and won't give the badge yet: step here (a trainer comes to talk to you), then talk to Whitney (person:0) again for the Plain Badge.",
+            StoryCondition.Or(StoryCondition.FlagSet(FLAG_WHITNEY_CALMED), StoryCondition.HasBadge(HgssStoryTable.PLAIN)),
+        ),
+        // Cianwood Gym: Chuck trains under the waterfall and won't battle (VAR_TEMP_x4000 == 0) until the winch is turned
+        // (FLAG_SYS_CIANWOOD_WATERFALL_DISABLE, cleared on each entry); scr_seq_0877_T24GYM0101.s.
+        Curated(
+            Target.Person(MAP_CIANWOOD_GYM, 0),
+            "Chuck under the waterfall: turn the winch (interact sign:0, at the top-left, facing north; answer yes) to stop the waterfall, then talk to him.",
+            // Not lifted by the badge: Chuck stays under the waterfall on every visit (rematch, TM).
+            StoryCondition.FlagSet(HgssGymPuzzles.FLAG_WATERFALL_DISABLE),
+        ),
+        // Team Rocket HQ (Mahogany). B2F (scr_seq_0090_D35R0103.s): the door of the transmitter room (two door objects,
+        // slid west when it opens) checks Petrel's voice; it opens when the Murkrow that repeats his password screams it
+        // in front of it (coordinate trigger 3, after following it from B2F to B3F and back), or with A once heard.
+        *listOf(5, 6).map { id ->
+            Curated(
+                Target.Person(MAP_ROCKET_HQ_B2F, id),
+                "A voice-recognition door (the radio transmitter room): only Petrel's voice opens it. Follow the Murkrow that repeats his password (B2F north-west, then B3F, then back near this door); when it screams the password in front of the door, it opens. Once heard, talking to the door (A) opens it too.",
+                closedAt = setOf(30 to 22, 31 to 22),
+                cause = Cause.Password(listOf("person:16", "person:17", "person:18"), StoryCondition.FlagSet(FLAG_HQ_B2F_PASSWORD)),
+            )
+        }.toTypedArray(),
+        // The three Electrode powering the transmitter (static battles, scr_seq_D35R0103_004..006); Lance takes the others.
+        *(0 until 3).map { i ->
+            Curated(
+                Target.Person(MAP_ROCKET_HQ_B2F, 9 + i),
+                "An Electrode powering the radio transmitter: battle it (A) and make it faint (or catch it). Once all three are gone, the signal stops.",
+                StoryCondition.FlagSet(FLAG_HQ_ELECTRODE_1 + i),
+                cause = Cause.Battle(ELECTRODE),
+            )
+        }.toTypedArray(),
+        // B3F (scr_seq_0091_D35R0104.s): a door needing two passwords, each told by a grunt once beaten (scr 004).
+        *listOf(10, 11).map { id ->
+            Curated(
+                Target.Person(MAP_ROCKET_HQ_B3F, id),
+                "A locked door that needs two passwords: beat the two Rocket grunts who know them (person:3 and person:4 on this floor), then talk to the door (A) to say them.",
+                closedAt = setOf(23 to 15, 24 to 15),
+                cause = Cause.Password(
+                    listOf("person:3", "person:4"),
+                    StoryCondition.And(HQ_B3F_PASSWORD_TRAINERS.map { StoryCondition.FlagSet(HgssSave.TRAINER_FLAG_BASE + it) }),
+                ),
+            )
+        }.toTypedArray(),
         // Kanto.
         Curated(
             Target.Trigger(MAP_ROUTE_24, 0),
@@ -279,7 +385,9 @@ object HgssBlockers {
     private val byTrigger: Map<Target.Trigger, Curated> = curated.filter { it.target is Target.Trigger }.associateBy { it.target as Target.Trigger }
 
     /** Every flag the curated blockers read. */
-    val flagIds: Set<Int> get() = curated.flatMapTo(mutableSetOf()) { it.liftedWhen?.flagIds().orEmpty() }
+    val flagIds: Set<Int> get() = curated.flatMapTo(mutableSetOf()) {
+        it.liftedWhen?.flagIds().orEmpty() + ((it.cause as? Cause.Password)?.knownWhen?.flagIds().orEmpty())
+    }
 
     /** Every var the curated blockers read. */
     val varIds: Set<Int> get() = curated.flatMapTo(mutableSetOf()) { it.liftedWhen?.varIds().orEmpty() }

@@ -28,6 +28,10 @@ data class HgssMapHeader(
     val wildEncounterBank: Int,
     /** `flyAllowed`: Fly (and Teleport) can be used from this zone (outdoors). */
     val flyAllowed: Boolean = true,
+    /** `bikeAllowed`: the Bicycle can be ridden in this zone. */
+    val bikeAllowed: Boolean = true,
+    /** `regionNo`: 0 Johto, 1 Kanto ([HgssMapHeaders.REGION_JOHTO], [HgssMapHeaders.REGION_KANTO]). */
+    val region: Int = 0,
 )
 
 /** Decodes the map header table from the (decompressed) ARM9 binary. */
@@ -62,9 +66,18 @@ object HgssMapHeaders {
                 mapType = ((flags shr 8) and 0xF).toInt(),
                 wildEncounterBank = u8(arm9, o),
                 flyAllowed = (flags shr FLY_ALLOWED_BIT) and 1L == 1L,
+                bikeAllowed = (flags shr BIKE_ALLOWED_BIT) and 1L == 1L,
+                region = (flags and 1L).toInt(),
             )
         }
     }
+
+    /** Bit of `bikeAllowed` in the header's u32 bitfield (see [decode]). */
+    private const val BIKE_ALLOWED_BIT = 25
+
+    /** `regionNo` values. */
+    const val REGION_JOHTO = 0
+    const val REGION_KANTO = 1
 
     /** Bit of `flyAllowed` in the header's u32 bitfield (see [decode]). */
     private const val FLY_ALLOWED_BIT = 28

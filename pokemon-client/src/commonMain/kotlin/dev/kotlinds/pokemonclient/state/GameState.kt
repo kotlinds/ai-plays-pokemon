@@ -69,6 +69,8 @@ data class Blocker(
     val target: String,
     /** Why it blocks and how to get past (our walkthrough text). */
     val reason: String,
+    /** The mechanism, when it is a known one (a password door, a Pokémon to battle). */
+    val cause: BlockerCause? = null,
 )
 
 /** The player's trainer card. */
@@ -79,6 +81,11 @@ data class PlayerInfo(
     val trainerId: Long,
     /** Time played, as the game counts it (the "Continue" screen and the trainer card show it). */
     val playTime: PlayTime? = null,
+    /**
+     * The badges owned, by the game's badge id (language-independent: rules check these, never [badges]' names).
+     * HGSS: 0..7 Johto (Zephyr .. Rising), 8..15 Kanto (Boulder .. Earth). Empty when unknown.
+     */
+    val badgeIds: Set<Int> = emptySet(),
 )
 
 /** A play time counter. */
@@ -120,6 +127,13 @@ data class FieldState(
     val flyAllowed: Boolean? = null,
     /** Whether the map has a PC (Pokémon storage), null when unknown. */
     val hasPc: Boolean? = null,
+    /**
+     * Tiles of the map's coordinate triggers active right now (their variable has the awaited value): stepping on one
+     * runs a script (a scene, a hole, a twig...). Filled when the game knows the map's events.
+     */
+    val activeTriggers: Set<Pair<Int, Int>> = emptySet(),
+    /** Whether the bicycle can be ridden on this map, null when unknown. */
+    val bikeAllowed: Boolean? = null,
 )
 
 /** A person or object standing on the map. */
@@ -167,6 +181,15 @@ enum class PersonRole {
 
     /** Sells items (Poké Mart counter). */
     CLERK,
+
+    /** A door or gate placed as an object (League doors, the Radio Tower and Rocket HQ doors): it opens after an event. */
+    GATE,
+
+    /** A shutter of a map puzzle (Goldenrod Tunnel): switches open and close it ([FieldState.puzzle]). */
+    SHUTTER,
+
+    /** Stands in a passage until a story event or a talk moves them ([GameState.story] blockers say what lifts it). */
+    BLOCKER,
 }
 
 /** Kinds of [FieldObject]. */

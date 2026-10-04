@@ -25,6 +25,18 @@ class LookupTest {
     }
 
     @Test
+    fun speciesSheetGivesTheGrowthCurveAndTheMachines() {
+        val bulbasaur = lookup().lookup(LookupKind.SPECIES, "species:1").getOrThrow()
+        val growth = bulbasaur["growth_rate"]!!.jsonObject
+        assertEquals("medium_slow", growth["curve"]!!.jsonPrimitive.content)
+        assertEquals(1059860, growth["exp_to_level_100"]!!.jsonPrimitive.content.toInt())
+        val machines = bulbasaur["machines"]!!.jsonArray.map { it.jsonPrimitive.content }
+        assertTrue("TM22 SolarBeam" in machines || machines.any { it.startsWith("TM22 ") }, machines.toString())
+        assertTrue(machines.any { it.startsWith("HM01 ") }, "Bulbasaur learns Cut")
+        assertTrue(machines.none { it.startsWith("TM24 ") }, "no Thunderbolt")
+    }
+
+    @Test
     fun movesMachinesAndTypes() {
         val thunderbolt = lookup().lookup(LookupKind.MOVE, "Thunderbolt").getOrThrow()
         assertEquals("95", thunderbolt["power"]!!.jsonPrimitive.content)

@@ -16,7 +16,19 @@ interface WorldSource {
 
     /** Number of zones (maps): ids are `0 until zoneCount` (0 when unknown). Used to find a map by name. */
     val zoneCount: Int get() = 0
+
+    /** Whether Fly can be used from zone [zoneId] (outdoors), null when unknown. */
+    fun flyAllowed(zoneId: Int): Boolean? = null
+
+    /** Whether the bicycle can be ridden in zone [zoneId], null when unknown. */
+    fun bikeAllowed(zoneId: Int): Boolean? = null
+
+    /** The region zone [zoneId] belongs to (Fly only reaches the region the player is in), null when unknown. */
+    fun regionOf(zoneId: Int): Region? = null
 }
+
+/** A region of the world (HGSS: Johto, Kanto): [id] is the game's number, [name] is for display only. */
+data class Region(val id: Int, val name: String)
 
 /**
  * A rectangle of tiles in the coordinates the game reports for the player, with their properties and the events of
@@ -186,7 +198,19 @@ data class PersonTemplate(
 )
 
 /** A coordinate trigger: stepping on it runs [script] while variable [variable] equals [value]. */
-data class Trigger(val zone: Int, val id: Int, val x: Int, val y: Int, val width: Int, val height: Int, val script: Int, val variable: Int, val value: Int)
+data class Trigger(
+    val zone: Int,
+    val id: Int,
+    val x: Int,
+    val y: Int,
+    val width: Int,
+    val height: Int,
+    val script: Int,
+    val variable: Int,
+    val value: Int,
+    /** Its script does nothing (a placeholder ending at once): stepping on it starts no scene, it is walked like floor. */
+    val inert: Boolean = false,
+)
 
 /**
  * A coordinate trigger ([Trigger] number [trigger] of [zone]) whose script warps the player to ([x], [y]) on the same

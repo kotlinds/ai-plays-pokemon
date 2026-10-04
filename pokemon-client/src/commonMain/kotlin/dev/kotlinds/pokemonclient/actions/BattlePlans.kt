@@ -1,6 +1,10 @@
 package dev.kotlinds.pokemonclient.actions
 
+import dev.kotlinds.pokemonclient.console.Button
+import dev.kotlinds.pokemonclient.state.Awaiting
+import dev.kotlinds.pokemonclient.state.BattleState
 import dev.kotlinds.pokemonclient.state.GameState
+import dev.kotlinds.pokemonclient.state.TextSource
 import dev.kotlinds.pokemonclient.state.MenuKind
 import dev.kotlinds.pokemonclient.state.MoveContext
 import dev.kotlinds.pokemonclient.state.PartyPurpose
@@ -34,10 +38,16 @@ internal object BattlePlans {
         }.then { ActionOutcome.Done() }
     }
 
-    /** BAG → POKé BALLS → the ball → USE, then waits for the outcome (caught, or it broke free). */
+    /**
+     * BAG → POKé BALLS → the ball → USE, then follows the throw to its typed [ThrowResult]: caught (then the Pokédex
+     * entry, the nickname question answered with [GameAction.ThrowBall.nickname] (none: NO), and the PC transfer when
+     * the party is full, up to the overworld), broke free (after how many shakes), or missed. The result is read from
+     * the game (the shakes it computed when the ball landed), never guessed from the screens that follow.
+     */
     val throwBall = ActionPlan<GameAction.ThrowBall> { action, context ->
         var ballId = ""
-        context.navigator.choose(Screen.BattleCommand::class, "BAG") { it.id == "option:bag" }.andThen {
+        val before = context.state()
+        val reached = context.navigator.choose(Screen.BattleCommand::class, "BAG") { it.id == "option:bag" }.andThen {
             context.navigator.choose(Screen.Bag::class, "POKé BALLS") { it.id == BALLS_POCKET }
         }.andThen { state ->
             val bag = state.screen as? Screen.Bag ?: return@andThen Step.Failed(ActionError.UnexpectedScreen("the balls pocket", state.screen.toString()))
@@ -48,14 +58,73 @@ internal object BattlePlans {
             ballId = ball.id
             context.navigator.choose(Screen.Bag::class, ball.label) { it.id == ball.id }
         }.andThen {
-            context.navigator.choose(Screen.ContextMenu::class, "USE") { it.id == "option:use" }
+            // USE is confirmed here, not by the navigator: its settling would let the whole throw play unseen.
+            when (val use = context.navigator.select(Screen.ContextMenu::class, "USE") { it.id == "option:use" }) {
+                is Step.Failed -> Step.Failed(use.error)
+                is Step.Done -> Step.Done(context.state())
+            }
+        }
+        if (reached is Step.Failed) return@ActionPlan ActionOutcome.Failed(reached.error)
+        context.scope.tap(Button.A)
+        val foe = before.battle?.battlers?.firstOrNull { !it.ref.isPlayerSide }
+        // The throw, the shakes, then the next turn (it broke free) or the capture's messages and questions.
+        var shakes: Int? = null
+        var end: GameState? = null
+        for (poll in 0 until THROW_FRAMES / 2) {
+            val state = context.state()
+            state.battle?.ballShakes?.let { shakes = it }
+            val screen = state.screen
+            val settled = screen.awaiting == Awaiting.INPUT
+            if (settled && (screen is Screen.Selectable || screen is Screen.Overworld || screen is Screen.Keyboard)) {
+                end = state
+                break
+            }
+            // The Pokédex entry of a new species waits for A; battle messages go on by themselves.
+            if (settled && (screen is Screen.PressToContinue || screen is Screen.Dialogue && screen.source != TextSource.BATTLE)) {
+                context.scope.tap(Button.A)
+                context.navigator.awaitChange(screen, maxFrames = 60)
+            } else context.scope.step(2)
+        }
+        val last = end ?: return@ActionPlan ActionOutcome.Failed(ActionError.Timeout("the throw didn't end"))
+        val caught = shakes == BattleState.CAUGHT_SHAKES || last.battle == null
+        val result = when {
+            caught -> ThrowResult.Caught(foe?.species?.name ?: "the Pokémon", foe?.level)
+            shakes != null -> ThrowResult.BrokeFree(shakes!!)
+            else -> ThrowResult.Missed
+        }
+        if (result !is ThrowResult.Caught) return@ActionPlan ActionOutcome.Done("$ballId: ${result.describe()}")
+        // Caught: the nickname question (in battle), then the transfer to the PC when the party is full.
+        val named = answerNickname(context, last, action.nickname)
+        if (named is Step.Failed) return@ActionPlan ActionOutcome.Failed(named.error)
+        val after = context.navigator.advanceUntil(AFTER_CATCH_WAITS) { s ->
+            s.battle == null && s.screen is Screen.Overworld || s.screen is Screen.Selectable || s.screen is Screen.Keyboard
+        }
+        val where = (after as? Step.Done)?.value?.let { state ->
+            when {
+                state.party.size > before.party.size -> "joined the party"
+                (state.storage?.mons?.size ?: 0) > (before.storage?.mons?.size ?: 0) ->
+                    state.storage?.mons?.firstOrNull { m -> before.storage?.mons?.none { it.id == m.id } == true }?.let { m ->
+                        "sent to ${state.storage?.boxes?.firstOrNull { it.index == m.box }?.name ?: "BOX ${m.box + 1}"} (party full)"
+                    }
+                else -> null
+            }
+        }
+        val nicknamed = action.nickname?.let { " as $it" } ?: ""
+        ActionOutcome.Done("$ballId: ${result.describe()}$nicknamed" + (where?.let { ", $it" } ?: ""))
+    }
+
+    /** Answers "Give a nickname to the caught X?": YES and types [nickname], or NO. Nothing when no question shows. */
+    private fun answerNickname(context: PlanContext, state: GameState, nickname: String?): Step<GameState> {
+        val prompt = state.screen as? Screen.YesNo ?: return Step.Done(state)
+        if (prompt.entries.none { it.id == "option:yes" } || prompt.entries.none { it.id == "option:no" }) return Step.Done(state)
+        if (nickname == null) return context.navigator.choose(Screen.YesNo::class, "NO (no nickname)") { it.id == "option:no" }
+        return context.navigator.choose(Screen.YesNo::class, "YES (nickname)") { it.id == "option:yes" }.andThen {
+            context.navigator.advanceUntil(NICKNAME_WAITS) { it.screen is Screen.Keyboard }
         }.andThen {
-            // The throw, the shakes, then: the next turn (it broke free), or the capture's messages and questions.
-            context.navigator.advanceUntil(THROW_WAITS) { it.screen is Screen.Selectable || it.screen is Screen.Overworld || it.screen is Screen.Keyboard }
-        }.then { state ->
-            // The bag in RAM only changes when the battle ends: the outcome is told by the screens that follow.
-            val caught = state.battle == null || (state.screen as? Screen.YesNo)?.entries?.any { it.id == "option:yes" } == true && state.screen !is Screen.BattleCommand
-            ActionOutcome.Done(if (state.screen is Screen.BattleCommand) "$ballId: it broke free" else if (caught) "$ballId: caught" else "$ballId: now ${state.screen}")
+            when (val typed = TextPlans.enterText.run(GameAction.EnterText(nickname), context)) {
+                is ActionOutcome.Done -> Step.Done(context.state())
+                is ActionOutcome.Failed -> Step.Failed(typed.error)
+            }
         }
     }
 
@@ -168,7 +237,29 @@ internal object BattlePlans {
     }
 
     private const val BALLS_POCKET = "pocket:poke_balls"
-    private const val THROW_WAITS = 200
+    /** The throw, the shakes, "Gotcha!" and the Pokédex entry up to the nickname question (~1600 frames seen). */
+    private const val THROW_FRAMES = 2400
+    private const val AFTER_CATCH_WAITS = 40
+    private const val NICKNAME_WAITS = 20
     private const val LEARN_WAITS = 40
     private const val CONFIRM_FRAMES = 120
+}
+
+/** How a thrown Poké Ball ended. */
+sealed interface ThrowResult {
+    /** Caught: [species] at [level] (of the wild Pokémon). */
+    data class Caught(val species: String, val level: Int?) : ThrowResult
+
+    /** It broke free after [shakes] shakes (0..3). */
+    data class BrokeFree(val shakes: Int) : ThrowResult
+
+    /** The ball didn't reach a catch roll (blocked, or the Pokémon can't be caught). */
+    data object Missed : ThrowResult
+
+    /** For the action's answer: "caught SPINARAK Lv12", "broke free after 2 shakes", "missed". */
+    fun describe(): String = when (this) {
+        is Caught -> "caught $species" + (level?.let { " Lv$it" } ?: "")
+        is BrokeFree -> "broke free after $shakes shake" + if (shakes == 1) "" else "s"
+        Missed -> "missed"
+    }
 }

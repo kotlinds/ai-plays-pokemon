@@ -8,7 +8,20 @@ import dev.kotlinds.pokemonclient.state.MoveId
  * badge [badge] (as [dev.kotlinds.pokemonclient.state.PlayerInfo.badges] lists it). Games give one per move they
  * have ([dev.kotlinds.pokemonclient.PokemonGame.fieldMoveRule]); HGSS checks them in `src/field_move.c`.
  */
-data class FieldMoveRule(val move: MoveId, val badge: String)
+data class FieldMoveRule(
+    val move: MoveId,
+    /** The badge's name, for messages (display only). */
+    val badge: String,
+    /**
+     * The badge's id ([dev.kotlinds.pokemonclient.state.PlayerInfo.badgeIds]): what the check uses when the game gives
+     * one (never the name, which depends on the language). Null: the name is compared (games without badge ids).
+     */
+    val badgeId: Int? = null,
+) {
+    /** True when [player] owns the badge: by id when known, else by name. */
+    fun badgeOwned(player: dev.kotlinds.pokemonclient.state.PlayerInfo): Boolean =
+        if (badgeId != null) badgeId in player.badgeIds else badge in player.badges
+}
 
 /** Whether the party can use a field move right now, and when not, what is missing. */
 sealed interface FieldMoveAccess {
@@ -38,8 +51,8 @@ object FieldMoves {
         // The game takes the first Pokémon knowing the move (GetPartySlotWithMove): eggs never count.
         val mon = state.party.firstOrNull { mon -> !mon.isEgg && mon.moves.any { it.move.id == rule.move } }
             ?: return FieldMoveAccess.NoPokemon
-        val badges = state.player?.badges ?: return FieldMoveAccess.NoBadge(rule.badge)
-        if (rule.badge !in badges) return FieldMoveAccess.NoBadge(rule.badge)
+        val player = state.player ?: return FieldMoveAccess.NoBadge(rule.badge)
+        if (!rule.badgeOwned(player)) return FieldMoveAccess.NoBadge(rule.badge)
         return FieldMoveAccess.Usable(mon.slot, mon.displayName)
     }
 

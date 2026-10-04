@@ -581,6 +581,7 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             badgeCount = badges.size,
             playTime = Triple(u16(pd + A.PD_PLAY_TIME), u8(pd + A.PD_PLAY_TIME + 2), u8(pd + A.PD_PLAY_TIME + 3))
                 .takeIf { (_, m, s) -> m < 60 && s < 60 },
+            badgeIds = ((0 until 8).filter { johto shr it and 1 == 1 } + (0 until 8).filter { kanto shr it and 1 == 1 }.map { 8 + it }).toSet(),
         )
     }
 

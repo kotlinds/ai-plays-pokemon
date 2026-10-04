@@ -1,6 +1,8 @@
 package dev.kotlinds.pokemonclient.actions
 
 import dev.kotlinds.pokemonclient.console.Button
+import dev.kotlinds.pokemonclient.data.ItemPocket
+import dev.kotlinds.pokemonclient.state.ItemId
 import dev.kotlinds.pokemonclient.state.Cursor
 import dev.kotlinds.pokemonclient.state.GameState
 import dev.kotlinds.pokemonclient.state.MenuKind
@@ -27,10 +29,60 @@ internal object PcPlans {
 
     val pc = ActionPlan<GameAction.Pc> { action, context -> session(context, action.operations) }
 
+    /**
+     * Releases a Pokémon for good, from the PC of this building: a party Pokémon from DEPOSIT's party view, a stored one
+     * from WITHDRAW's box view, then RELEASE and YES. Refused unless the action says `confirm` (the id is the
+     * confirmation of which one), and for the last Pokémon able to battle or one holding Mail. Checked on the party
+     * and the boxes after.
+     */
+    val release = ActionPlan<GameAction.Release> { action, context ->
+        val state = context.state()
+        val mon = action.mon
+        if (!action.confirm) {
+            return@ActionPlan ActionOutcome.Failed(ActionError.InvalidParameter("confirm", "false", listOf("true (releasing $mon is for good)")))
+        }
+        val partyMon = state.party.firstOrNull { it.id == mon }
+        val stored = state.storage?.find(mon)
+        when {
+            partyMon == null && stored == null -> return@ActionPlan ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.UNKNOWN_POKEMON, "$mon is neither in the party nor in a box"))
+            partyMon != null && state.party.count { !it.isEgg && !it.fainted && it.id != mon } == 0 ->
+                return@ActionPlan ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.LAST_POKEMON, "$mon is your last Pokémon able to battle"))
+            partyMon?.heldItem?.let { isMail(context, it.id) } == true ->
+                return@ActionPlan ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.MAIL_BLOCKS_DEPOSIT, "$mon holds ${partyMon.heldItem.name}: take the Mail first (take_item)"))
+        }
+        val name = partyMon?.displayName ?: stored?.displayName ?: mon.toString()
+        val opened = openStorage(context)
+        if (opened is Step.Failed) {
+            PartyBagPlans.closeToOverworld(context, maxPresses = CLOSE_PRESSES)
+            return@ActionPlan ActionOutcome.Failed(opened.error)
+        }
+        val released = openMode(context, if (partyMon != null) PcMode.DEPOSIT else PcMode.WITHDRAW).andThen {
+            if (partyMon != null) Step.Done(it) else showBoxWith(context, mon)
+        }.andThen {
+            context.navigator.choose(Screen.PcBox::class, "the Pokémon to release") { it.id == mon.toString() }
+        }.andThen {
+            context.navigator.choose(Screen.ContextMenu::class, "RELEASE") { it.id == "option:release" }
+        }.andThen {
+            context.navigator.advanceUntil(PC_WAITS) { it.screen is Screen.YesNo }
+        }.andThen {
+            context.navigator.choose(Screen.YesNo::class, "YES (release $name)") { it.id == "option:yes" }
+        }.andThen {
+            // "X was released outside." / "Bye-bye, X!", back on the box.
+            context.navigator.advanceUntil(PC_WAITS) { it.screen is Screen.PcBox }
+        }.andThen { backToStorageMenu(context) }
+        PartyBagPlans.closeToOverworld(context, maxPresses = CLOSE_PRESSES)
+        if (released is Step.Failed) return@ActionPlan ActionOutcome.Failed(released.error)
+        val after = context.state()
+        if (after.party.any { it.id == mon } || after.storage?.find(mon) != null) {
+            return@ActionPlan ActionOutcome.Failed(ActionError.Timeout("$name is still there after RELEASE"))
+        }
+        ActionOutcome.Done("released $name ($mon)")
+    }
+
     /** Boots the PC once, runs [operations] in order (stopping at the first failure), switches it off. */
     private fun session(context: PlanContext, operations: List<PcOperation>): ActionOutcome {
         if (operations.isEmpty()) return ActionOutcome.Failed(ActionError.InvalidParameter("operations", "empty", listOf("deposit", "withdraw", "move", "swap")))
-        val plan = validate(context.state(), operations.map { normalize(context.state(), it) })
+        val plan = validate(context.state(), operations.map { normalize(context.state(), it) }) { item -> isMail(context, item) }
         if (plan is Step.Failed) return ActionOutcome.Failed(plan.error)
         val ops = (plan as Step.Done).value
         val opened = openStorage(context)
@@ -74,8 +126,18 @@ internal object PcPlans {
     private fun normalize(state: GameState, op: PcOperation): PcOperation =
         if (op is PcOperation.Move && state.party.any { it.id == op.mon }) PcOperation.Deposit(op.mon, op.box) else op
 
-    /** Refuses impossible sessions before touching the PC, following the party size and boxes through the operations. */
-    private fun validate(state: GameState, operations: List<PcOperation>): Step<List<PcOperation>> {
+    /** Whether [item] is a Mail (the game's MAIL pocket): a Pokémon holding one can't go into a box. */
+    internal fun isMail(context: PlanContext, item: ItemId): Boolean = context.game.data?.item(item)?.pocket == ItemPocket.MAIL
+
+    /**
+     * Refuses impossible sessions before touching the PC, following the party size and boxes through the operations.
+     * A party Pokémon holding Mail can't be stored (the game asks to remove the Mail first): [MAIL_BLOCKS_DEPOSIT].
+     */
+    private fun validate(state: GameState, operations: List<PcOperation>, isMail: (ItemId) -> Boolean): Step<List<PcOperation>> {
+        fun mailOf(mon: MonId) = state.party.firstOrNull { it.id == mon }?.heldItem?.takeIf { isMail(it.id) }
+        fun mailBlocks(mon: MonId) = mailOf(mon)?.let {
+            unavailable(UnavailableReason.MAIL_BLOCKS_DEPOSIT, "$mon holds ${it.name}: a Pokémon holding Mail can't be stored", "take the Mail first (take_item)")
+        }
         val party = state.party.map { it.id }.toMutableList()
         val able = state.party.filter { !it.isEgg && !it.fainted }.map { it.id }.toMutableSet()
         val storage = state.storage
@@ -86,6 +148,7 @@ internal object PcPlans {
             when (op) {
                 is PcOperation.Deposit -> {
                     if (op.mon !in party) return unavailable(UnavailableReason.UNKNOWN_POKEMON, "${op.mon} isn't in the party")
+                    mailBlocks(op.mon)?.let { return it }
                     if (party.size <= 1 || (op.mon in able && able.size <= 1)) return unavailable(UnavailableReason.LAST_POKEMON, "${op.mon} is your last Pokémon able to battle")
                     if (op.box != null && op.box !in 0 until BOXES) return Step.Failed(ActionError.InvalidParameter("box", op.box.toString(), listOf("0..${BOXES - 1}")))
                     if (op.box != null && boxFull(op.box)) return unavailable(UnavailableReason.PARTY_FULL, "Box ${op.box + 1} is full")
@@ -113,6 +176,7 @@ internal object PcPlans {
                 }
                 is PcOperation.Swap -> {
                     if (op.partyMon !in party) return unavailable(UnavailableReason.UNKNOWN_POKEMON, "${op.partyMon} isn't in the party")
+                    mailBlocks(op.partyMon)?.let { return it }
                     if (stored != null && op.boxMon !in stored) return unavailable(UnavailableReason.UNKNOWN_POKEMON, "${op.boxMon} isn't in any box")
                     if (op.partyMon in able && able.size <= 1) return unavailable(UnavailableReason.LAST_POKEMON, "${op.partyMon} is your last Pokémon able to battle")
                     party[party.indexOf(op.partyMon)] = op.boxMon

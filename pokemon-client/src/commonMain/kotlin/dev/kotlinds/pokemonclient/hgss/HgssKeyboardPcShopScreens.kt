@@ -4,6 +4,7 @@ import dev.kotlinds.pokemonclient.console.Button
 import dev.kotlinds.pokemonclient.console.TouchPoint
 import dev.kotlinds.pokemonclient.state.AnimationKind
 import dev.kotlinds.pokemonclient.state.Awaiting
+import dev.kotlinds.pokemonclient.state.TextSource
 import dev.kotlinds.pokemonclient.state.CancelBehavior
 import dev.kotlinds.pokemonclient.state.ContinueReason
 import dev.kotlinds.pokemonclient.state.Cursor
@@ -145,7 +146,16 @@ internal object HgssNamingKeyboard {
     fun decode(mem: HgssMemory, version: HgssKeyboardPcShopVersion): Screen? {
         if (mem.fn(mem.version.gSystem + K.SYS_VBLANK_INTR) != version.namingVBlankCallback) return null
         val data = mem.ptr(version.namingAppData) ?: return null
-        val ready = mem.s32(data + K.NS_PAGE_SWITCH_STATE) == K.NS_PAGE_SWITCH_IDLE &&
+        // After a capture with a full party: "X was transferred to BOX 1 in Bill's PC!" printed on the keyboard,
+        // then the screen fades out by itself (naming_screen.c:572-590).
+        val pageSwitch = mem.s32(data + K.NS_PAGE_SWITCH_STATE)
+        if (pageSwitch == K.NS_PAGE_SWITCH_WAIT_BATTLE_MESSAGE || pageSwitch == K.NS_PAGE_SWITCH_DELAY_AND_FADE_OUT) {
+            mem.gameString(mem.ptr(data + K.NS_BATTLE_MSG_STRING))?.takeIf { it.isNotBlank() }?.let { text ->
+                val awaiting = if (pageSwitch == K.NS_PAGE_SWITCH_WAIT_BATTLE_MESSAGE) Awaiting.TEXT_PRINTING else Awaiting.ANIMATION
+                return Screen.Dialogue(TextSource.MENU, null, text, awaiting)
+            }
+        }
+        val ready = pageSwitch == K.NS_PAGE_SWITCH_IDLE &&
             mem.s32(data + K.NS_IGNORE_INPUT) == 0 && mem.u16(mem.version.paletteFadeActive) == 0
         if (!ready) return Screen.Animation(AnimationKind.TRANSITION)
 

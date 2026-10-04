@@ -160,6 +160,7 @@ internal object HgssFlyMapScreens : HgssScreenDecoder {
             entries, cursor, topology, CancelBehavior.CLOSES,
             cursorCell = Screen.MapCell(view.cursorX, view.cursorY),
             cells = points.associate { p -> p.id to Screen.MapCell(p.x + (p.width - 1) / 2, p.y + (p.height - 1) / 2) },
+            otherRegion = points.filter { view.visited(it) && !view.inRegion(it) }.map { it.id }.toSet(),
         )
     }
 

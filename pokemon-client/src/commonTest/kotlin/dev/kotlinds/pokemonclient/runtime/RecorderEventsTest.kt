@@ -37,13 +37,15 @@ class RecorderEventsTest {
      * Feeds [parties] to a recorder, one decoded state each, and returns the party events. The first party is held
      * for the recorder's seeding period first (like a game that has been running for a while), unless [boot].
      */
-    private fun events(vararg parties: List<PartyMon>, boot: Boolean = false): List<GameEvent> =
-        record((if (boot) parties.toList() else List(SEED_POLLS) { parties.first() } + parties)
+    private fun events(vararg parties: List<PartyMon>, boot: Boolean = false, evolvesInto: (SpeciesId, SpeciesId) -> Boolean? = { _, _ -> null }): List<GameEvent> =
+        record(evolvesInto, (if (boot) parties.toList() else List(SEED_POLLS) { parties.first() } + parties)
             .map { GameState(0, Screen.Overworld(awaiting = Awaiting.INPUT), null, it, null, null, null) })
             .filter { it is GameEvent.LevelUp || it is GameEvent.Evolved || it is GameEvent.PokemonObtained }
 
     /** Feeds [states] to a recorder, one per frame, and returns every event. */
-    private fun record(states: List<GameState>): List<GameEvent> {
+    private fun record(states: List<GameState>): List<GameEvent> = record({ _, _ -> null }, states)
+
+    private fun record(evolvesInto: (SpeciesId, SpeciesId) -> Boolean?, states: List<GameState>): List<GameEvent> {
         var current = states.first()
         val game = object : PokemonGame {
             override val name = "Scripted"
@@ -51,7 +53,7 @@ class RecorderEventsTest {
             override fun state(memory: Memory) = current
             override val inputProbe = InputProbe { emptySet() }
         }
-        val recorder = Recorder(game, every = 1)
+        val recorder = Recorder(game, every = 1, evolvesInto = evolvesInto)
         val memory = object : Memory {
             override fun read8(addr: Long) = 0
             override fun read16(addr: Long) = 0
@@ -155,5 +157,32 @@ class RecorderEventsTest {
         val swinub = mon(swinub, "PILOSWINE", 39, slot = 2)
         val events = events(emptyList(), emptyList(), listOf(hooh), listOf(hooh, kenya), listOf(hooh, kenya, swinub), listOf(hooh, kenya, swinub), boot = true)
         assertEquals(emptyList(), events)
+    }
+
+    @Test
+    fun aReadingBackToThePreviousSpeciesIsNotAnEvolution() {
+        // NOTES-run P8: "CYNDAQUIL evolved into QUILAVA", then "QUILAVA evolved into CYNDAQUIL" and again
+        // "CYNDAQUIL evolved into QUILAVA" from a reading showing the old species for a moment.
+        val events = events(
+            listOf(mon(swinub, "CYNDAQUIL", 13)),
+            listOf(mon(swinub, "QUILAVA", 14)),
+            listOf(mon(swinub, "CYNDAQUIL", 14)),
+            listOf(mon(swinub, "QUILAVA", 14)),
+        )
+        assertEquals(listOf("CYNDAQUIL" to "QUILAVA"), events.filterIsInstance<GameEvent.Evolved>().map { it.from to it.to })
+    }
+
+    @Test
+    fun aSpeciesChangeTheGameDataDoesNotAllowIsNotAnEvolution() {
+        // With the game's evolution data: CYNDAQUIL (9 letters) evolves into QUILAVA (7 letters) only.
+        val evolves = { from: SpeciesId, to: SpeciesId -> from.value == 9 && to.value == 7 }
+        val events = events(
+            listOf(mon(swinub, "CYNDAQUIL", 13)),
+            listOf(mon(swinub, "PIDGEY", 13)),
+            listOf(mon(swinub, "CYNDAQUIL", 13)),
+            listOf(mon(swinub, "QUILAVA", 14)),
+            evolvesInto = evolves,
+        )
+        assertEquals(listOf("CYNDAQUIL" to "QUILAVA"), events.filterIsInstance<GameEvent.Evolved>().map { it.from to it.to })
     }
 }

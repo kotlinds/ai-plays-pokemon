@@ -27,7 +27,9 @@ class EventFeed(private val log: EventLog, private val autoConfirm: Boolean = tr
     fun take(): Batch {
         val repeated = offered != null && offered!! > confirmed
         val events = log.since(confirmed)
-        offered = log.lastSeq
+        // What was handed out, not the log's end: an event recorded meanwhile (the game runs on its own thread) must
+        // not be confirmed without having been given.
+        offered = events.lastOrNull()?.seq ?: confirmed
         if (autoConfirm) confirm()
         return Batch(events, repeated)
     }

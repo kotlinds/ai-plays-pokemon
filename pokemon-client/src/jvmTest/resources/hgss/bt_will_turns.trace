@@ -1,0 +1,49 @@
+# Frame-by-frame battle message (bs->msgBuffer) of Elite Four Will's battle, run-length encoded: <frames>	<message, \n escaped; empty: none>.
+# Recorded on the bench (truth:dump): HOOTHOOT switched in and K.O.'d, Kenya sent, Fly, a miss, confusion, Kenya K.O.'d, Typhlosion, burn, Xatu fainted, EXP, switch question.
+155	What will HO-OH do?
+134	HO-OH, switch out!\nCome back!
+180	Go! HOOTHOOT!
+421	The foe’s XATU used\nPsychic!
+288	HOOTHOOT fainted!\n
+194	Go! Kenya!
+244	What will Kenya do?
+82	Kenya flew\nup high!
+67	The foe’s XATU used\nConfuse Ray!
+118	The attack of the foe’s\nXATU missed!
+376	Kenya used\nFly!
+424	The foe’s XATU used\nConfuse Ray!
+91	Kenya became\nconfused!
+49	What will Kenya do?
+173	Kenya is\nconfused!
+1	It hurt i
+182	It hurt itself in its\nconfusion!
+427	The foe’s XATU used\nPsychic!
+51	What will Kenya do?
+173	Kenya is\nconfused!
+1	It h
+239	It hurt itself in its\nconfusion!
+169	Kenya fainted!\n
+61	The foe’s XATU used\nPsychic!
+185	But there was no target...
+236	You’re in charge, TYPHLOSION!
+58	What will TYPHLOSION do?
+398	TYPHLOSION used\nLava Plume!
+82	The foe’s XATU\nwas burned!
+424	The foe’s XATU used\nConfuse Ray!
+83	TYPHLOSION became\nconfused!
+260	The foe’s XATU is hurt\nby its burn!
+1	The foe’s XATU fain
+163	The foe’s XATU fainted!\n
+159	HO-OH gained\n732 Exp. Points!\n
+207	TYPHLOSION gained\n732 Exp. Points!\n
+245	Elite Four Will is\nabout to send in SLOWBRO.\n\nWill you switch your Pokémon?
+216	Elite Four Will sent\nout SLOWBRO!
+53	What will TYPHLOSION do?
+179	TYPHLOSION is\nconfused!
+1	It hurt
+176	It hurt itself in its\nconfusion!
+250	The foe’s SLOWBRO used\nCurse!
+160	The foe’s SLOWBRO’s Speed\nfell!
+70	The foe’s SLOWBRO’s\nAttack rose!
+103	The foe’s SLOWBRO’s\nDefense rose!
+9	What will TYPHLOSION do?

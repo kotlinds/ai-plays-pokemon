@@ -36,7 +36,10 @@ internal object PartyBagPlans {
         }
     }
 
-    /** Takes the item held by a Pokémon: party → mon → ITEM → TAKE. */
+    /**
+     * Takes the item held by a Pokémon: party → mon → ITEM → TAKE. For Mail (MAIL → TAKE), the game then asks "Send the
+     * removed Mail to your PC?": YES keeps the written message in the PC's mailbox (NO would erase it).
+     */
     val takeItem = ActionPlan<GameAction.TakeItem> { action, context ->
         openParty(context).andThen {
             context.navigator.choose(Screen.PartyGrid::class, "the Pokémon") { it.id == action.mon.toString() }
@@ -44,6 +47,8 @@ internal object PartyBagPlans {
             context.navigator.choose(Screen.ContextMenu::class, "ITEM") { it.id == "option:item" || it.id == "option:mail" }
         }.andThen {
             context.navigator.choose(Screen.ContextMenu::class, "TAKE") { it.id == "option:take" }
+        }.andThen { after ->
+            if (after.screen is Screen.YesNo) context.navigator.choose(Screen.YesNo::class, "YES (send the Mail to the PC)") { it.id == "option:yes" } else Step.Done(after)
         }.then {
             closeToOverworld(context)
             val held = context.state().party.firstOrNull { it.id == action.mon }?.heldItem
@@ -51,8 +56,18 @@ internal object PartyBagPlans {
         }
     }
 
-    /** Gives an item from the bag: bag → item → GIVE → the Pokémon (answers yes to swapping a held item). */
+    /**
+     * Gives an item from the bag: bag → item → GIVE → the Pokémon (answers yes to swapping a held item). Mail is refused
+     * before anything is pressed: giving it opens the mail editor, where the game wants a written message (an empty one
+     * is refused) and that editor isn't decoded.
+     */
     val giveItem = ActionPlan<GameAction.GiveItem> { action, context ->
+        val mail = context.state().bag.orEmpty().firstOrNull { it.name == MAIL_POCKET }?.items.orEmpty()
+            .firstOrNull { matchesRef(action.item.raw, "item", it.item.id.value, it.item.name) }
+        if (mail != null) {
+            return@ActionPlan ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.MAIL_NEEDS_WRITING,
+                "Giving ${mail.item.name} opens the mail editor to write a message, which isn't supported", "give another item"))
+        }
         bagItem(context, action.item).andThen { itemEntry ->
             context.navigator.choose(Screen.Bag::class, itemEntry.label) { it.id == itemEntry.id }
         }.andThen {
@@ -112,8 +127,14 @@ internal object PartyBagPlans {
         }
         if (reached is Step.Failed) return ActionOutcome.Failed(reached.error)
         // The effect: A through its messages, until the bag (or the field) is back, or the party grid when the game
-        // refused the item. Never a burst of blind presses: only messages are answered.
+        // refused the item. Never a burst of blind presses: only messages are answered. A whole-party item (Sacred
+        // Ash: one HP bar and one message per fainted Pokémon) takes longer, but never more than [EFFECT_MAX_FRAMES]:
+        // the agent's call must answer in time.
+        val effectStart = context.scope.frame
         effect@ for (press in 0 until EFFECT_PRESSES) {
+            if (context.scope.frame - effectStart > EFFECT_MAX_FRAMES) {
+                return ActionOutcome.Failed(ActionError.Timeout("${use.item.raw}'s effect still runs after ${EFFECT_MAX_FRAMES / 60} s: call get_state, then go on"))
+            }
             val state = context.navigator.settle(maxFrames = EFFECT_SETTLE_FRAMES)
             when (val screen = state.screen) {
                 is Screen.Dialogue, is Screen.PressToContinue -> {
@@ -144,7 +165,11 @@ internal object PartyBagPlans {
         return context.navigator.choose(list::class, entry.label) { it.id == entry.id }
     }
 
-    private const val EFFECT_PRESSES = 12
+    /** Enough for Sacred Ash on six fainted Pokémon (an HP bar and a message each). */
+    private const val EFFECT_PRESSES = 30
+
+    /** About 20 s: with the session's settling, the agent's call stays well under its client's timeout. */
+    private const val EFFECT_MAX_FRAMES = 1200
     private const val EFFECT_SETTLE_FRAMES = 240
 
     /** How many of [item] the bag holds. */
@@ -257,6 +282,9 @@ internal object PartyBagPlans {
 
     private const val TEACH_WAITS = 40
 
+    /** The bag pocket of the Mail items (pocket ids are the same in every language). */
+    private const val MAIL_POCKET = "mail"
+
     // region Routes
 
     /** Opens the start menu (X) from the overworld and picks [entryId], or does nothing if already there. */
@@ -320,6 +348,8 @@ internal object PartyBagPlans {
                 // A question about learning a move (Rare Candy...) is the agent's to answer: B would give the move up.
                 is Screen.YesNo, is Screen.MoveSelect -> if (state.battle == null && BattlePlans.isLearnPrompt(state)) return else context.scope.tap(Button.B)
                 is Screen.Dialogue, is Screen.PressToContinue -> context.scope.tap(Button.A)
+                // The Pokégear has no B: its Close button is touched.
+                is Screen.Viewer -> state.screen.exit.touch?.let { context.scope.touch(it) } ?: context.scope.tap(state.screen.exit.button ?: Button.B)
                 else -> context.scope.tap(Button.B)
             }
             context.navigator.awaitChange(state.screen, maxFrames = 60)

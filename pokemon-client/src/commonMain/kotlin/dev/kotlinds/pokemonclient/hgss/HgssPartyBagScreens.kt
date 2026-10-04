@@ -86,6 +86,10 @@ internal object HgssPartyMenuScreen {
             P.STATE_ITEM_USE_CB -> levelUpPanel(mem, state, pm)
                 ?: if (HgssScreenMemory.textPrinting(mem)) message(mem, pm) else Screen.Animation(AnimationKind.TRANSITION)
             in P.MESSAGE_STATES -> message(mem, pm)
+            // Sacred Ash revives every fainted Pokémon in turn (PartyMenu_Subtask_SacredAsh): an HP bar filling one
+            // point a frame, then "X regained health." waiting for A, then the next one.
+            P.STATE_SACRED_ASH -> if (mem.u8(pm + P.PM_AFTER_TEXT_PRINTER_STATE) == P.SACRED_ASH_STEP_MESSAGE) message(mem, pm)
+                else Screen.Animation(AnimationKind.TRANSITION)
             else -> Screen.Animation(AnimationKind.TRANSITION)
         }
     }
@@ -357,6 +361,14 @@ internal object HgssBagScreen {
                 else -> message(mem, work)
             }
             in P.BAG_BUSY_STATES -> Screen.Animation(AnimationKind.TRANSITION)
+            // Selling at a Poké Mart (the bag opened by SELL): "How many?", the number, "I can pay ₽X. OK?", "Turned over...".
+            P.BAG_STATE_SELL_ASK_HOW_MANY, P.BAG_STATE_SELL_DONE_PRINTING ->
+                Screen.Dialogue(TextSource.MENU, speaker = null, text = bagText(mem, work).orEmpty(), awaiting = Awaiting.TEXT_PRINTING)
+            P.BAG_STATE_SELL_QUANTITY -> Screen.Quantity(mem.u16(work + P.BAG_SELL_QUANTITY), 1, mem.u16(work + P.BAG_SELL_MAX).coerceAtLeast(1))
+            P.BAG_STATE_SELL_YES_NO -> yesNoPrompt(mem, mem.ptr(work + P.BAG_YES_NO_PROMPT), bagText(mem, work))
+                ?: Screen.Dialogue(TextSource.MENU, speaker = null, text = bagText(mem, work).orEmpty(), awaiting = Awaiting.TEXT_PRINTING)
+            P.BAG_STATE_SELL_DONE, P.BAG_STATE_SELL_MESSAGE -> message(mem, work)
+            in P.BAG_SELL_BUSY_STATES -> Screen.Animation(AnimationKind.TRANSITION)
             else -> null
         }
     }
@@ -565,6 +577,7 @@ internal object HgssPartyBagAddresses {
     const val FLAG_CANCEL_DISABLED = 0x80
     const val FLAG_SECOND_CURSOR = 0x40
     const val DONOR_SLOT_MASK = 0x3F
+    const val PM_AFTER_TEXT_PRINTER_STATE = 0xC62L // u8 afterTextPrinterState: step of a multi-part item effect
     const val PM_TEXT_PRINTER_ID = 0xC64L       // u8 textPrinterId of the message box (window 34)
     const val PM_PARTY_MON_INDEX = 0xC65L       // u8 grid cursor: 0-5 slot, 7 CANCEL button
     const val PM_ITEM_USE_CALLBACK = 0xC54L     // int (*itemUseCallback)(PartyMenu *)
@@ -605,6 +618,9 @@ internal object HgssPartyBagAddresses {
     const val STATE_USE_ITEM_SELECT_MON = 4
     const val STATE_ITEM_USE_CB = 5
     const val STATE_SELECT_MOVE = 6
+    const val STATE_SACRED_ASH = 7
+    /** `afterTextPrinterState` of [STATE_SACRED_ASH]: 1-2 heal (HP bar), 3 the message waits for its printer (A). */
+    const val SACRED_ASH_STEP_MESSAGE = 3
     const val STATE_GIVE_ITEM_SELECT_MON = 8
     const val STATE_YESNO_SWITCH_ITEMS = 10
     const val STATE_SUBCONTEXT_MENU = 15
@@ -719,6 +735,24 @@ internal object HgssPartyBagAddresses {
     const val BAG_STATE_ACTION_MENU = 4
     const val BAG_STATE_MESSAGE = 12
     const val BAG_STATE_TM_MESSAGE = 13
+
+    /**
+     * Selling (the bag opened by the clerk's SELL; states found live, overlay 15 is not decompiled): 17 "How many will
+     * you sell?" printing, 18 the number (UP / DOWN, A sells), 22 "I can pay ₽X. Would that be OK?" then its YES / NO,
+     * 23 "Turned over X and received ₽Y." printing, 24 waiting for A, 21 a message waiting for A; then back to 16.
+     */
+    const val BAG_STATE_SELL_ASK_HOW_MANY = 17
+    const val BAG_STATE_SELL_QUANTITY = 18
+    const val BAG_STATE_SELL_MESSAGE = 21
+    const val BAG_STATE_SELL_YES_NO = 22
+    const val BAG_STATE_SELL_DONE_PRINTING = 23
+    const val BAG_STATE_SELL_DONE = 24
+
+    /** Opening the selling box, closing it after the number. */
+    val BAG_SELL_BUSY_STATES = setOf(34, 35)
+    const val BAG_SELL_QUANTITY = 0x680L        // u16 number to sell
+    const val BAG_SELL_MAX = 0x682L             // u16 how many the bag holds
+    const val BAG_SELL_UNIT_PRICE = 0x684L      // u16 what the shop pays for one
 
     /** Pocket change, open / close the action menu, page turn, button animation, exit. */
     val BAG_BUSY_STATES = setOf(0, 2, 27, 28, 29, 30, 31, 35, 36, 37)

@@ -249,7 +249,7 @@ internal object HgssPostBattleScreens : HgssScreenDecoder {
 
     /**
      * Shakes of the ball being thrown (0..3 = breaks free after that many, 4 = caught), while the catch task runs and
-     * once it computed them (state >= 3); null otherwise. The model has no place for it yet (see the report).
+     * once it computed them (state >= 3); null otherwise. Exposed as `BattleState.ballShakes`.
      */
     fun catchShakes(mem: HgssMemory): Int? {
         val root = HgssBattleRoot.find(mem) ?: return null

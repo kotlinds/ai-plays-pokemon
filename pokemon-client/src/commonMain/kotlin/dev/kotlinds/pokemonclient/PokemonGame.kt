@@ -53,4 +53,7 @@ interface PokemonGame {
      * Y), or null when this game has no such button.
      */
     fun registeredItemTouch(slot: Int): dev.kotlinds.pokemonclient.console.TouchPoint? = null
+
+    /** The item id of the bicycle (a key item ridden from the field), or null when this game has none. */
+    val bicycleItem: Int? get() = null
 }

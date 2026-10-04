@@ -30,11 +30,13 @@ internal class HgssServices {
         val field = withSave.field ?: return withSave
         val objects = raw.surroundings?.objects.orEmpty().associateBy { "person:${it.id}" }
         val badges = withSave.player?.badges?.size ?: 0
+        val badgeIds = raw.story?.badges
         return withSave.copy(
             field = field.copy(
                 flyAllowed = HgssData.world?.header(field.mapId)?.flyAllowed,
                 hasPc = hasPc(field.mapId),
-                objects = field.objects.map { o -> objects[o.id]?.let { info -> enrichObject(o, info, field.mapId, badges, save) } ?: o },
+                bikeAllowed = HgssData.world?.header(field.mapId)?.bikeAllowed,
+                objects = field.objects.map { o -> objects[o.id]?.let { info -> enrichObject(o, info, field.mapId, badges, save, badgeIds) } ?: o },
             ),
         )
     }
@@ -58,14 +60,22 @@ internal class HgssServices {
         return found
     }
 
-    /** Beaten: its trainer flag, or the flag its scripted battle sets once won (the Elite Four). */
-    private fun defeated(save: HgssSave, zone: Int, trainerId: Int): Boolean? {
+    /**
+     * Beaten: its trainer flag, or what its scripted battle records once won: a flag (the Elite Four, Elder Li) or the
+     * badge it gives (gym leaders), see [HgssTrainers.WonCondition].
+     */
+    private fun defeated(save: HgssSave, zone: Int, trainerId: Int, badgeIds: Set<Int>?): Boolean? {
         val byTrainerFlag = save.trainerDefeated(trainerId)
-        val byScript = HgssTrainers.wonFlag(zone, trainerId)?.let { save.flag(it) }
+        val byScript = when (val won = HgssTrainers.wonCondition(zone, trainerId)) {
+            is HgssTrainers.WonCondition.Flag -> save.flag(won.flag)
+            is HgssTrainers.WonCondition.Badge -> badgeIds?.let { won.badge in it }
+            is HgssTrainers.WonCondition.VarAtLeast -> save.variable(won.variable)?.let { it >= won.value }
+            null -> null
+        }
         return if (byTrainerFlag == true || byScript == true) true else byTrainerFlag ?: byScript
     }
 
-    private fun enrichObject(o: FieldObject, info: MapObjectInfo, mapId: Int, badges: Int, save: HgssSave): FieldObject {
+    private fun enrichObject(o: FieldObject, info: MapObjectInfo, mapId: Int, badges: Int, save: HgssSave, badgeIds: Set<Int>? = null): FieldObject {
         if (o.kind != FieldObjectKind.PERSON) return o
         val zone = info.mapId.takeIf { it >= 0 } ?: mapId
         // The nurse's sprite is also worn by attendants on a common script (std_wifi_club_closed: the one blocking
@@ -81,7 +91,7 @@ internal class HgssServices {
             trainerId = trainerId,
             trainerClass = trainerClass,
             name = name,
-            defeated = defeated(save, zone, trainerId),
+            defeated = defeated(save, zone, trainerId, badgeIds),
             sightRange = if (info.type == TRAINER_TYPE_SIGHT) info.param0.coerceIn(0, MAX_SIGHT) else 0,
         )
         return o.copy(label = label(trainer), trainer = trainer)

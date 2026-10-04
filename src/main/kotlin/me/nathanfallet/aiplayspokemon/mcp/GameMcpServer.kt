@@ -196,7 +196,8 @@ class GameMcpServer(
         }
         addTool(
             name = "screenshot",
-            description = "A picture of both screens (top, then the bottom touch screen), for anything the state doesn't describe.",
+            description = "A picture of both screens (top, then the bottom touch screen), for anything the state doesn't describe. " +
+                "It is 256x384: to touch something seen at (x, y) on the bottom half, touch (x, y - 192).",
         ) {
             val frame = host.frames.value ?: return@addTool error("No frame yet")
             mutex.withLock { session.countScreenshot() }

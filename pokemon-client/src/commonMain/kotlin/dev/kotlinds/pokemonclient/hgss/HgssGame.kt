@@ -57,6 +57,9 @@ class HgssGame(private val version: HgssVersion, rom: NdsRom? = null) : PokemonG
      * 8 and 9: x 203-255, y 8-39 and 46-77), which set `FieldSystem.lastTouchMenuInput` to 9 / 10: the first / second
      * registered item (src/field/field_control.c).
      */
+    /** ITEM_BICYCLE (include/constants/items.h). */
+    override val bicycleItem: Int get() = ITEM_BICYCLE
+
     override fun registeredItemTouch(slot: Int): dev.kotlinds.pokemonclient.console.TouchPoint? = when (slot) {
         0 -> dev.kotlinds.pokemonclient.console.TouchPoint(229, 23)
         1 -> dev.kotlinds.pokemonclient.console.TouchPoint(229, 61)
@@ -75,12 +78,16 @@ class HgssGame(private val version: HgssVersion, rom: NdsRom? = null) : PokemonG
         val mapped = services.enrich(mapper.map(state, hgssMemory), state, hgssMemory)
         val field = mapped.field ?: return mapped
         val area = world?.areaOf(field.mapId)
-        val puzzle = HgssPuzzles.read(field.mapId, HgssPuzzles.reads(reader), area)
+        val people = field.objects.mapNotNull { o -> o.id.removePrefix("person:").toIntOrNull()?.let { HgssIlexFarfetchd.ObjectAt(it, o.x, o.y, o.facing) } }
+        val puzzle = HgssPuzzles.read(field.mapId, HgssPuzzles.reads(reader), area, people)
         val pickedUp = area?.signs.orEmpty()
             .filter { it.zone == field.mapId && it.kind == SignKind.HIDDEN_ITEM && it.flag?.let(reader::flag) == true }
             .map { "hidden_item:${it.id}" }.toSet()
-        if (puzzle == null && pickedUp.isEmpty()) return mapped
-        return mapped.copy(field = field.copy(puzzle = puzzle, pickedUp = pickedUp))
+        val triggers = area?.triggers.orEmpty().filter { it.zone == field.mapId && reader.variable(it.variable) == it.value }
+            .flatMap { t -> (t.x until t.x + maxOf(1, t.width)).flatMap { x -> (t.y until t.y + maxOf(1, t.height)).map { y -> x to y } } }
+            .toSet()
+        if (puzzle == null && pickedUp.isEmpty() && triggers.isEmpty()) return mapped
+        return mapped.copy(field = field.copy(puzzle = puzzle, pickedUp = pickedUp, activeTriggers = triggers))
     }
 
     override fun observe(memory: Memory): Observation {
@@ -179,5 +186,6 @@ class HgssGame(private val version: HgssVersion, rom: NdsRom? = null) : PokemonG
 
     private companion object {
         val FIELD_MODES = setOf(GameMode.OVERWORLD, GameMode.FIELD_BUSY, GameMode.SCRIPT, GameMode.DIALOGUE, GameMode.START_MENU)
+        const val ITEM_BICYCLE = 450
     }
 }

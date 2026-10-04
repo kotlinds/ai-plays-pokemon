@@ -18,6 +18,8 @@ internal object HgssScreens {
         HgssFieldNoticeScreens,
         HgssTextScreens,
         HgssIntroScreens,
+        HgssIncomingCall,
+        HgssViewerScreens,
     )
 }
 

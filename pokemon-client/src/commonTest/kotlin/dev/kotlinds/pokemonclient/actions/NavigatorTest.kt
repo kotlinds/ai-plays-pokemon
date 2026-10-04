@@ -1,6 +1,7 @@
 package dev.kotlinds.pokemonclient.actions
 
 import dev.kotlinds.pokemonclient.console.Button
+import dev.kotlinds.pokemonclient.console.TouchPoint
 import dev.kotlinds.pokemonclient.state.Awaiting
 import dev.kotlinds.pokemonclient.state.Cursor
 import dev.kotlinds.pokemonclient.state.Entry
@@ -130,5 +131,43 @@ class NavigatorTest {
         game.onPress = { _, _ -> menu(listOf("A", "B"), Cursor.At(0)) }
         val error = assertIs<Step.Failed>(Navigator(game.scope(), game).advanceUntil { it.screen is Screen.Overworld }).error
         assertIs<ActionError.UnexpectedScreen>(error)
+    }
+
+    /** The Pokégear's contact list: two contacts the D-pad moves between, and Close, only reachable by touch. */
+    private fun contacts() = Screen.ListMenu(
+        MenuKind.PHONE_CONTACTS,
+        listOf(Entry("contact:mom", "MOM"), Entry("contact:elm", "ELM"), Entry("option:cancel", "Close", touch = TouchPoint(230, 176))),
+        Cursor.At(0),
+        Topology { from, button -> when (button) { Button.DOWN -> if (from == 0) 1 else null; Button.UP -> if (from == 1) 0 else null; else -> null } },
+    )
+
+    @Test
+    fun anEntryOnlyReachableByTouchIsTouchedAndTheScreenChecked() {
+        val game = FakeGame(contacts())
+        game.moving()
+        game.onTouch = { point, screen -> if (point == TouchPoint(230, 176)) Screen.Overworld(awaiting = Awaiting.INPUT) else screen }
+        val result = Navigator(game.scope(), game).choose(Screen.ListMenu::class, "Close") { it.id == "option:cancel" }
+        assertIs<Step.Done<*>>(result)
+        assertEquals(listOf(TouchPoint(230, 176)), game.touches)
+        assertFalse(Button.A in game.presses, "touching is the confirmation")
+    }
+
+    @Test
+    fun aTouchTheGameIgnoresFailsAfterTheRetries() {
+        val game = FakeGame(contacts())
+        game.moving()
+        val error = assertIs<Step.Failed>(Navigator(game.scope(), game).choose(Screen.ListMenu::class, "Close") { it.id == "option:cancel" }).error
+        assertIs<ActionError.VerificationFailed>(error)
+        assertEquals(RetryPolicy().maxCorrections + 1, game.touches.size)
+    }
+
+    @Test
+    fun anUnreachableEntryWithoutTouchPointStaysUnreachable() {
+        val screen = contacts().let { it.copy(entries = it.entries.map { e -> e.copy(touch = null) }) }
+        val game = FakeGame(screen)
+        game.moving()
+        val error = assertIs<Step.Failed>(Navigator(game.scope(), game).choose(Screen.ListMenu::class, "Close") { it.id == "option:cancel" }).error
+        assertIs<ActionError.Unreachable>(error)
+        assertTrue(game.touches.isEmpty())
     }
 }

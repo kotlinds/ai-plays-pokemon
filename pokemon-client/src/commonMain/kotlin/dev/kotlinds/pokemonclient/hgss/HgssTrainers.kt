@@ -15,8 +15,12 @@ import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.u8
  *    where one script battles several people in a row (the Kimono Girls of the Dance Theater,
  *    scr_seq_T27R0501_016).
  *
- * Whether a trainer was beaten: its trainer flag, or for a scripted battle the flag its script sets once the battle
- * is won (`CheckBattleWon` then `SetFlag`): the Elite Four only set `FLAG_DEFEATED_<NAME>` (scr_seq_T10R0501_001).
+ * Whether a trainer was beaten: its trainer flag, or for a scripted battle what its script records once the battle is
+ * won ([WonCondition]): the badge a gym leader gives (`GiveBadge`, scr_seq_T22GYM0101_001 for Falkner), or a flag
+ * set after the win that the same script checks before the battle (`GoToIfSet FLAG_UNK_076` for Elder Li,
+ * scr_seq_D15R0103_002; `FLAG_DEFEATED_<NAME>` for the Elite Four, scr_seq_T10R0501_001). The win's branch can be
+ * long (messages, an item given) before that flag: matching it with the script's own pre-battle check is what tells
+ * it from the other flags set there.
  */
 internal object HgssTrainers {
 
@@ -27,8 +31,23 @@ internal object HgssTrainers {
         return scenes.own[scriptId] ?: scenes.moved[localId]
     }
 
-    /** The flag zone [zoneId]'s scripts set after beating [trainerId] (null when they set none). */
-    fun wonFlag(zoneId: Int, trainerId: Int): Int? = zoneScenes(zoneId)?.wonFlags?.get(trainerId)
+    /** The flag zone [zoneId]'s scripts set after beating [trainerId] (null when they set none, or give a badge). */
+    fun wonFlag(zoneId: Int, trainerId: Int): Int? = (wonCondition(zoneId, trainerId) as? WonCondition.Flag)?.flag
+
+    /** What zone [zoneId]'s scripts record once [trainerId] is beaten (null for none: its trainer flag says it). */
+    fun wonCondition(zoneId: Int, trainerId: Int): WonCondition? = zoneScenes(zoneId)?.wonFlags?.get(trainerId)
+
+    /** What a scripted battle's script records once the battle is won. */
+    sealed interface WonCondition {
+        /** Event flag [flag] is set. */
+        data class Flag(val flag: Int) : WonCondition
+
+        /** Badge [badge] (`BADGE_*`, 0 = Zephyr ... 8 = Boulder ...) is given. */
+        data class Badge(val badge: Int) : WonCondition
+
+        /** Script variable [variable] is at least [value] (Whitney cries before giving the badge: `VAR_UNK_410A` = 1). */
+        data class VarAtLeast(val variable: Int, val value: Int) : WonCondition
+    }
 
     /** `ScriptNumToTrainerNum` for the common trainer scripts, null for other scripts. */
     fun commonScriptTrainer(scriptId: Int): Int? = when (scriptId) {
@@ -51,8 +70,8 @@ internal object HgssTrainers {
         val own: Map<Int, Int>,
         /** Object local id → the trainer battled right after this object was moved by a scene script. */
         val moved: Map<Int, Int>,
-        /** Trainer id → the flag set once its scripted battle is won. */
-        val wonFlags: Map<Int, Int> = emptyMap(),
+        /** Trainer id → what its script records once its scripted battle is won. */
+        val wonFlags: Map<Int, WonCondition> = emptyMap(),
     )
 
     private val scenes = HashMap<Int, Scenes?>()
@@ -80,14 +99,46 @@ internal object HgssTrainers {
                 ?.let { u16(file, it + 2) } ?: continue
             moved.putIfAbsent(mover, trainer)
         }
-        val wonFlags = HashMap<Int, Int>()
+        val wonFlags = HashMap<Int, WonCondition>()
         for (o in battles) {
             val won = (o + BATTLE_SIZE until minOf(file.size - 4, o + WON_LOOKAHEAD)).firstOrNull { c -> isCheckBattleWon(file, c) } ?: continue
-            val set = (won + 4 until minOf(file.size - 4, won + SET_FLAG_LOOKAHEAD)).firstOrNull { f -> u16(file, f) == SET_FLAG } ?: continue
-            wonFlags.putIfAbsent(u16(file, o + 2), u16(file, set + 2))
+            val start = starts.filter { it <= o }.maxOrNull() ?: code
+            val end = minOf(starts.filter { it > o }.minOrNull() ?: file.size, file.size - 4)
+            wonCondition(file, start, o, won, end)?.let { wonFlags.putIfAbsent(u16(file, o + 2), it) }
         }
         return Scenes(own, moved, wonFlags)
     }
+
+    /**
+     * What the win branch after `CheckBattleWon` at [won] (battle at [battle], in the script [start] until [end])
+     * records, in order: a `GiveBadge`; a `SetFlag` of a flag the script checks (`CheckFlag` + `GoToIf TRUE`) before
+     * the battle; a `SetVar` of a variable the script compares before the battle (anywhere after the win: Whitney
+     * sets it once she stops crying); the first `SetFlag` right after the check.
+     */
+    private fun wonCondition(file: ByteArray, start: Int, battle: Int, won: Int, end: Int): WonCondition? {
+        // The win's scene ends at its `ReleaseAll` (the player moves again; what follows may be other branches:
+        // Whitney's badge comes from talking to her again).
+        val limit = minOf(end, won + WIN_BRANCH_LOOKAHEAD)
+        val branchEnd = (won + 4 until limit).firstOrNull { u16(file, it) == RELEASE_ALL } ?: limit
+        val branch = won + 4 until branchEnd
+        branch.firstOrNull { u16(file, it) == GIVE_BADGE && u16(file, it + 2) < BADGE_COUNT }?.let { return WonCondition.Badge(u16(file, it + 2)) }
+        val before = start until battle
+        val flagGuards = before.filter { isFlagGuard(file, it) }.map { u16(file, it + 2) }.toSet()
+        branch.firstOrNull { u16(file, it) == SET_FLAG && u16(file, it + 2) in flagGuards }?.let { return WonCondition.Flag(u16(file, it + 2)) }
+        val varGuards = before.filter { isVarGuard(file, it) }.map { u16(file, it + 2) to u16(file, it + 4) }.toSet()
+        (won + 4 until limit).firstOrNull { u16(file, it) == SET_VAR && (u16(file, it + 2) to u16(file, it + 4)) in varGuards }
+            ?.let { return WonCondition.VarAtLeast(u16(file, it + 2), u16(file, it + 4)) }
+        return (won + 4 until minOf(end, won + SET_FLAG_LOOKAHEAD)).firstOrNull { u16(file, it) == SET_FLAG }?.let { WonCondition.Flag(u16(file, it + 2)) }
+    }
+
+    /** `Compare var, value` (command 17) then `GoToIfEq` (command 28, condition 1) on a save variable. */
+    private fun isVarGuard(file: ByteArray, o: Int): Boolean =
+        o + 9 <= file.size && u16(file, o) == COMPARE_VALUE && u16(file, o + 2) in SAVE_VARS && u16(file, o + 4) > 0 &&
+            u16(file, o + 6) == GO_TO_IF && u8(file, o + 8) == 1
+
+    /** `GoToIfSet flag, dest`: `CheckFlag flag` (command 32) then `GoToIf TRUE` (command 28, condition 1). */
+    private fun isFlagGuard(file: ByteArray, o: Int): Boolean =
+        o + 7 <= file.size && u16(file, o) == CHECK_FLAG && u16(file, o + 4) == GO_TO_IF && u8(file, o + 6) == 1
 
     /** `CheckBattleWon VAR_SPECIAL_RESULT` (command 220): the script tests the battle it just ran. */
     private fun isCheckBattleWon(file: ByteArray, o: Int): Boolean = u16(file, o) == CHECK_BATTLE_WON && u16(file, o + 2) == VAR_SPECIAL_RESULT
@@ -110,6 +161,22 @@ internal object HgssTrainers {
     private const val APPLY_MOVEMENT = 94
     private const val CHECK_BATTLE_WON = 220
     private const val SET_FLAG = 30
+    private const val CHECK_FLAG = 32
+    private const val GO_TO_IF = 28
+    private const val GIVE_BADGE = 295
+    private const val SET_VAR = 41
+    private const val COMPARE_VALUE = 17
+    private const val RELEASE_ALL = 97
+
+    /** Save variables (`VAR_BASE` until `VARS_END`, include/constants/vars.h). */
+    private val SAVE_VARS = 0x4000 until 0x4170
+    private const val BADGE_COUNT = 16
+
+    /**
+     * From `CheckBattleWon` over the win's branch: the trainer flags of the gym, messages and an item before the
+     * flag of the win (Elder Li: a message and TM70 before `SetFlag FLAG_UNK_076`).
+     */
+    private const val WIN_BRANCH_LOOKAHEAD = 0x80
     private const val VAR_SPECIAL_RESULT = 0x800C
 
     /** From a battle to its `CheckBattleWon` (a rematch battle and a `GoTo` may sit in between, scr_seq_T10R0501_001). */

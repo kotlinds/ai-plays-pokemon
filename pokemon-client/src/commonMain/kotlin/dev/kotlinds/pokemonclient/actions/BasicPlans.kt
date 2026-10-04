@@ -6,9 +6,11 @@ import dev.kotlinds.pokemonclient.state.TextSource
 import dev.kotlinds.pokemonclient.state.Awaiting
 import dev.kotlinds.pokemonclient.state.BattlerRef
 import dev.kotlinds.pokemonclient.state.GameState
+import dev.kotlinds.pokemonclient.state.IncomingCall
 import dev.kotlinds.pokemonclient.state.MenuKind
 import dev.kotlinds.pokemonclient.state.PartyPurpose
 import dev.kotlinds.pokemonclient.state.Screen
+import dev.kotlinds.pokemonclient.state.sameAs
 
 /** Recipes of the raw controls and of the generic screen actions. */
 internal object BasicPlans {
@@ -31,14 +33,31 @@ internal object BasicPlans {
     /** Runs [GameAction.Wait.frames] frames, or until the game expects input again. */
     val wait = ActionPlan<GameAction.Wait> { action, context ->
         val frames = action.frames
-        if (frames != null) context.scope.step(frames) else context.navigator.settle(maxFrames = MAX_WAIT_FRAMES)
+        when {
+            action.untilChange -> {
+                val before = context.state().screen
+                val start = context.scope.frame
+                context.navigator.awaitChange(before, maxFrames = frames ?: MAX_WAIT_FRAMES)
+                if (context.state().screen.sameAs(before)) return@ActionPlan ActionOutcome.Done("nothing changed in ${context.scope.frame - start} frames")
+            }
+            frames != null -> context.scope.step(frames)
+            else -> context.navigator.settle(maxFrames = MAX_WAIT_FRAMES)
+        }
         ActionOutcome.Done()
     }
 
     /** Presses A through messages, stopping at the first choice, menu or back in control (on a choice already: nothing). */
     val advanceDialogue = ActionPlan<GameAction.AdvanceDialogue> { _, context ->
-        val started = context.state().screen
+        var started = context.state().screen
         if (started is Screen.Selectable) return@ActionPlan ActionOutcome.Done("already on a choice: nothing to read")
+        // The phone rings while walking: answer it (touch the Pokégear), then read the call like any call.
+        val call = (started as? Screen.Overworld)?.incomingCall
+        if (call != null) {
+            when (val answered = answerCall(context, call)) {
+                is Step.Failed -> return@ActionPlan ActionOutcome.Failed(answered.error)
+                is Step.Done -> started = answered.value
+            }
+        }
         val startFrame = context.scope.frame
         var outOfTime = false
         context.navigator.advanceUntil { state ->
@@ -60,6 +79,37 @@ internal object BasicPlans {
             } else ActionOutcome.Done()
         }
     }
+
+    /**
+     * Answers a ringing phone: touches [call]'s answer point (the Pokégear button), then waits for the call's first
+     * message. A touch the game ignored is tried again (3 times), then fails with an explicit error.
+     */
+    private fun answerCall(context: PlanContext, call: IncomingCall): Step<Screen> {
+        val point = call.answer ?: return Step.Failed(ActionError.Unavailable(UnavailableReason.WRONG_SCREEN, "No way to answer ${call.caller}'s call is known"))
+        repeat(ANSWER_TRIES) {
+            context.scope.touch(point)
+            var waited = 0
+            while (waited < ANSWER_FRAMES) {
+                context.scope.step(2)
+                waited += 2
+                val screen = context.state().screen
+                if (screen is Screen.Dialogue && screen.source == TextSource.PHONE) return Step.Done(screen)
+                // The caller hung up before the touch (calls ring about 30 s): nothing to answer.
+                if (screen is Screen.Overworld && screen.incomingCall == null && screen.awaiting == Awaiting.INPUT) {
+                    return Step.Failed(ActionError.Unavailable(UnavailableReason.WRONG_SCREEN, "${call.caller} hung up: no call to answer"))
+                }
+                if (screen !is Screen.Overworld && screen !is Screen.Animation && screen !is Screen.Unknown && screen !is Screen.Dialogue) {
+                    return Step.Failed(ActionError.UnexpectedScreen("${call.caller}'s call", screen.kind))
+                }
+            }
+        }
+        return Step.Failed(ActionError.VerificationFailed("answer ${call.caller}'s call", expected = "the call's first message", actual = context.state().screen.kind, attempts = ANSWER_TRIES))
+    }
+
+    private const val ANSWER_TRIES = 3
+
+    /** Opening the Pokégear and dialing take about two seconds. */
+    private const val ANSWER_FRAMES = 240
 
     /** Selects and confirms an entry of the menu on screen, by its stable id. */
     val choose = ActionPlan<GameAction.Choose> { action, context ->

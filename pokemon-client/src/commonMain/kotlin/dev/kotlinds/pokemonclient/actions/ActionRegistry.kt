@@ -85,7 +85,11 @@ class ActionRegistry(private val definitions: List<ActionDefinition<*>>) {
             ?: return ActionOutcome.Failed(ActionError.Unsupported(action.key))
         val context = PlanContext(scope, game)
         when (val availability = def.spec.availability(context.state())) {
-            is Availability.Unavailable -> return ActionOutcome.Failed(ActionError.Unavailable(availability.reason, availability.detail, availability.hint))
+            is Availability.Unavailable -> {
+                // Fly refused here: name the nearest place where it works (computed only when asked, it routes).
+                val hint = if (availability.reason == UnavailableReason.NOT_FLYABLE_HERE) FlyHints.nearestFlyable(context) ?: availability.hint else availability.hint
+                return ActionOutcome.Failed(ActionError.Unavailable(availability.reason, availability.detail, hint))
+            }
             Availability.Hidden -> return ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.WRONG_SCREEN, "${def.spec.name} isn't possible on this screen"))
             is Availability.Available -> Unit
         }

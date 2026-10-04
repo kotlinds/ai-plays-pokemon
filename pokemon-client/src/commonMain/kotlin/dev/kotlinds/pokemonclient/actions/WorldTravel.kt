@@ -42,7 +42,7 @@ internal object WorldTravel {
             is Resolved.Failed -> return resolved.outcome
         }
         val trip = travel(context, world, goal, action.options)
-        return finish(context, trip, goal)
+        return finish(context, trip, goal).withNotes(trip.notes)
     }
 
     /**
@@ -55,8 +55,11 @@ internal object WorldTravel {
         return travel(context, world, Goal(field.mapId, target), MoveOptions())
     }
 
-    /** How a [travel] ended: the last walk, the links taken before it, the active triggers of its map. */
-    data class Trip(val walk: MovePlans.Walk, val taken: List<ZoneLink>, val triggers: Set<Pair<Int, Int>>)
+    /**
+     * How a [travel] ended: the last walk, the links taken before it, the active triggers of its map, and what the
+     * agent should know about the way (the bicycle...).
+     */
+    data class Trip(val walk: MovePlans.Walk, val taken: List<ZoneLink>, val triggers: Set<Pair<Int, Int>>, val notes: List<String> = emptyList())
 
     // region Targets
 
@@ -156,9 +159,19 @@ internal object WorldTravel {
 
     /** Walks to [goal]: on this area directly, or through the links the [WorldRouter] finds, one at a time. */
     private fun travel(context: PlanContext, world: WorldSource, goal: Goal, options: MoveOptions): Trip {
+        val notes = mutableListOf<String>()
+        val trip = travel(context, world, goal, options, notes)
+        // Got off at a building that doesn't allow cycling after riding there: nothing worth saying.
+        val said = if (RODE in notes) notes.filterNot { it.startsWith(NO_CYCLING) } else notes
+        return trip.copy(notes = said + trip.notes)
+    }
+
+    private fun travel(context: PlanContext, world: WorldSource, goal: Goal, options: MoveOptions, notes: MutableList<String>): Trip {
         val taken = mutableListOf<ZoneLink>()
         var localFailure: MovePlans.Walk.NoRoute? = null
         repeat(MAX_HOPS) {
+            // Back on the bicycle after each warp (a building gets the player off it).
+            BikeRide.mount(context, options)?.let { if (it !in notes) notes += it }
             val state = context.navigator.settle()
             val field = state.field
             if (field == null || state.screen !is Screen.Overworld) return Trip(MovePlans.Walk.Interrupted(state, 0), taken, emptySet())
@@ -176,7 +189,7 @@ internal object WorldTravel {
                 ?: return Trip(
                     // A field move needed on this very map: the local failure knows where to use it from and what the
                     // party lacks; keep it over the less precise cross-map one.
-                    localFailure?.takeIf { it.failure is RouteFailure.NeedsFieldMove }
+                    localFailure?.takeIf { it.failure is RouteFailure.NeedsFieldMove || it.failure is RouteFailure.BlockedByBarrier || it.failure == RouteFailure.DifferentLevel }
                         ?: blocked(context, world, field, area, goalArea, goal, options) ?: localFailure
                         ?: MovePlans.Walk.NoRoute(RouteFailure.Unreachable, "no way to ${goal.target.id} from ${field.x},${field.y} (${field.mapName})"),
                     taken, triggers,
@@ -227,7 +240,9 @@ internal object WorldTravel {
         if (!options.acceptOneWay && worldRoute(context, world, field, area, goalArea, goal, options.copy(acceptOneWay = true)) != null) {
             return MovePlans.Walk.NoRoute(RouteFailure.OnlyOneWay, "no way to ${goal.target.id} from ${field.x},${field.y} without jumping down ledges")
         }
-        val route = worldRoute(context, world, field, area, goalArea, goal, options, relaxed = true) ?: return null
+        // Scene triggers don't block the way (a scene starts, then the walk goes on): crossing them keeps the search
+        // from inventing a detour over water around a trigger (NOTES-run P6: "needs Surf" next to Violet's bridge).
+        val route = worldRoute(context, world, field, area, goalArea, goal, options, relaxed = true, crossScenes = true) ?: return null
         val routeOptions = MovePlans.routeOptions(field, options)
         val overlay = MovePlans.overlay(context, field, emptySet())
         for (place in route.places) {
@@ -249,7 +264,10 @@ internal object WorldTravel {
         val triggers = trip.triggers
         val via = if (taken.isEmpty()) "" else " (${describe(taken)})"
         return when (walked) {
-            is MovePlans.Walk.Arrived -> ActionOutcome.Done("arrived at ${walked.field.x},${walked.field.y}" + (if (taken.isEmpty()) "" else " on ${walked.field.mapName}") + via)
+            is MovePlans.Walk.Arrived -> ActionOutcome.Done(
+                "arrived at ${walked.field.x},${walked.field.y}" + (if (taken.isEmpty()) "" else " on ${walked.field.mapName}") + via +
+                    walked.notes.joinToString("") { "; $it" },
+            )
             is MovePlans.Walk.Interrupted -> {
                 val at = walked.at
                 if (at != null && at in triggers && walked.state.battle == null) {
@@ -266,6 +284,16 @@ internal object WorldTravel {
         }
     }
 
+    /** [notes] added to the detail of a success or of an interruption. */
+    private fun ActionOutcome.withNotes(notes: List<String>): ActionOutcome {
+        if (notes.isEmpty()) return this
+        val text = notes.joinToString("") { "; $it" }
+        return when (this) {
+            is ActionOutcome.Done -> copy(detail = (detail ?: "done") + text)
+            is ActionOutcome.Failed -> if (error is ActionError.Interrupted) ActionOutcome.Failed(error.copy(performed = error.performed + text)) else this
+        }
+    }
+
     private fun describe(taken: List<ZoneLink>): String =
         if (taken.isEmpty()) "no warp taken" else "via " + taken.joinToString(", ") { l -> l.id + if (l.oneWay) " (fell, one way)" else "" }
 
@@ -279,6 +307,9 @@ internal object WorldTravel {
 
     /** `frontier` skips the ways out this close to the player (the one they just came through). */
     private const val FRONTIER_SKIP = 2
+
+    private const val RODE = BikeRide.RODE
+    private const val NO_CYCLING = BikeRide.NO_CYCLING
 
     /** At most this many warps / falls per `go_to`. */
     private const val MAX_HOPS = 12

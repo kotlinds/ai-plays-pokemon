@@ -56,7 +56,8 @@ class ServicesActionsTest {
         field: FieldState? = field(),
         badges: List<String> = listOf("Storm"),
         storage: PcStorage? = null,
-    ) = GameState(0, screen, PlayerInfo("ACE", 5000, badges, 1), party, emptyList(), null, field, storage = storage)
+        badgeIds: Set<Int> = if ("Storm" in badges) setOf(STORM) else emptySet(),
+    ) = GameState(0, screen, PlayerInfo("ACE", 5000, badges, 1, badgeIds = badgeIds), party, emptyList(), null, field, storage = storage)
 
     private fun available(state: GameState) = registry.available(state, ActionMode.ASSISTED).associateBy { it.name }
     private fun unavailable(state: GameState) = registry.unavailable(state, ActionMode.ASSISTED).associateBy { it.name }
@@ -67,6 +68,14 @@ class ServicesActionsTest {
         assertEquals(UnavailableReason.NOT_FLYABLE_HERE, unavailable(state(field = field(flyAllowed = false)))["fly"]?.reason)
         assertEquals(UnavailableReason.NEEDS_BADGE, unavailable(state(badges = emptyList()))["fly"]?.reason)
         assertEquals(UnavailableReason.NO_POKEMON_KNOWS_MOVE, unavailable(state(party = listOf(mon(2))))["fly"]?.reason)
+    }
+
+    @Test
+    fun theFlyBadgeIsCheckedByIdNotByItsName() {
+        // A French game names it "Tempête": the badge id is what counts.
+        assertTrue("fly" in available(state(badges = listOf("Tempête"), badgeIds = setOf(STORM))))
+        // An English name without the id isn't enough.
+        assertEquals(UnavailableReason.NEEDS_BADGE, unavailable(state(badges = listOf("Storm"), badgeIds = setOf(0, 1, 2, 3)))["fly"]?.reason)
     }
 
     @Test
@@ -137,4 +146,9 @@ class ServicesActionsTest {
     }
 
     private fun parse(json: String) = registry.parse(Json.parseToJsonElement(json).jsonObject, ActionMode.ASSISTED).getOrThrow()
+
+    private companion object {
+        /** BADGE_STORM (include/constants/badge.h). */
+        const val STORM = 4
+    }
 }

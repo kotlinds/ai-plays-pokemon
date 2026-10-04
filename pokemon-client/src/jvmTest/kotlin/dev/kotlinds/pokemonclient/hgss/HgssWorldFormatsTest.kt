@@ -32,7 +32,13 @@ class HgssWorldFormatsTest {
             .s32((4 shl 8) or (1 shl 1)).bytes()
         header.copyInto(arm9, 0x100 + 80 * HgssWorldAddresses.MAP_HEADER_SIZE)
         val headers = HgssMapHeaders.decode(arm9, HgssWorldAddresses.ARM9_LOAD_ADDRESS + 0x100)
-        assertEquals(HgssMapHeader(80, 90, 77, 922, 695, 614, 133, 4, 0xFF, flyAllowed = false), headers[80])
+        assertEquals(HgssMapHeader(80, 90, 77, 922, 695, 614, 133, 4, 0xFF, flyAllowed = false, bikeAllowed = false), headers[80])
+        // bikeAllowed is bit 25, regionNo bit 0 (Kanto), flyAllowed bit 28.
+        val kanto = Bytes().u8(0xFF).u8(0).u16(0).u16(1).u16(2).u16(3).u16(4).u16(1).u16(1).u16(5).u16(6)
+            .s32((2 shl 8) or (1 shl 25) or (1 shl 28) or 1).bytes()
+        kanto.copyInto(arm9, 0x100 + 81 * HgssWorldAddresses.MAP_HEADER_SIZE)
+        val kantoHeader = HgssMapHeaders.decode(arm9, HgssWorldAddresses.ARM9_LOAD_ADDRESS + 0x100)[81]
+        assertEquals(Triple(true, true, HgssMapHeaders.REGION_KANTO), Triple(kantoHeader.bikeAllowed, kantoHeader.flyAllowed, kantoHeader.region))
         assertEquals(0, headers[79].matrixId)
         assertFailsWith<IllegalArgumentException> { HgssMapHeaders.decode(arm9, HgssWorldAddresses.ARM9_LOAD_ADDRESS + 0x200) }
         assertEquals(0x020F6BE0L, HgssWorldAddresses.mapHeadersAddress("IPKE"))

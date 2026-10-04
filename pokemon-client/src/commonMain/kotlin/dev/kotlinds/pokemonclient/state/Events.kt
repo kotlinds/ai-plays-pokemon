@@ -45,6 +45,27 @@ sealed interface GameEvent {
 
     /** The human pressed buttons or touched the screen. */
     data class HumanInput(override val seq: Long, override val frame: Long) : GameEvent
+
+    /**
+     * A wild Pokémon was caught: it joined the party, or went to PC box [box] (0-based, named [boxName]) when the
+     * party was full. [name] is its nickname if it got one, else its species.
+     */
+    data class Caught(
+        override val seq: Long,
+        override val frame: Long,
+        val mon: MonId,
+        val species: String,
+        val name: String,
+        val level: Int?,
+        val box: Int? = null,
+        val boxName: String? = null,
+    ) : GameEvent
+
+    /** The game put a new Pokémon in PC box [box] (0-based) by itself: a capture or a gift with a full party. */
+    data class SentToBox(override val seq: Long, override val frame: Long, val mon: MonId, val name: String, val box: Int, val boxName: String) : GameEvent
+
+    /** A Pokémon learned [move] (level up, TM / HM, tutor), forgetting [forgot] when it already knew four. */
+    data class LearnedMove(override val seq: Long, override val frame: Long, val mon: MonId, val name: String, val move: String, val forgot: String? = null) : GameEvent
 }
 
 /**
@@ -63,14 +84,21 @@ class EventLog(private val capacity: Int = 10_000) {
 
     private var dropped = 0L
 
-    /** Appends an event built from its sequence number (single writer: the console thread). */
+    /**
+     * Appends an event built from its sequence number. Safe from several threads (the console thread records, the UI
+     * thread notes human inputs): the list is swapped with a compare-and-set, retried when another append came first,
+     * so no event is ever overwritten by a concurrent one.
+     */
     fun append(build: (seq: Long) -> GameEvent): GameEvent {
-        val current = events.load()
-        val event = build((current.lastOrNull()?.seq ?: dropped) + 1)
-        val next = if (current.size >= capacity) current.drop(current.size - capacity + 1) + event else current + event
-        if (next.size < current.size + 1) dropped = next.first().seq - 1
-        events.store(next)
-        return event
+        while (true) {
+            val current = events.load()
+            val base = current.lastOrNull()?.seq ?: dropped
+            val event = build(base + 1)
+            val next = if (current.size >= capacity) current.drop(current.size - capacity + 1) + event else current + event
+            if (!events.compareAndSet(current, next)) continue
+            if (next.size < current.size + 1) dropped = next.first().seq - 1
+            return event
+        }
     }
 
     /** Events after [seq] (exclusive), oldest first. */

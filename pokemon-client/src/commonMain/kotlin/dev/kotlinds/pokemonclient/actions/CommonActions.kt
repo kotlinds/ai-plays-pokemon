@@ -38,7 +38,8 @@ object CommonActions {
 
     val touch = ActionDefinition(GameAction.Touch::class, spec(
         name = "touch",
-        description = "Touch the bottom (touch) screen at x (0-255), y (0-191) pixels.",
+        description = "Touch the bottom (touch) screen at x (0-255), y (0-191) pixels of the bottom screen. On a screenshot of both " +
+            "screens (256x384, the top screen first), the bottom screen's y is the screenshot's y minus 192.",
         parameters = listOf(
             Parameter("x", ParameterType.INTEGER, "Horizontal position, 0 (left) to 255."),
             Parameter("y", ParameterType.INTEGER, "Vertical position, 0 (top) to 191."),
@@ -50,22 +51,31 @@ object CommonActions {
 
     val wait = ActionDefinition(GameAction.Wait::class, spec(
         name = "wait",
-        description = "Let the game run: a number of frames (60 per second), or until it waits for you again when omitted.",
-        parameters = listOf(Parameter("frames", ParameterType.INTEGER, "Frames to wait (1-1800).", required = false)),
+        description = "Let the game run: a number of frames (60 per second), or until it waits for you again when omitted; " +
+            "with until=change, until something changes on screen (new text, screen, cursor), at most `frames` (30 s by default).",
+        parameters = listOf(
+            Parameter("frames", ParameterType.INTEGER, "Frames to wait (1-1800).", required = false),
+            Parameter("until", ParameterType.STRING, "input (default): until the game waits for you; change: until the screen changes.", required = false, values = listOf("input", "change")),
+        ),
         modes = both,
         availability = { Availability.Available() },
-        parse = { json -> GameAction.Wait(json["frames"]?.jsonPrimitive?.intOrNull?.also { check(it, "frames", 1..1800) }) },
+        parse = { json ->
+            val until = json["until"]?.jsonPrimitive?.contentOrNull?.lowercase()
+            if (until != null && until != "input" && until != "change") throw ActionException(ActionError.InvalidParameter("until", until, listOf("input", "change")))
+            GameAction.Wait(json["frames"]?.jsonPrimitive?.intOrNull?.also { check(it, "frames", 1..1800) }, untilChange = until == "change")
+        },
         enumerate = { listOf(GameAction.Wait()) },
     ), BasicPlans.wait)
 
     val advanceDialogue = ActionDefinition(GameAction.AdvanceDialogue::class, spec(
         name = "advance_dialogue",
-        description = "Read the messages through to the end (every page is returned), stopping at the first choice (already on a choice: does nothing).",
+        description = "Read the messages through to the end (every page is returned), stopping at the first choice (already on a choice: does nothing). When the phone rings (incoming_call), answers it first.",
         parameters = emptyList(),
         modes = assisted,
         availability = { state ->
-            when (state.screen) {
+            when (val screen = state.screen) {
                 is Screen.Dialogue, is Screen.PressToContinue -> Availability.Available()
+                is Screen.Overworld -> if (screen.incomingCall?.answer != null) Availability.Available() else Availability.Hidden
                 // Nothing to read: accepted as a no-op, so a chain like `press a` → `advance_dialogue` doesn't fail.
                 is Screen.Selectable -> Availability.Available(listed = false)
                 else -> Availability.Hidden
@@ -289,6 +299,7 @@ object CommonActions {
         Parameter("avoid_trainers", ParameterType.BOOLEAN, "Avoid the line of sight of trainers when another way exists.", required = false),
         Parameter("accept_one_way", ParameterType.BOOLEAN, "Allow a way with no way back (ledges you can't come back up by any path). Ledges that are only shortcuts are always taken.", required = false),
         Parameter("run", ParameterType.BOOLEAN, "Run (hold B) instead of walking.", required = false),
+        Parameter("bike", ParameterType.BOOLEAN, "Ride the Bicycle (from the bag, or Y when registered) where cycling is allowed: faster.", required = false),
     )
 
     val goTo = ActionDefinition(GameAction.GoTo::class, spec(
@@ -299,7 +310,8 @@ object CommonActions {
             "you are not standing at; stops before it). With map, x / y are on that map (another floor or a neighbour). " +
             "Goes through warps, stairs, holes and map edges when needed; walks onto a scene trigger only when it is the " +
             "destination or the only way (and says so). Stops early when something happens (battle, trainer, phone call, script). " +
-            "Uses field moves by itself when the party can (a Pokémon knows the move and the badge is owned): Surf from the shore, " +
+            "Uses field moves by itself when the party can (a Pokémon knows the move and the badge is owned; a fainted Pokémon " +
+            "can still use its field moves outside battle): Surf from the shore, " +
             "Waterfall, Whirlpool, Cut, Rock Smash, Strength (boulders pushed as needed) and ice blocks; otherwise the error says " +
             "which move or badge is missing and the tile and direction to use it from.",
         parameters = listOf(
@@ -474,8 +486,12 @@ object CommonActions {
 
     val throwBall = ActionDefinition(GameAction.ThrowBall::class, spec(
         name = "throw_ball",
-        description = "Throw a Poké Ball at the wild Pokémon (wild battles only).",
-        parameters = listOf(Parameter("ball", ParameterType.STRING, "The ball: its id (item:4) or its name.")),
+        description = "Throw a Poké Ball at the wild Pokémon (wild battles only). Says how it ended: caught (then answers the " +
+            "nickname question and goes on until the battle is over), broke free after N shakes, or missed.",
+        parameters = listOf(
+            Parameter("ball", ParameterType.STRING, "The ball: its id (item:4) or its name."),
+            Parameter("nickname", ParameterType.STRING, "Nickname to give if it's caught (omit: no nickname).", required = false),
+        ),
         modes = assisted,
         availability = { state ->
             val battle = state.battle ?: return@spec Availability.Hidden
@@ -485,7 +501,7 @@ object CommonActions {
             if (balls.isEmpty()) Availability.Unavailable(UnavailableReason.NO_STOCK, "No Poké Balls in the bag", "buy some at a Poké Mart")
             else Availability.Available(mapOf("ball" to balls.map { Choice("item:${it.item.id.value}", "${it.item.name} x${it.quantity}") }))
         },
-        parse = { json -> GameAction.ThrowBall(ItemRef(string(json, "ball"))) },
+        parse = { json -> GameAction.ThrowBall(ItemRef(string(json, "ball")), json["nickname"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }) },
     ), BattlePlans.throwBall)
 
     val learnMove = ActionDefinition(GameAction.LearnMove::class, spec(
@@ -519,7 +535,8 @@ object CommonActions {
 
     /** The Fly move id and the badge it needs (Gen 4; badges are named by the game data layer, not shown text). */
     private const val MOVE_FLY = 19
-    private const val FLY_BADGE = "Storm"
+    /** The Storm Badge: by id (BADGE_STORM, include/constants/badge.h), never by its name (the game may be in French). */
+    private const val FLY_BADGE_ID = 4
 
     /** Old Rod, Good Rod, Super Rod (Gen 4 item ids). */
     private val RODS = setOf(445, 446, 447)
@@ -587,7 +604,7 @@ object CommonActions {
                 state.field?.flyAllowed == false -> Availability.Unavailable(UnavailableReason.NOT_FLYABLE_HERE, "Fly can't be used here (indoors, in a cave...)", "go outdoors first")
                 state.party.none { mon -> !mon.isEgg && mon.moves.any { it.move.id.value == MOVE_FLY } } ->
                     Availability.Unavailable(UnavailableReason.NO_POKEMON_KNOWS_MOVE, "No Pokémon in the party knows Fly")
-                state.player != null && FLY_BADGE !in state.player.badges -> Availability.Unavailable(UnavailableReason.NEEDS_BADGE, "Fly needs the Storm Badge")
+                state.player != null && FLY_BADGE_ID !in state.player.badgeIds -> Availability.Unavailable(UnavailableReason.NEEDS_BADGE, "Fly needs the Storm Badge")
                 else -> Availability.Available()
             }
         },
@@ -630,7 +647,8 @@ object CommonActions {
 
     /** Every common action, in the order they are listed to agents. */
     val definitions: List<ActionDefinition<*>> get() =
-        listOf(advanceDialogue, choose, enterText, attack, switch, throwBall, learnMove, run, keepBattling, goTo, interact, step, findEncounter, heal, fly, fish, buy, setQuantity, deposit, withdraw, pc, reorderParty, useItem, giveItem, takeItem, teach, useKeyItem, registerItem, saveGame, softReset, setOptions, chooseStarter, press, touch, wait)
+        listOf(advanceDialogue, choose, enterText, attack, switch, throwBall, learnMove, run, keepBattling, goTo, interact, step, findEncounter, heal, fly, fish, buy, setQuantity, deposit, withdraw, pc, reorderParty, useItem, giveItem, takeItem, teach, useKeyItem, registerItem, saveGame, softReset, setOptions, chooseStarter, press, touch, wait) +
+            MoreActions.definitions
 
     // region Helpers
 
@@ -697,6 +715,7 @@ object CommonActions {
         avoidTrainers = bool(json, "avoid_trainers"),
         acceptOneWay = bool(json, "accept_one_way"),
         run = bool(json, "run"),
+        bike = bool(json, "bike"),
     )
 
     /** Stored Pokémon as choices: "mon:… = HO-OH Lv45 (BOX 1)". */

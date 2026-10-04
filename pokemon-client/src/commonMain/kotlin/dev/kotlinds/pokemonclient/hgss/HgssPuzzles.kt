@@ -1,6 +1,11 @@
 package dev.kotlinds.pokemonclient.hgss
 
+import dev.kotlinds.pokemonclient.Direction
 import dev.kotlinds.pokemonclient.world.Area
+import dev.kotlinds.pokemonclient.state.PlatformEffect
+import dev.kotlinds.pokemonclient.state.PlatformTrigger
+import dev.kotlinds.pokemonclient.state.PuzzlePlatform
+import dev.kotlinds.pokemonclient.state.PuzzleBoulderHole
 import dev.kotlinds.pokemonclient.state.PuzzleBarrier
 import dev.kotlinds.pokemonclient.state.PuzzleKind
 import dev.kotlinds.pokemonclient.state.PuzzleState
@@ -22,8 +27,15 @@ import dev.kotlinds.pokemonclient.state.TeleportKind
  *   switches} (include/gymmick.h, src/gymmick_init.c InitAzaleaGym), routes in asm/overlay_04.s
  *   `ov04_022575A4` (per station, per lever state: count, arrival station, path) and `ov04_022575D4` (station
  *   tiles); ride: `BeginAzaleaGymSpinarakRide` / `ov04_02254724`, levers: `FlipAzaleaGymSwitch`.
+ * - **Blackthorn Gym** (`MAP_BLACKTHORN_GYM`): three platforms on the lava, turned and slid by trigger tiles
+ *   ([HgssBlackthornGym]).
+ * - **Ice Path B1F** (`MAP_ICE_PATH_B1F`): four Strength boulders, each dropping through its own hole to B2F.
+ * - **Ilex Forest** (`MAP_ILEX_FOREST`): the two lost Farfetch'd to herd and catch ([HgssIlexFarfetchd]).
  * - **Warp pads** (any map): coordinate triggers whose script warps within the map ([Area.scriptWarps]), e.g. the
  *   Blackthorn Gym exit pads (`VAR_UNK_4111` == 0, never set) and the Team Rocket HQ B1F trap tile.
+ * - **Violet Gym lift**, **Ecruteak Gym** invisible floor and candles, **Cianwood Gym** winch, **Vermilion Gym** trash
+ *   cans: see [HgssGymPuzzles].
+ * - Gyms whose mechanism isn't modeled (Blackthorn platforms, Fuchsia invisible walls): [PuzzleState.unmodeled].
  */
 object HgssPuzzles {
 
@@ -47,20 +59,32 @@ object HgssPuzzles {
         override fun gymmick() = reader.gymmick()
     }
 
-    /** The puzzle of zone [mapId] right now, or null when the map has none. [area] gives the warp pads (ROM). */
-    fun read(mapId: Int, reads: Reads, area: Area?): PuzzleState? {
+    /**
+     * The puzzle of zone [mapId] right now, or null when the map has none. [area] gives the warp pads (ROM);
+     * [objects] are the map's live objects (local id and position), for puzzles about people (the Farfetch'd).
+     */
+    fun read(mapId: Int, reads: Reads, area: Area?, objects: List<HgssIlexFarfetchd.ObjectAt> = emptyList()): PuzzleState? {
         val pads = pads(mapId, reads, area)
         val main = when (mapId) {
             GOLDENROD_TUNNEL_B2F -> goldenrodTunnel(reads)
             AZALEA_GYM -> azaleaGym(reads)
-            else -> null
+            HgssBlackthornGym.MAP -> blackthornGym(reads, area)
+            ICE_PATH_B1F -> icePathBoulders(reads)
+            HgssIlexFarfetchd.MAP -> HgssIlexFarfetchd.herds(reads, objects, area).takeIf { it.isNotEmpty() }
+                ?.let { PuzzleState(PuzzleKind.HERDING, HgssIlexFarfetchd.RULE, herds = it) }
+            else -> HgssGymPuzzles.read(mapId, reads, area)
         }
+        val unmodeled = HgssGymPuzzles.unmodeled(reads)
         return when {
-            main != null -> main.copy(teleports = main.teleports + pads)
-            pads.isNotEmpty() -> PuzzleState(PuzzleKind.TELEPORT_PADS, PADS_RULE, teleports = pads)
+            main != null -> main.copy(teleports = main.teleports + pads, unmodeled = main.unmodeled ?: unmodeled)
+            pads.isNotEmpty() -> PuzzleState(PuzzleKind.TELEPORT_PADS, PADS_RULE, teleports = pads, unmodeled = unmodeled)
+            unmodeled != null -> PuzzleState(PuzzleKind.UNMODELED, UNMODELED_RULE, unmodeled = unmodeled)
             else -> null
         }
     }
+
+    private const val UNMODELED_RULE =
+        "This map has a mechanism the route planner doesn't model (see unmodeled): routes may not find the way through it."
 
     // region Warp pads
 
@@ -216,6 +240,67 @@ object HgssPuzzles {
         }
         return PuzzleState(PuzzleKind.CART_RIDES, AZALEA_RULE, levers, teleports = rides)
     }
+
+    // region Ice Path B1F
+
+    /** `MAP_ICE_PATH_B1F` (D39R0102). */
+    const val ICE_PATH_B1F = 237
+
+    /**
+     * Boulder object, hole, and the boulder's `FLAG_HIDE_ICE_PATH_BOULDER_n_INIT` (set once it fell): the table
+     * `ov01_02206A14` (asm/overlay_01_021F1AFC.s) checked after each Strength push on this map (`ov01_021F1F8C`): the
+     * boulder is deleted, its INIT flag set and its `..._FALLEN` flag cleared, so it shows on B2F below the hole.
+     */
+    private val ICE_PATH_HOLES = listOf(
+        Triple(0, PuzzleTile(11, 10), 0x1EA), Triple(1, PuzzleTile(10, 18), 0x1EB),
+        Triple(2, PuzzleTile(18, 7), 0x1EC), Triple(3, PuzzleTile(19, 19), 0x1ED),
+    )
+
+    private const val ICE_PATH_RULE =
+        "Push each Strength boulder into its own hole (boulder person:N into the hole listed with it; another hole " +
+            "refuses it): it drops to B2F, where the fallen boulders are the stoppers that make the slides on the ice " +
+            "lead to the stairs down (boulder person:0 into the hole at 11,10 is the one the way to B3F needs). go_to plans " +
+            "these pushes when Strength can be used."
+
+    private fun icePathBoulders(reads: Reads): PuzzleState = PuzzleState(
+        PuzzleKind.BOULDER_HOLES, ICE_PATH_RULE,
+        boulderHoles = ICE_PATH_HOLES.map { (id, hole, flag) -> PuzzleBoulderHole("person:$id", hole, reads.flag(flag) == true) },
+    )
+
+    // endregion
+
+    // region Blackthorn Gym
+
+    private const val BLACKTHORN_RULE =
+        "Platforms over the lava: walk on their tiles. Stepping on a platform's pivot turns it a quarter turn " +
+            "clockwise; stepping on the tile on either side of the pivot slides it its width that way, with you on it. " +
+            "A platform blocked by the floor or another platform doesn't move. go_to plans the rides by itself."
+
+    private fun blackthornGym(reads: Reads, area: Area?): PuzzleState? {
+        if (area == null) return null
+        val poses = reads.gymmick()?.let(HgssBlackthornGym::poses) ?: return null
+        val gym = HgssBlackthornGym(poses, area)
+        val platforms = poses.mapIndexed { i, pose ->
+            val (pivot, forward, backward) = gym.triggers(pose)
+            val (fx, fy) = gym.forward(pose)
+            fun direction(dx: Int, dy: Int) = Direction.entries.first { it.dx == dx && it.dy == dy }
+            fun possible(tile: Pair<Int, Int>) = gym.ride(poses, tile.first, tile.second)?.moved == true
+            PuzzlePlatform(
+                id = "platform:$i",
+                pivot = PuzzleTile(pose.x, pose.y),
+                rotation = pose.rotation,
+                tiles = gym.walkTiles(listOf(pose)).map { PuzzleTile(it.first, it.second) }.sortedWith(compareBy({ it.y }, { it.x })),
+                triggers = listOf(
+                    PlatformTrigger(PuzzleTile(pivot.first, pivot.second), PlatformEffect.RotateClockwise, possible(pivot)),
+                    PlatformTrigger(PuzzleTile(forward.first, forward.second), PlatformEffect.Slide(direction(fx, fy), gym.width(i)), possible(forward)),
+                    PlatformTrigger(PuzzleTile(backward.first, backward.second), PlatformEffect.Slide(direction(-fx, -fy), gym.width(i)), possible(backward)),
+                ),
+            )
+        }
+        return PuzzleState(PuzzleKind.MOVING_PLATFORMS, BLACKTHORN_RULE, platforms = platforms, mechanics = gym)
+    }
+
+    // endregion
 
     private fun u32(b: ByteArray, o: Int): Int =
         (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8) or ((b[o + 2].toInt() and 0xFF) shl 16) or ((b[o + 3].toInt() and 0xFF) shl 24)

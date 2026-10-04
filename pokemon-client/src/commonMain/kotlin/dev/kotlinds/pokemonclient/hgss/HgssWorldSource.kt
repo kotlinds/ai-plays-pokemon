@@ -5,6 +5,7 @@ import dev.kotlinds.NarcArchive
 import dev.kotlinds.NdsRom
 import dev.kotlinds.pokemonclient.Direction
 import dev.kotlinds.pokemonclient.world.Area
+import dev.kotlinds.pokemonclient.world.Region
 import dev.kotlinds.pokemonclient.world.FieldMoveKind
 import dev.kotlinds.pokemonclient.world.PersonTemplate
 import dev.kotlinds.pokemonclient.world.ScriptWarp
@@ -66,6 +67,12 @@ class HgssWorldSource(private val rom: NdsRom, private val version: HgssVersion)
     fun header(zoneId: Int): HgssMapHeader? = headers.getOrNull(zoneId)
 
     override val zoneCount: Int get() = headers.size
+
+    override fun flyAllowed(zoneId: Int): Boolean? = header(zoneId)?.flyAllowed
+
+    override fun bikeAllowed(zoneId: Int): Boolean? = header(zoneId)?.bikeAllowed
+
+    override fun regionOf(zoneId: Int): Region? = header(zoneId)?.region?.let { Region(it, if (it == HgssMapHeaders.REGION_KANTO) "Kanto" else "Johto") }
 
     /** The script file (bytecode, [HgssScripts]) of zone [zoneId], or null. */
     fun scriptFile(zoneId: Int): ByteArray? = header(zoneId)?.scriptsBank?.let { scriptFiles.getOrNull(it) }
@@ -156,8 +163,10 @@ class HgssWorldSource(private val rom: NdsRom, private val version: HgssVersion)
                     },
                 )
             }
+            val scripts = scriptFile(zone)
             ev.coords.forEachIndexed { i, c ->
-                triggers += Trigger(zone, i, c.x, c.z, c.width, c.height, c.script, c.variable, c.value)
+                val inert = scripts != null && HgssScripts.isEmpty(scripts, c.script)
+                triggers += Trigger(zone, i, c.x, c.z, c.width, c.height, c.script, c.variable, c.value, inert)
             }
             scriptWarps += scriptWarps(zone, ev)
             triggerWarps += triggerWarps(zone, ev)

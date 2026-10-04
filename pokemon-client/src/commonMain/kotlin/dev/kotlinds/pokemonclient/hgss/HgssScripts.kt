@@ -93,6 +93,18 @@ internal object HgssScripts {
         return null
     }
 
+    /**
+     * True when event script [scriptId] (1-based) of [file] does nothing: its first command is `End` (a placeholder
+     * scene trigger like Violet City's on the Sprout Tower bridge, scr_seq_T22_002). Stepping on its trigger runs
+     * nothing the player would notice.
+     */
+    fun isEmpty(file: ByteArray, scriptId: Int): Boolean {
+        val start = scriptStarts(file).getOrNull(scriptId - 1) ?: return false
+        return start + 2 <= file.size && u16(file, start) == END_OPCODE
+    }
+
+    /** `End` (script command 2). */
+    private const val END_OPCODE = 2
     private const val SETVAR_OPCODE = 41
     private const val GOTO_OPCODE = 22
     private const val VAR_BASE = 0x4000

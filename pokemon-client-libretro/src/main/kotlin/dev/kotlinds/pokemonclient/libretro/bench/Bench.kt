@@ -66,7 +66,12 @@ import kotlin.io.path.writeBytes
  * - `watch:on|off`: after every frame, prints the raw party reading and what the state shows when they change
  *   (`BENCH_WATCH_HEX=1` adds the raw bytes; `BENCH_WATCH_FIXTURE=<prefix>` [+ `BENCH_WATCH_FIXTURE_SLOT=n`] saves
  *   fixtures of frames where a party slot is mid-rewrite); `rawmon`: raw party bytes; `box:<n>`: PC box n;
+ * - `pace:<n>`: walks one tile left then right, n times, until the phone rings (or the overworld is left);
  * - `record:on|off`: runs the app's Recorder on every frame; `events`: prints its events (screen changes left out).
+ * - `msgtrace:<n>` / `mashtrace:<n>`: steps n frames (mashing A one frame in four) printing every change of the battle
+ *   message and ball shakes; `truth:on` records the battle message of every frame, `truth:check` compares it with
+ *   the recorder's battle messages (what was shown but not recorded), `truth:dump:<name>` writes it to `<name>.trace`
+ *   (run-length encoded in tests); `autobattle:<n>[,move:<id>]` plays n decisions of a battle like an agent and checks.
  */
 fun main(args: Array<String>) {
     require(args.size >= 3) { "usage: <data dir>|<out dir>|<command>|..." }
@@ -101,11 +106,38 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
     /** `watch:on` prints, after every emulated frame, the raw party reading and what the state exposes when they change. */
     private var watching = false
     private var lastWatch: String? = null
+    /** `autobattle`: every battle message read on every frame (the ground truth the recorder is checked against). */
+    private var truth: MutableList<String>? = null
+
     private val scope: ActionScope = ActionScope(console, game.inputProbe, onFrame = {
         if (watching) watchParty()
+        truth?.let { seen ->
+            val message = runCatching { game.state(scope.memory()).battle?.message }.getOrNull()
+            truthFrames += message
+            if (message != null && message != seen.lastOrNull()) {
+                // A half-written read is a prefix of the next one: keep the complete text only.
+                if (seen.isNotEmpty() && message.startsWith(seen.last())) seen[seen.size - 1] = message else seen += message
+            }
+        }
         recorder.onFrame(console.frame) { scope.memory() }
     })
     private val registry = ActionRegistry.of()
+
+    /** Walks back and forth (one tile left, one right) up to [times] times, until the phone rings or the overworld is left. */
+    private fun pace(times: Int) {
+        repeat(times) { i ->
+            for (button in listOf(Button.LEFT, Button.RIGHT)) {
+                scope.step(16, InputFrame(setOf(button)))
+                scope.step(4)
+                val screen = game.state(scope.memory()).screen
+                if (screen !is Screen.Overworld || screen.incomingCall != null) {
+                    println("  after ${i + 1} paces: $screen")
+                    return
+                }
+            }
+        }
+        println("  no call after $times paces")
+    }
 
     fun run(command: String) {
         val name = command.substringBefore(':')
@@ -145,6 +177,12 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
                     p.switches.forEach { println("    $it") }
                     p.barriers.forEach { println("    $it") }
                     p.teleports.forEach { println("    $it") }
+                    p.indicators.forEach { println("    $it") }
+                    p.surfaces.forEach { println("    $it") }
+                    if (p.unmodeled != null) println("    unmodeled: ${p.unmodeled}")
+                    p.herds.forEach { println("    $it") }
+                    p.boulderHoles.forEach { println("    $it") }
+                    p.platforms.forEach { pl -> println("    ${pl.id} pivot ${pl.pivot.x},${pl.pivot.y} r${pl.rotation} " + pl.triggers.joinToString { "${it.tile.x},${it.tile.y}=${it.effect}${if (it.possible) "" else "(blocked)"}" }) }
                 } ?: println("  no puzzle")
             }
             "ram" -> out.resolve("$arg.ram").writeBytes(ram())
@@ -160,6 +198,17 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
                 (x0..x1).forEach { x -> println("  $x,$y ${ar?.tile(x, y)} zone=${ar?.zoneAt(x, y)}") }
             }
             "trace" -> trace(arg.toInt())
+            "msgtrace" -> msgTrace(arg.toInt())
+            "mashtrace" -> msgTrace(arg.toInt(), mash = true)
+            "truth" -> when {
+                arg == "on" -> truthOn()
+                // One line per frame: the battle message read that frame (escaped), empty when none. For replay tests.
+                arg.startsWith("dump:") -> out.resolve(arg.removePrefix("dump:") + ".trace").toFile().writeText(
+                    truthFrames.joinToString("\n") { m -> m?.replace("\\", "\\\\")?.replace("\n", "\\n") ?: "" } + "\n",
+                )
+                else -> truthCheck()
+            }
+            "autobattle" -> autoBattle(arg.substringBefore(',').toInt(), arg.substringAfter(',', "").takeIf { it.isNotEmpty() })
             "rawmon" -> HgssReader(scope.memory(), HgssVersion.HEARTGOLD_US).partyRaw().forEachIndexed { i, b ->
                 println("  slot $i: " + b.joinToString("") { "%02x".format(it) })
             }
@@ -177,6 +226,7 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
                 st.surroundings?.grid?.let { g -> g.rows.forEachIndexed { i, r -> println("    ${g.originZ + i}\t$r") }; println("    x0=${g.originX}") }
             }
             "fish" -> fish(arg.toInt())
+            "pace" -> pace(arg.toInt())
             "scr" -> println(describe(game.state(scope.memory()).screen))
             "walk" -> walk(arg.split(',').map { Button.valueOf(it.trim().uppercase()) })
             "cur" -> println(describe(game.state(scope.memory()).screen).lineSequence().first())
@@ -189,7 +239,8 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
                 val startFrame = console.frame
                 val outcome = registry.execute(action, scope, game)
                 val actFrames = console.frame - startFrame
-                Navigator(scope, game).settle()
+                // Like the app (GameSession.SETTLE_FRAMES): the game settles after every action.
+                Navigator(scope, game).settle(maxFrames = 1800)
                 println("  $outcome ($actFrames frames)")
                 println("  " + game.state(scope.memory()).screen)
             }
@@ -298,6 +349,69 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
             if (line != last) println("  [${console.frame}] $line")
             last = line
         }
+    }
+
+    /** Steps [frames] frames printing every change of the battle message (state) and the screen kind. */
+    private fun msgTrace(frames: Int, mash: Boolean = false) {
+        var last: String? = null
+        repeat(frames) { i ->
+            // mash: A pressed one frame out of four, like an impatient player (or a plan pressing through texts).
+            scope.step(1, if (mash && i % 4 == 0) InputFrame.of(Button.A) else InputFrame.NONE)
+            val state = game.state(scope.memory())
+            val line = "${state.screen.kind} | ${state.battle?.message?.replace("\n", "/")} | shakes=${state.battle?.ballShakes}"
+            if (line != last) println("  [${console.frame}] $line")
+            last = line
+        }
+    }
+
+    /**
+     * Plays up to [turns] decisions of the current battle like an agent would (attack with [move] or the first move
+     * with PP, keep battling, send the first Pokémon able to fight, keep the old moves, read on), with the app's
+     * settle after each action; then compares the battle messages read on every frame with the recorder's.
+     */
+    private var truthSince = 0L
+
+    /** The battle message of every frame since `truth:on` (null: no battle message), for `truth:dump`. */
+    private val truthFrames = mutableListOf<String?>()
+
+    private fun truthOn() {
+        truth = mutableListOf()
+        truthFrames.clear()
+        truthSince = recorder.log.lastSeq
+    }
+
+    private fun truthCheck() {
+        val seen = truth ?: return
+        truth = null
+        val recorded = recorder.log.since(truthSince).filterIsInstance<dev.kotlinds.pokemonclient.state.GameEvent.TextShown>()
+            .filter { it.source == dev.kotlinds.pokemonclient.state.TextSource.BATTLE }.map { it.text }
+        val missing = seen.filter { it !in recorded }
+        println("  battle messages shown: ${seen.size}, recorded: ${recorded.size}, missing: ${missing.size}")
+        missing.forEach { println("    MISSING: ${it.replace("\n", "/")}") }
+    }
+
+    private fun autoBattle(turns: Int, move: String?) {
+        if (truth == null) truthOn()
+        repeat(turns) {
+            val state = game.state(scope.memory())
+            val screen = state.screen
+            val json = when {
+                state.battle == null && screen is Screen.Overworld -> return@repeat
+                screen is Screen.BattleCommand -> {
+                    val actor = state.battle?.battlers?.firstOrNull { it.ref == screen.actor }
+                    val chosen = move?.takeIf { m -> actor?.moves?.any { "move:${it.move.id.value}" == m && it.pp > 0 } == true }
+                        ?: actor?.moves?.firstOrNull { it.pp > 0 }?.let { "move:${it.move.id.value}" } ?: return@repeat
+                    """{"type":"attack","move":"$chosen"}"""
+                }
+                screen is Screen.ListMenu && screen.kind == dev.kotlinds.pokemonclient.state.MenuKind.BATTLE_SWITCH_OR_KEEP -> """{"type":"keep_battling"}"""
+                screen is Screen.PartyGrid -> screen.entries.firstOrNull { it.selectable && it.id.startsWith("mon:") }?.let { """{"type":"switch","pokemon":"${it.id}"}""" } ?: return@repeat
+                screen is Screen.YesNo && screen.learning != null -> """{"type":"learn_move"}"""
+                screen is Screen.YesNo && screen.entries.any { it.id == "option:next" } -> """{"type":"choose","entry":"option:next"}"""
+                else -> """{"type":"advance_dialogue"}"""
+            }
+            run("act:$json")
+        }
+        truthCheck()
     }
 
     private fun describe(): String {

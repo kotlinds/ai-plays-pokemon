@@ -6,10 +6,12 @@ import dev.kotlinds.pokemonclient.Observation
 import dev.kotlinds.pokemonclient.PokemonGame
 import dev.kotlinds.pokemonclient.console.Button
 import dev.kotlinds.pokemonclient.console.ConsolePort
+import dev.kotlinds.pokemonclient.data.GameData
 import dev.kotlinds.pokemonclient.console.Frame
 import dev.kotlinds.pokemonclient.console.InputFrame
 import dev.kotlinds.pokemonclient.console.MemoryRegion
 import dev.kotlinds.pokemonclient.console.Platform
+import dev.kotlinds.pokemonclient.console.TouchPoint
 import dev.kotlinds.pokemonclient.runtime.ActionScope
 import dev.kotlinds.pokemonclient.runtime.InputProbe
 import dev.kotlinds.pokemonclient.state.GameState
@@ -22,13 +24,32 @@ import kotlinx.serialization.json.JsonObject
  */
 class FakeGame(var screen: Screen, var state: (Screen) -> GameState = { GameState(0, it, null, emptyList(), null, null, null) }) : PokemonGame {
 
+    /** The maps, for recipes that walk (none by default). */
+    override var world: dev.kotlinds.pokemonclient.world.WorldSource? = null
+
     /** Reaction of the scripted game to a button press. */
     var onPress: (Button, Screen) -> Screen = { _, current -> current }
+
+    /** Reaction of the scripted game to a new touch of the bottom screen. */
+    var onTouch: (TouchPoint, Screen) -> Screen = { _, current -> current }
 
     /** Every press the game registered, in order. */
     val presses = mutableListOf<Button>()
 
+    /** Reaction of the scripted game to each emulated frame (frame number, current screen). */
+    var onFrame: (Long, Screen) -> Screen = { _, current -> current }
+
+    /** Where the stylus was on every frame it was down, in order. */
+    val touchFrames = mutableListOf<TouchPoint>()
+
+    /** Every new touch the game registered, in order. */
+    val touches = mutableListOf<TouchPoint>()
+    private var touching: TouchPoint? = null
+
     override val name = "Fake"
+
+    /** The game's data, when a test needs some (see [StubGameData]). */
+    override var data: GameData? = null
     override fun observe(memory: Memory) = Observation(GameMode.UNKNOWN, null, "", JsonObject(emptyMap()))
     override fun state(memory: Memory): GameState = state(screen)
 
@@ -48,6 +69,14 @@ class FakeGame(var screen: Screen, var state: (Screen) -> GameState = { GameStat
                 presses += button
                 screen = onPress(button, screen)
             }
+            val touch = input.touch
+            if (touch != null) touchFrames += touch
+            if (touch != null && touching == null) {
+                touches += touch
+                screen = onTouch(touch, screen)
+            }
+            touching = touch
+            screen = onFrame(frame, screen)
         }
         override fun memorySize(region: MemoryRegion) = 16
         override fun read(region: MemoryRegion, offset: Int, length: Int, into: ByteArray) = Unit

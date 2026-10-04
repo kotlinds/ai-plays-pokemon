@@ -91,6 +91,36 @@ object HgssLabels {
         "SIGNFLAG" to "sign",
         "SIGNPOKEGEAR" to "sign",
         "SIGNBALL" to "sign",
+        "WIFISF" to "attendant",
+        "BFSM" to "attendant",
+        "BFSW1" to "attendant",
+        "BFSW2" to "attendant",
+        "LEAG_DOOR2" to "door",
+        "BABYBOY1_11" to "door",
+        "BABYBOY1_9" to "door",
+        "GATE_LEFT" to "shutter",
+        "GATE_RIGHT" to "shutter",
+        "GATE_TOP" to "shutter",
+        "GATE_BOTTOM" to "shutter",
+        "GSDSBOY" to "boy",
+        "DAIGO" to "Steven",
+        "AJI_PERU" to "Persian statue",
+        "RKANBUM" to "Team Rocket executive",
+        "RKANBUM2" to "Team Rocket executive",
+        "RKANBUM3" to "Team Rocket executive",
+        "RKANBUW" to "Team Rocket executive",
+        "YADON" to "Slowpoke (Pokémon)",
+        "RGYARADOSU" to "red Gyarados (Pokémon)",
+        "RAPURASU" to "Lapras (Pokémon)",
+        "LUG_OBJ01" to "Lugia (Pokémon)",
+        "HOU_OBJ01" to "Ho-Oh (Pokémon)",
+        "REDMAMA" to "Red's mom",
+        "NANAMI" to "Daisy",
+        "STOROPHY" to "trophy",
+        "GTOROPHY" to "trophy",
+        "BTOROPHY" to "trophy",
+        "MEDAL" to "medal",
+        "SCROLL" to "scroll",
     )
 
     private val genericWords = listOf(
@@ -109,8 +139,11 @@ object HgssLabels {
     /** "Mom", "woman", "Totodile (Pokémon)"... from the sprite constant name (without the SPRITE_ prefix). */
     fun person(spriteName: String): String {
         namedSprites[spriteName]?.let { return it }
+        // Apricorn trees come in one sprite per colour (BONGURI_R, _G, _P...).
+        if (spriteName.startsWith("BONGURI")) return "Apricorn tree"
         if (spriteName.startsWith("FOLLOWER_MON_")) {
-            val species = spriteName.removePrefix("FOLLOWER_MON_").substringBefore("_F").replace('_', ' ')
+            // STATIC_: a Pokémon standing on the map (Route 30's Rattata and Pidgey), not a follower.
+            val species = spriteName.removePrefix("FOLLOWER_MON_").removePrefix("STATIC_").substringBefore("_F").replace('_', ' ')
             return species.lowercase().replaceFirstChar { it.uppercase() } + " (Pokémon)"
         }
         if (spriteName.startsWith("SPRITE_")) return "person"
