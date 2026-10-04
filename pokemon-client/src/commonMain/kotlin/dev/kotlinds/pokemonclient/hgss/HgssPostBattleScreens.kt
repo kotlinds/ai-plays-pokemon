@@ -225,16 +225,17 @@ internal object HgssPostBattleScreens : HgssScreenDecoder {
     /**
      * Who wants to learn what while Task_GetExp runs its learn-move flow ("wants to learn X", "Make it forget another
      * move?", "Give up on X?"): the move from `tempData[DATA_GET_EXP_MOVE_TO_LEARN]`, the Pokémon from the battle's
-     * party copy at `tempData[DATA_GET_EXP_PARTY_SLOT]` (src/battle/battle_command.c). Null when no move is pending.
+     * party copy at the slot the task works on ([levelUpSlot]: `tempData[DATA_GET_EXP_PARTY_SLOT]` is only where its
+     * search starts, src/battle/battle_command.c:6011). Null when no move is pending.
      */
     fun moveToLearn(mem: HgssMemory): MoveOffer? {
         val root = HgssBattleRoot.find(mem) ?: return null
         val gw = mem.ptr(root.ctx + P.BC_GETTER_WORK) ?: return null
         if (mem.mainTasks().none { it.second == gw && it.first == P.FN_GET_EXP }) return null
         val move = mem.u16(gw + P.GW_MOVE_TO_LEARN).takeIf { it in 1 until MAX_MOVE } ?: return null
-        val slot = mem.s32(gw + P.GW_PARTY_SLOT)
         val party = mem.ptr(root.bs + A.BS_TRAINER_PARTY)
-        val mon = party?.takeIf { slot in 0..5 }?.let { HgssScreenMemory.mon(mem, it + A.PARTY_MONS + slot * A.POKEMON_SIZE) }
+        val slot = party?.let { levelUpSlot(mem, root, gw, it) }
+        val mon = slot?.let { HgssScreenMemory.mon(mem, party + A.PARTY_MONS + it * A.POKEMON_SIZE) }
         return MoveOffer(mon?.monId(), mon?.displayName(), Named(MoveId(move), HgssData.moveName(move)))
     }
 

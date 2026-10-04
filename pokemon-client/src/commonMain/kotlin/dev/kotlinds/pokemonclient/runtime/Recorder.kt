@@ -2,6 +2,7 @@ package dev.kotlinds.pokemonclient.runtime
 
 import dev.kotlinds.pokemonclient.Memory
 import dev.kotlinds.pokemonclient.PokemonGame
+import dev.kotlinds.pokemonclient.state.BattleKind
 import dev.kotlinds.pokemonclient.state.Awaiting
 import dev.kotlinds.pokemonclient.state.EventLog
 import dev.kotlinds.pokemonclient.state.GameEvent
@@ -106,7 +107,9 @@ class Recorder(
         if (from != to) log.append { GameEvent.ScreenChanged(it, frame, from, to) }
 
         // Party: new Pokémon, evolutions, level ups (by stable id, so reordering isn't a change).
-        recordParty(frame, now.party)
+        // A demo battle shows someone else's party and bag: nothing of it is the player's.
+        if (now.battle?.kind == BattleKind.DEMO || before.battle?.kind == BattleKind.DEMO) return
+        recordParty(frame, now.party, inBattle = now.battle != null)
 
         // Bag: quantities that went up, once they stay up for a moment (see [recordItems]).
         recordItems(frame, before, now)
@@ -151,9 +154,10 @@ class Recorder(
     /**
      * Party events from [party] (the state's party: only valid readings, see HgssStateMapper), against [known]: a
      * Pokémon never seen before was obtained, a new species is an evolution, a level above the highest seen is a
-     * level up.
+     * level up. Two "new" Pokémon are only a torn reading and are left out: one with the personality of a known
+     * Pokémon but another trainer id (a personality is unique), and an Egg in battle (Eggs never come from battles).
      */
-    private fun recordParty(frame: Long, party: List<PartyMon>) {
+    private fun recordParty(frame: Long, party: List<PartyMon>, inBattle: Boolean) {
         // Right after a save is loaded, the party becomes readable slot by slot: the first readings only teach the
         // recorder who is there (nobody can be obtained within a second of loading).
         if (party.isNotEmpty() && partyPolls < SEED_POLLS) {
@@ -163,6 +167,7 @@ class Recorder(
         }
         for (mon in party) {
             val was = known[mon.id]
+            if (was == null && isTornReading(mon, inBattle)) continue
             when {
                 was == null -> if (known.isNotEmpty() || party.size == 1) {
                     log.append { GameEvent.PokemonObtained(it, frame, mon.id, mon.displayName) }
@@ -174,6 +179,10 @@ class Recorder(
             known[mon.id] = if (was != null && mon.level < was.level) mon.copy(level = was.level) else mon
         }
     }
+
+    /** A "new" Pokémon that can't be one (see [recordParty]): a personality is unique, Eggs never come from battles. */
+    private fun isTornReading(mon: PartyMon, inBattle: Boolean): Boolean =
+        (mon.isEgg && inBattle) || known.keys.any { it.personality == mon.id.personality && it != mon.id }
 }
 
 /** Readings with a party during which the recorder only learns the party (see [Recorder.recordParty]). */
@@ -201,6 +210,7 @@ val Screen.kind: String
         is Screen.PressToContinue -> "press_to_continue:${reason.name.lowercase()}"
         is Screen.Dialogue -> "dialogue:${source.name.lowercase()}"
         is Screen.Evolution -> "evolution"
+        is Screen.StarterChoice -> "starter_choice"
         is Screen.Animation -> "animation:${kind.name.lowercase()}"
         is Screen.Overworld -> "overworld"
         is Screen.Battle -> "battle"

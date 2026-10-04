@@ -6,6 +6,7 @@ import dev.kotlinds.pokemonclient.data.Matchups
 import dev.kotlinds.pokemonclient.PokemonGame
 import dev.kotlinds.pokemonclient.actions.ActionError
 import dev.kotlinds.pokemonclient.actions.ActionMode
+import dev.kotlinds.pokemonclient.actions.ActionChains
 import dev.kotlinds.pokemonclient.actions.ActionOutcome
 import dev.kotlinds.pokemonclient.actions.ActionRegistry
 import dev.kotlinds.pokemonclient.actions.GameAction
@@ -122,8 +123,10 @@ class GameSession(
      * One response for the whole sequence: `performed` lists every step done, and the messages / events cover all
      * of them (nothing said by the game between two steps is lost).
      */
-    suspend fun act(actions: List<GameAction>, expectedVersion: Long? = lastServedVersion, budgetMillis: Long? = null, compact: Boolean = false): JsonObject {
-        require(actions.isNotEmpty()) { "no action" }
+    suspend fun act(requested: List<GameAction>, expectedVersion: Long? = lastServedVersion, budgetMillis: Long? = null, compact: Boolean = false): JsonObject {
+        require(requested.isNotEmpty()) { "no action" }
+        // Field item uses in a row: one bag session instead of closing and reopening the bag for each item.
+        val actions = ActionChains.coalesce(requested, inBattle = host.observe { memory -> game.state(memory).battle != null })
         val started = System.currentTimeMillis()
         val performed = mutableListOf<String>()
         val details = mutableListOf<String>()
@@ -140,6 +143,11 @@ class GameSession(
                     outcome.detail?.let { details += if (actions.size > 1) "${action.key}: $it" else it }
                 }
                 is ActionOutcome.Failed -> {
+                    // A spare advance_dialogue (the dialogue ended sooner than expected): nothing to read, go on.
+                    if (index > 0 && ActionChains.isSpareAdvance(action, outcome.error, host.observe { memory -> game.state(memory) })) {
+                        details += "${action.key}: skipped, no dialogue left"
+                        continue
+                    }
                     failed = action to outcome.error
                     skipped = actions.drop(index + 1)
                     break

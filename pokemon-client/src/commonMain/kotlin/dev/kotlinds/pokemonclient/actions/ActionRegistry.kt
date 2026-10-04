@@ -66,6 +66,11 @@ class ActionRegistry(private val definitions: List<ActionDefinition<*>>) {
             ?: return Result.failure(ActionException(ActionError.InvalidParameter("type", "missing", byName.keys.toList())))
         val def = byName[type]?.takeIf { mode in it.spec.modes }
             ?: return Result.failure(ActionException(ActionError.InvalidParameter("type", type, definitions.filter { mode in it.spec.modes }.map { it.spec.name })))
+        // A misspelled parameter would otherwise be ignored silently (e.g. `count` for `tiles`): refuse it, listing the valid ones.
+        val known = def.spec.parameters.map { it.name }
+        json.keys.firstOrNull { it != "type" && it !in known }?.let { unknown ->
+            return Result.failure(ActionException(ActionError.InvalidParameter("parameter", unknown, known)))
+        }
         return runCatching { def.spec.parse(json) }.recoverCatching { error ->
             throw (error as? ActionException) ?: ActionException(ActionError.InvalidParameter(type, json.toString()))
         }

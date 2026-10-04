@@ -21,7 +21,12 @@ data class BattleState(
 )
 
 /** Kinds of battles. */
-enum class BattleKind { WILD, TRAINER, SCRIPTED }
+enum class BattleKind {
+    WILD, TRAINER, SCRIPTED,
+
+    /** A battle the game plays by itself to show something (Lyra's catching demo): nothing to choose, nothing gained. */
+    DEMO,
+}
 
 /** A battle position: the player's side (left / right in doubles) or the opponent's. */
 enum class BattlerRef(val wire: String, val isPlayerSide: Boolean) {

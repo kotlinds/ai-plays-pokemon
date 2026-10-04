@@ -276,6 +276,7 @@ object HgssAddresses {
     const val STR_MAGIC = 0x04L
     const val STR_DATA = 0x08L
     const val STRING_MAGIC = 0xB6F8D2ECL     // src/pm_string.c:9
+    const val STRING_INVAL = 0xB6F8D2EDL     // src/pm_string.c:10: set by String_Delete
 
     // StartMenuTaskData (include/start_menu.h) — TaskManager.env of Task_StartMenu
     const val SE_FIELD_MENU = 0x10L          // FieldMenu * of top-screen multichoice menus (ScrCmd_064..067)
@@ -403,6 +404,8 @@ object HgssAddresses {
     // BattleSetup (include/battle/battle_setup.h) = OverlayManager.args of the battle app, alive for the whole app
     // (intro, battle, end, evolutions). It holds copies of the player's party and bag, used by the battle and written
     // back to the save only when the app ends (sub_0205239C, src/battle/battle_setup.c:418).
+    const val SETUP_BATTLE_TYPE = 0x00L      // u32 battleType (include/battle/battle_setup.h:29)
+    const val BATTLE_TYPE_TUTORIAL = 1L shl 10 // the catching demo: Lyra's party and bag (include/constants/battle.h:144)
     const val SETUP_PARTY = 0x04L            // Party *party[4]; [0] = the player's
     const val SETUP_BAG = 0x108L             // Bag *bag (same layout as the save's bag)
     const val BS_TRAINER_ID = 0xA0L          // u16[4]

@@ -10,6 +10,7 @@ import dev.kotlinds.pokemonclient.state.Named
 import dev.kotlinds.pokemonclient.state.PcBoxContents
 import dev.kotlinds.pokemonclient.state.PcStorage
 import dev.kotlinds.pokemonclient.state.SpeciesId
+import dev.kotlinds.pokemonclient.state.StartMenuFeature
 import dev.kotlinds.pokemonclient.state.TextSpeed
 import dev.kotlinds.pokemonclient.hgss.HgssAddresses as A
 import dev.kotlinds.pokemonclient.hgss.HgssKeyboardPcShopAddresses as K
@@ -46,6 +47,15 @@ internal class HgssSave(private val mem: HgssMemory) {
     fun trainerDefeated(trainerId: Int): Boolean? = flag(TRAINER_FLAG_BASE + trainerId)
 
     /**
+     * The start menu entries unlocked so far: `FLAG_GOT_BAG + i` for BAG, TRAINER CARD, SAVE, OPTIONS
+     * (CheckGotMenuIconI, src/sys_flags.c:285). X opens nothing before the bag (src/field/field_control.c:149).
+     */
+    fun startMenu(): Set<StartMenuFeature>? {
+        val features = StartMenuFeature.entries.map { it to (flag(FLAG_GOT_BAG + it.ordinal) ?: return null) }
+        return features.filter { it.second }.map { it.first }.toSet()
+    }
+
+    /**
      * The OPTIONS (`Options`, include/options.h, first u16 of the player data; bitfields from bit 0: textSpeed:4,
      * soundMethod:2, battleStyle:1, battleScene:1 — 0 means ON / SHIFT, src/options.c Options_Init).
      */
@@ -64,6 +74,9 @@ internal class HgssSave(private val mem: HgssMemory) {
     fun pcStorage(): Long? = array(SAVE_PCSTORAGE)
 
     companion object {
+        /** `FLAG_GOT_BAG` (include/constants/flags.h); the next three unlock TRAINER CARD, SAVE and OPTIONS. */
+        const val FLAG_GOT_BAG = 0x11B
+
         /** `TRAINER_FLAG_BASE` (include/constants/flags.h). */
         const val TRAINER_FLAG_BASE = 0x550
 

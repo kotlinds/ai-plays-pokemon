@@ -109,6 +109,9 @@ sealed interface ActionError {
 /** Why an action is unavailable (typed, so agents can react without parsing text). */
 enum class UnavailableReason {
     WRONG_SCREEN,
+
+    /** The story hasn't unlocked it yet (the start menu at the very start of a new game). */
+    NOT_UNLOCKED_YET,
     NOT_IN_BATTLE,
     IN_BATTLE,
     TRAINER_BATTLE,

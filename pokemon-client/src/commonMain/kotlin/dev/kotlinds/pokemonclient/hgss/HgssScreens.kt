@@ -8,6 +8,7 @@ package dev.kotlinds.pokemonclient.hgss
  */
 internal object HgssScreens {
     val decoders: List<HgssScreenDecoder> = listOf(
+        HgssStarterScreen,
         HgssPostBattleScreens,
         HgssBattleScreens,
         HgssKeyboardPcShopScreens,

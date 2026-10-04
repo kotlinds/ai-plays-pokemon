@@ -29,6 +29,7 @@ import dev.kotlinds.pokemonclient.world.Warp
 import dev.kotlinds.pokemonclient.world.WorldSource
 import kotlinx.serialization.json.JsonObject
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
@@ -259,5 +260,12 @@ class WorldTravelTest {
         val failed = assertIs<ActionOutcome.Failed>(MovePlans.goTo.run(GameAction.GoTo(4, 0, null), game.context()))
         val error = assertIs<ActionError.Unavailable>(failed.error)
         assertTrue("person:8" in error.message && "talk to them" in error.message, error.message)
+    }
+
+    @Test
+    fun aTownCanBeNamedWithOrWithoutTown() {
+        assertTrue(WorldTravel.sameMapName("New Bark", "New Bark Town"))
+        assertTrue(WorldTravel.sameMapName("Goldenrod City", "goldenrod"))
+        assertFalse(WorldTravel.sameMapName("Route 3", "Route 30"))
     }
 }

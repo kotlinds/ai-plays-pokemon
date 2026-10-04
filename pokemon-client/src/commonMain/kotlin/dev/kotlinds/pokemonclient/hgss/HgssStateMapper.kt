@@ -109,7 +109,12 @@ class HgssStateMapper {
             kept
         }
         if (state.party.isNotEmpty()) lastGood.keys.retainAll(party.map { it.id }.toSet())
-        val screen = if (state.fading) Screen.Animation(AnimationKind.TRANSITION) else memory?.let { decoded(it, state) } ?: screen(state, party)
+        val screen = when {
+            state.fading -> Screen.Animation(AnimationKind.TRANSITION)
+            // The catching demo plays itself: its menus aren't the player's (a press would pick Lyra's moves).
+            state.battle?.battleTypeFlags?.contains("TUTORIAL") == true -> Screen.Animation(AnimationKind.CUTSCENE)
+            else -> memory?.let { decoded(it, state) } ?: screen(state, party)
+        }
         return GameState(
             frame = state.frame,
             screen = screen,
@@ -366,7 +371,11 @@ class HgssStateMapper {
         }
         val bySlot = party.associateBy { it.slot }
         return BattleState(
-            kind = if (b.isWild) BattleKind.WILD else BattleKind.TRAINER,
+            kind = when {
+                "TUTORIAL" in b.battleTypeFlags -> BattleKind.DEMO
+                b.isWild -> BattleKind.WILD
+                else -> BattleKind.TRAINER
+            },
             isDouble = b.isDoubles,
             actor = commandActor ?: if (b.awaitingInput) BattlerRef.PLAYER_LEFT else null,
             battlers = battlers,

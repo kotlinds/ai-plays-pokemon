@@ -131,10 +131,17 @@ internal object WorldTravel {
     /** Zones named [name] (our map names, case and punctuation ignored) or `map:<id>`. */
     private fun zonesNamed(context: PlanContext, world: WorldSource, name: String): List<Int> {
         name.removePrefix("map:").toIntOrNull()?.takeIf { name.startsWith("map:") }?.let { id -> return listOfNotNull(id.takeIf { world.areaOf(it) != null }) }
-        val wanted = normalize(name)
-        if (wanted.isEmpty()) return emptyList()
-        return (0 until world.zoneCount).filter { id -> context.game.zoneName(id)?.let(::normalize) == wanted }
+        if (normalize(name).isEmpty()) return emptyList()
+        return (0 until world.zoneCount).filter { id -> context.game.zoneName(id)?.let { sameMapName(it, name) } == true }
     }
+
+    /**
+     * True when [a] and [b] name the same map, ignoring case, spaces and punctuation, and a "Town" / "City" one of
+     * them adds: the town is "New Bark Town" on screen, its map "New Bark".
+     */
+    internal fun sameMapName(a: String, b: String): Boolean = mapKey(a) == mapKey(b)
+
+    private fun mapKey(value: String) = normalize(value).removeSuffix("town").removeSuffix("city")
 
     /** Maps worth suggesting: the neighbours and the destinations of this map's warps and holes. */
     private fun knownMaps(context: PlanContext, world: WorldSource, area: Area, field: FieldState): List<String> =
@@ -185,7 +192,10 @@ internal object WorldTravel {
 
     /** The first link of the cheapest route from the player to [goal] across zones, or null when there is none. */
     private fun nextLink(context: PlanContext, world: WorldSource, field: FieldState, area: Area, goalArea: Area, goal: Goal, options: MoveOptions): ZoneLink? =
-        worldRoute(context, world, field, area, goalArea, goal, options)?.links?.firstOrNull()
+        (worldRoute(context, world, field, area, goalArea, goal, options)
+            // The only way out crosses a scene trigger (Elm's aide by the lab's door): take it, the scene will start
+            // on the way like for a target on this map (the walk to the link allows triggers the same way).
+            ?: worldRoute(context, world, field, area, goalArea, goal, options, crossScenes = true))?.links?.firstOrNull()
 
     private fun worldRoute(
         context: PlanContext,
@@ -196,8 +206,9 @@ internal object WorldTravel {
         goal: Goal,
         options: MoveOptions,
         relaxed: Boolean = false,
+        crossScenes: Boolean = false,
     ): WorldRouter.WorldRoute? {
-        val overlay = MovePlans.overlay(context, field, emptySet())
+        val overlay = MovePlans.overlay(context, field, emptySet()).let { if (crossScenes) it.copy(activeTriggers = emptySet()) else it }
         val router = WorldRouter(world) { _, a -> if (a === area) overlay else WorldRouter.staticOverlay(a) }
         val start = Node(field.x, field.y, Pathfinder(area).levelAt(field.x, field.y, field.height * MovePlans.HEIGHT_UNITS))
         val goalTiles = MovePlans.goalTiles(goalArea, goal.target)

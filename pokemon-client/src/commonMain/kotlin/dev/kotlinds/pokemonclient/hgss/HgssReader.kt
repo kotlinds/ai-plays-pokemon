@@ -224,15 +224,18 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
         val player = saveData?.let { runCatching { readPlayer(it) }.getOrNull() }
         // In battle the game works on its own copy of the party (BattleSystem.trainerParty[0], same slot order as the
         // save, values updated live: HP, status, PP); the save's party is only written back when the battle ends.
-        val battleParty = if (battle != null) battleSystem?.let { bs -> ptr(bs + A.BS_TRAINER_PARTY)?.let { runCatching { readPartyAt(ctx, it) }.getOrNull() } } else null
+        // The catching demo (BATTLE_TYPE_TUTORIAL) battles with Lyra's party and bag: the player's are the save's.
+        val demo = battle?.battleTypeFlags?.contains("TUTORIAL") == true ||
+            battleSetup?.let { u32(it + A.SETUP_BATTLE_TYPE) and A.BATTLE_TYPE_TUTORIAL != 0L } == true
+        val battleParty = if (battle != null && !demo) battleSystem?.let { bs -> ptr(bs + A.BS_TRAINER_PARTY)?.let { runCatching { readPartyAt(ctx, it) }.getOrNull() } } else null
         // Outside the battle proper (intro, end of battle, evolutions after it) the battle app's setup holds the party
         // the game works on; the save's is only updated when the app ends.
-        val setupParty = if (battleParty.isNullOrEmpty()) battleSetup?.let { ptr(it + A.SETUP_PARTY) }?.let { runCatching { readPartyAt(ctx, it) }.getOrNull() } else null
+        val setupParty = if (battleParty.isNullOrEmpty() && !demo) battleSetup?.let { ptr(it + A.SETUP_PARTY) }?.let { runCatching { readPartyAt(ctx, it) }.getOrNull() } else null
         val party = battleParty?.takeIf { it.isNotEmpty() }
             ?: setupParty?.takeIf { it.isNotEmpty() }
             ?: saveData?.let { runCatching { readParty(ctx, it) }.getOrNull() } ?: emptyList()
         // Same for the bag: balls thrown and items used in battle come out of the setup's copy.
-        val bag = (battleSystem?.let { ptr(it + A.BS_BAG) } ?: battleSetup?.let { ptr(it + A.SETUP_BAG) })
+        val bag = (if (demo) null else battleSystem?.let { ptr(it + A.BS_BAG) } ?: battleSetup?.let { ptr(it + A.SETUP_BAG) })
             ?.let { runCatching { readBagAt(it) }.getOrNull() }
             ?: saveData?.let { runCatching { readBag(it) }.getOrNull() }
         val registered = saveData?.let { sd -> saveArray(sd, A.SAVE_BAG) }

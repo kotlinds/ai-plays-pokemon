@@ -26,6 +26,15 @@ class HgssServicesRomTest {
     }
 
     @Test
+    fun onlyTheCounterNurseHeals() {
+        rom()
+        // Cherrygrove's Center: the counter nurse (person:0, CallStd std_nurse_joy) and the one blocking the stairs
+        // (person:7, std_wifi_club_closed) wear the same sprite; `heal` must talk to the first one.
+        val objects = kotlin.test.assertNotNull(HgssGame(HgssVersion.HEARTGOLD_US).state(HgssFixtures.load("cherrygrove_center")).field).objects
+        assertEquals(listOf("person:0"), objects.filter { it.role == dev.kotlinds.pokemonclient.state.PersonRole.NURSE }.map { it.id })
+    }
+
+    @Test
     fun routeTrainersComeFromTheCommonTrainerScripts() {
         // obj_R27_mystery_2: std_trainer(TRAINER_PSYCHIC_M_ELI) = 3000 + 412 - 1.
         assertEquals(412, HgssTrainers.commonScriptTrainer(3411))
@@ -49,6 +58,16 @@ class HgssServicesRomTest {
     }
 
     @Test
+    fun theEliteFourAreBeatenThroughTheFlagTheirScriptSets() {
+        rom()
+        // scr_seq_T10R0501_001: TrainerBattle KAREN / KAREN_2, CheckBattleWon, then SetFlag FLAG_DEFEATED_KAREN (0xE7).
+        assertEquals(0xE7, HgssTrainers.wonFlag(MAP_KAREN_ROOM, 246))
+        assertEquals(0xE4, HgssTrainers.wonFlag(MAP_WILL_ROOM, 245))
+        // Route trainers have no scripted win flag: their trainer flag says it.
+        assertNull(HgssTrainers.wonFlag(MAP_DANCE_THEATER, 412))
+    }
+
+    @Test
     fun clerkCatalogsComeFromTheirScripts() {
         rom()
         // The Indigo Plateau clerk (scr_seq_T10R0101_004): special mart 13.
@@ -68,6 +87,7 @@ class HgssServicesRomTest {
         const val MAP_DANCE_THEATER = 86
         const val MAP_LEAGUE_ENTRANCE = 300
         const val MAP_WILL_ROOM = 301
+        const val MAP_KAREN_ROOM = 304
     }
 }
 
@@ -97,4 +117,5 @@ class HgssPeopleLabelsTest {
         assertEquals("little boy", HgssLabels.person("BABYBOY1"))
         assertEquals("object", HgssLabels.person("BABYBOY1_11"))
     }
+
 }

@@ -16,6 +16,8 @@ import dev.kotlinds.pokemonclient.state.PartyMon
 import dev.kotlinds.pokemonclient.state.Screen
 import dev.kotlinds.pokemonclient.state.SpeciesId
 import kotlinx.serialization.json.JsonObject
+import dev.kotlinds.pokemonclient.state.BattleState
+import dev.kotlinds.pokemonclient.state.BattleKind
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -63,6 +65,11 @@ class RecorderEventsTest {
         return recorder.log.since(0)
     }
 
+    private fun state(party: List<PartyMon>, inBattle: Boolean) = GameState(
+        0, if (inBattle) Screen.Battle(Awaiting.ANIMATION) else Screen.Overworld(awaiting = Awaiting.INPUT), null, party, null,
+        if (inBattle) BattleState(BattleKind.TRAINER, false, null, emptyList(), emptyList(), emptyList(), null) else null, null,
+    )
+
     private fun bag(greatBalls: Int) = GameState(
         0, Screen.Overworld(awaiting = Awaiting.INPUT), null, emptyList(),
         listOf(BagPocket("balls", listOf(BagItem(Named(ItemId(3), "Great Ball"), greatBalls)))), null, null,
@@ -79,6 +86,25 @@ class RecorderEventsTest {
     fun aLastingIncreaseIsRecordedOnce() {
         val states = listOf(bag(6)) + List(20) { bag(9) }
         assertEquals(listOf("Great Ball" to 3), record(states).filterIsInstance<GameEvent.ItemReceived>().map { it.item to it.quantity })
+    }
+
+    @Test
+    fun aTornReadingWithAKnownPersonalityIsNotANewPokemon() {
+        // "obtained Egg (mon:033ef671.4cc4af7d)" during the battle against Lance: Swinub's personality, another trainer id.
+        val torn = mon(MonId(0x033ef671, 0x4cc4af7d), "EGG", 1).copy(isEgg = true)
+        val events = events(listOf(mon(swinub, "PILOSWINE", 40)), listOf(mon(swinub, "PILOSWINE", 40), torn))
+        assertEquals(emptyList(), events)
+    }
+
+    @Test
+    fun anEggIsNeverObtainedInBattle() {
+        val egg = mon(MonId(0x12345678, 0x3e9), "EGG", 1).copy(isEgg = true)
+        val party = listOf(mon(kenya, "FEAROW", 38))
+        val states = List(SEED_POLLS + 1) { state(party, inBattle = true) } + state(party + egg, inBattle = true)
+        assertEquals(emptyList(), record(states).filterIsInstance<GameEvent.PokemonObtained>())
+        // Out of battle, the same new Egg is obtained (the Day-Care, a gift).
+        val field = List(SEED_POLLS + 1) { state(party, inBattle = false) } + state(party + egg, inBattle = false)
+        assertEquals(1, record(field).filterIsInstance<GameEvent.PokemonObtained>().size)
     }
 
     @Test

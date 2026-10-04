@@ -198,6 +198,11 @@ sealed interface GameAction {
         override val key = "save_game"
     }
 
+    /** Picks [starter] (`species:<id>` or its name) on the professor's machine: turn, look, pick, confirm. */
+    data class ChooseStarter(val starter: String) : GameAction {
+        override val key get() = "choose_starter($starter)"
+    }
+
     /** Soft reset (L + R + START + SELECT), then CONTINUE: back to the last save, losing what came after. */
     data object SoftReset : GameAction {
         override val key = "soft_reset"

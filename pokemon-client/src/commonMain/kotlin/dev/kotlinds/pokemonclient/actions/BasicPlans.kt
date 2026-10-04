@@ -2,6 +2,7 @@ package dev.kotlinds.pokemonclient.actions
 
 import dev.kotlinds.pokemonclient.console.Button
 import dev.kotlinds.pokemonclient.runtime.kind
+import dev.kotlinds.pokemonclient.state.TextSource
 import dev.kotlinds.pokemonclient.state.Awaiting
 import dev.kotlinds.pokemonclient.state.BattlerRef
 import dev.kotlinds.pokemonclient.state.GameState
@@ -36,12 +37,28 @@ internal object BasicPlans {
 
     /** Presses A through messages, stopping at the first choice, menu or back in control (on a choice already: nothing). */
     val advanceDialogue = ActionPlan<GameAction.AdvanceDialogue> { _, context ->
-        if (context.state().screen is Screen.Selectable) return@ActionPlan ActionOutcome.Done("already on a choice: nothing to read")
+        val started = context.state().screen
+        if (started is Screen.Selectable) return@ActionPlan ActionOutcome.Done("already on a choice: nothing to read")
+        val startFrame = context.scope.frame
+        var outOfTime = false
         context.navigator.advanceUntil { state ->
             val screen = state.screen
-            screen !is Screen.Dialogue && screen !is Screen.PressToContinue && screen !is Screen.Battle && screen !is Screen.Animation ||
+            val done = screen !is Screen.Dialogue && screen !is Screen.PressToContinue && screen !is Screen.Battle && screen !is Screen.Animation ||
                 screen is Screen.Battle && screen.awaiting == Awaiting.INPUT
-        }.then { ActionOutcome.Done() }
+            // A long scene (Cherrygrove's guided tour): hand the turn back in time, so the answer reaches the agent
+            // before its call times out (an answer that late is taken as lost and repeated).
+            outOfTime = !done && context.scope.frame - startFrame > MAX_ADVANCE_FRAMES
+            done || outOfTime
+        }.then { end ->
+            if (outOfTime) return@then ActionOutcome.Done("still reading after ~${MAX_ADVANCE_FRAMES / 60} s: call advance_dialogue again to read on")
+            // A call ends on the Pokégear's contact list (it opened by itself for an incoming call): read, so close it.
+            val phoneLeftOpen = (started as? Screen.Dialogue)?.source == TextSource.PHONE &&
+                (end.screen as? Screen.ListMenu)?.kind == MenuKind.PHONE_CONTACTS
+            if (phoneLeftOpen) {
+                PartyBagPlans.closeToOverworld(context)
+                ActionOutcome.Done("call ended, Pokégear closed")
+            } else ActionOutcome.Done()
+        }
     }
 
     /** Selects and confirms an entry of the menu on screen, by its stable id. */
@@ -64,6 +81,9 @@ internal object BasicPlans {
     }
 
     private const val SHIFT = "option:shift"
+
+    /** About 30 s of a scene per `advance_dialogue` (the MCP repeats answers sent later than 50 s). */
+    private const val MAX_ADVANCE_FRAMES = 1800
 
     /** Flees: RUN on the battle command menu. */
     val run = ActionPlan<GameAction.Run> { _, context ->

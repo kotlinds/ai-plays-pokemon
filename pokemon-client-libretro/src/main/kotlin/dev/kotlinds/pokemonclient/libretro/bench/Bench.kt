@@ -19,6 +19,7 @@ import dev.kotlinds.pokemonclient.console.Button
 import dev.kotlinds.pokemonclient.console.Frame
 import dev.kotlinds.pokemonclient.console.MemoryRegion
 import dev.kotlinds.pokemonclient.console.TouchPoint
+import dev.kotlinds.pokemonclient.actions.ActionException
 import dev.kotlinds.pokemonclient.actions.ActionMode
 import dev.kotlinds.pokemonclient.actions.ActionRegistry
 import dev.kotlinds.pokemonclient.actions.Navigator
@@ -180,7 +181,11 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
             "walk" -> walk(arg.split(',').map { Button.valueOf(it.trim().uppercase()) })
             "cur" -> println(describe(game.state(scope.memory()).screen).lineSequence().first())
             "act" -> {
-                val action = registry.parse(Json.parseToJsonElement(arg).jsonObject, ActionMode.ASSISTED).getOrThrow()
+                val action = registry.parse(Json.parseToJsonElement(arg).jsonObject, ActionMode.ASSISTED).getOrElse { error ->
+                    // Refused like the agent would see it, and the script goes on.
+                    println("  refused: " + ((error as? ActionException)?.error?.let { "${it.code} ${it.message}" } ?: error.toString()))
+                    return
+                }
                 val startFrame = console.frame
                 val outcome = registry.execute(action, scope, game)
                 val actFrames = console.frame - startFrame

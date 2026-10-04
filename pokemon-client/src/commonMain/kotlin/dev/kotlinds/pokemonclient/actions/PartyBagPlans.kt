@@ -2,6 +2,7 @@ package dev.kotlinds.pokemonclient.actions
 
 import dev.kotlinds.pokemonclient.runtime.kind
 import dev.kotlinds.pokemonclient.console.Button
+import dev.kotlinds.pokemonclient.state.StartMenuFeature
 import dev.kotlinds.pokemonclient.state.Awaiting
 import dev.kotlinds.pokemonclient.state.Entry
 import dev.kotlinds.pokemonclient.state.GameState
@@ -334,7 +335,8 @@ internal object PartyBagPlans {
      * the bag and their menus). Not in the PC's menus: their actions (DEPOSIT, MARKING...) aren't the party's.
      */
     fun inField(state: GameState): Boolean = state.battle == null && when (val s = state.screen) {
-        is Screen.Overworld -> s.awaiting == Awaiting.INPUT
+        // X opens nothing before the bag is given (the start of a new game).
+        is Screen.Overworld -> s.awaiting == Awaiting.INPUT && state.startMenu?.contains(StartMenuFeature.BAG) != false
         is Screen.ListMenu -> s.kind == MenuKind.START_MENU
         is Screen.PartyGrid -> true
         is Screen.Bag -> !s.inBattle

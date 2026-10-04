@@ -25,6 +25,7 @@ internal class HgssServices {
         val withSave = mapped.copy(
             storage = runCatching { boxes.read(mem, save) }.getOrNull(),
             options = runCatching { save.options() }.getOrNull(),
+            startMenu = runCatching { save.startMenu() }.getOrNull(),
         )
         val field = withSave.field ?: return withSave
         val objects = raw.surroundings?.objects.orEmpty().associateBy { "person:${it.id}" }
@@ -57,9 +58,19 @@ internal class HgssServices {
         return found
     }
 
+    /** Beaten: its trainer flag, or the flag its scripted battle sets once won (the Elite Four). */
+    private fun defeated(save: HgssSave, zone: Int, trainerId: Int): Boolean? {
+        val byTrainerFlag = save.trainerDefeated(trainerId)
+        val byScript = HgssTrainers.wonFlag(zone, trainerId)?.let { save.flag(it) }
+        return if (byTrainerFlag == true || byScript == true) true else byTrainerFlag ?: byScript
+    }
+
     private fun enrichObject(o: FieldObject, info: MapObjectInfo, mapId: Int, badges: Int, save: HgssSave): FieldObject {
         if (o.kind != FieldObjectKind.PERSON) return o
         val zone = info.mapId.takeIf { it >= 0 } ?: mapId
+        // The nurse's sprite is also worn by attendants on a common script (std_wifi_club_closed: the one blocking
+        // the stairs of Cherrygrove's Center): only a map's own script (CallStd std_nurse_joy) heals.
+        if (o.role == PersonRole.NURSE && info.scriptId >= FIRST_STD_SCRIPT) return o.copy(role = null)
         if (o.role == PersonRole.CLERK) {
             val catalog = HgssMarts.catalog(zone, info.scriptId, badges) ?: return o
             return o.copy(catalog = catalog.map { ShopItem(Named(ItemId(it), HgssData.itemName(it)), HgssItemPrices.price(it)) })
@@ -70,7 +81,7 @@ internal class HgssServices {
             trainerId = trainerId,
             trainerClass = trainerClass,
             name = name,
-            defeated = save.trainerDefeated(trainerId),
+            defeated = defeated(save, zone, trainerId),
             sightRange = if (info.type == TRAINER_TYPE_SIGHT) info.param0.coerceIn(0, MAX_SIGHT) else 0,
         )
         return o.copy(label = label(trainer), trainer = trainer)
@@ -91,6 +102,9 @@ internal class HgssServices {
         /** Map object type 1: a trainer who sees ahead (`param[0]` tiles); 0: battles only when talked to. */
         const val TRAINER_TYPE_SIGHT = 1
         const val MAX_SIGHT = 15
+
+        /** `std_signpost` (include/constants/std_script.h): common scripts start here, a map's own are below. */
+        const val FIRST_STD_SCRIPT = 2000
 
         /** `MAP_TYPE_INTERIOR` (include/map_header.h). */
         const val MAP_TYPE_INTERIOR = 4

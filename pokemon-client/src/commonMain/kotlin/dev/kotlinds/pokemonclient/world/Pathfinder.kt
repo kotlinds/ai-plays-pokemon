@@ -210,13 +210,21 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
             ?: search(start, options, goalTiles, isGoal, allowJumps = true, allowTriggers = true).also { triggers = true }
             ?: return Result.Failed(blockedBy(start, options, goalTiles, isGoal))
         val jumps = found.any { it is Edge.Jump }
-        if (jumps && !options.acceptOneWay) {
+        // One way = no way back, not "jumps a ledge": a ledge is just a shortcut while the start can be reached again
+        // from the end (by another way: Route 29's ledges towards New Bark). Only a route with no way back needs
+        // [RouteOptions.acceptOneWay] (the way from Blackthorn down to Route 45).
+        val oneWay = jumps && !hasWayBack(found.last().to, start, options, triggers)
+        if (oneWay && !options.acceptOneWay) {
             // Prefer a route without ledges when one exists; otherwise refuse with the reason.
             val flat = search(start, options, goalTiles, isGoal, allowJumps = false, allowTriggers = triggers)
             return if (flat != null) Result.Found(route(flat, options)) else Result.Failed(RouteFailure.OnlyOneWay)
         }
-        return Result.Found(route(found, options))
+        return Result.Found(route(found, options, oneWay))
     }
+
+    /** True when [start] can be walked back to from [end] (ledges allowed: any way back will do). */
+    private fun hasWayBack(end: Node, start: Node, options: RouteOptions, triggers: Boolean): Boolean =
+        search(end, options, setOf(start.x to start.y), { it.x == start.x && it.y == start.y }, allowJumps = true, allowTriggers = triggers) != null
 
     /** The outcome of [route]. */
     sealed interface Result {
@@ -258,13 +266,13 @@ class Pathfinder(private val area: Area, private val overlay: Overlay = Overlay(
         return null
     }
 
-    private fun route(edges: List<Edge>, options: RouteOptions): Route {
+    private fun route(edges: List<Edge>, options: RouteOptions, oneWay: Boolean = false): Route {
         val crossed = edges.flatMap { it.tiles }
         val warnings = buildList {
             val grass = crossed.count { area.tile(it.x, it.y)?.kind == TileKind.TallGrass }
             if (grass > 0) add(RouteWarning.CrossesTallGrass(grass))
             if (crossed.any { (it.x to it.y) in inSight }) add(RouteWarning.PassesTrainerSight)
-            if (edges.any { it is Edge.Jump }) add(RouteWarning.OneWay)
+            if (oneWay) add(RouteWarning.OneWay)
             crossed.firstOrNull { (it.x to it.y) in overlay.activeTriggers }?.let { add(RouteWarning.StartsScene(it.x, it.y)) }
         }
         return Route(edges, warnings)

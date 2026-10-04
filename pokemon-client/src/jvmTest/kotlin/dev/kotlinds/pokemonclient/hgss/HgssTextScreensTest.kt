@@ -9,6 +9,7 @@ import dev.kotlinds.pokemonclient.state.ContinueReason
 import dev.kotlinds.pokemonclient.state.Cursor
 import dev.kotlinds.pokemonclient.state.MenuKind
 import dev.kotlinds.pokemonclient.state.Screen
+import dev.kotlinds.pokemonclient.state.StarterStage
 import dev.kotlinds.pokemonclient.state.TextSource
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -361,4 +362,32 @@ class HgssTextScreensTest {
     }
 
     // endregion
+
+    @Test
+    fun theProfessorsSpeechIsADialogueWaitingForA() {
+        // A new game, "NO INFO NEEDED", then the professor's first message page waiting for A (src/oaks_speech.c:961).
+        val s = assertIs<Screen.Dialogue>(screen("oak_speech_wait"))
+        assertEquals(TextSource.INTRO, s.source)
+        assertEquals("Sorry to keep you waiting!", s.text)
+        assertEquals(Awaiting.INPUT, s.awaiting)
+    }
+
+    @Test
+    fun elmsMachineListsTheStartersBySpecies() {
+        val s = assertIs<Screen.StarterChoice>(screen("starter_machine"))
+        assertEquals(listOf(152, 155, 158), s.starters.map { it.id.value })
+        assertEquals(0, s.front)
+        assertEquals(StarterStage.LOOKING, s.stage)
+        assertEquals(Awaiting.INPUT, s.awaiting)
+    }
+
+    @Test
+    fun lyrasCatchingDemoIsACutSceneWithThePlayersOwnParty() {
+        // Route 29: Lyra's Marill battles a Rattata by itself (BATTLE_TYPE_TUTORIAL). Its menus aren't the player's, and
+        // the battle's party is Lyra's: the state keeps the player's (no "obtained MARILL").
+        val state = HgssGame(version).state(HgssFixtures.load("lyra_catching_demo"))
+        assertEquals(Screen.Animation(AnimationKind.CUTSCENE), state.screen)
+        assertEquals(dev.kotlinds.pokemonclient.state.BattleKind.DEMO, assertNotNull(state.battle).kind)
+        assertEquals(listOf(155), state.party.map { it.species.id.value })
+    }
 }

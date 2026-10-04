@@ -34,7 +34,18 @@ data class GameState(
     val storage: PcStorage? = null,
     /** The game's OPTIONS (text speed, battle scene, battle style), null when unreadable. */
     val options: GameOptions? = null,
+    /** What the start menu offers yet (the story unlocks it bit by bit), null when unknown. */
+    val startMenu: Set<StartMenuFeature>? = null,
 )
+
+/** Start menu entries the story unlocks. */
+enum class StartMenuFeature {
+    /** The menu itself opens (X) once the bag is given; until then nothing opens. */
+    BAG,
+    TRAINER_CARD,
+    SAVE,
+    OPTIONS,
+}
 
 /** The story's progress, read from the game's flags and variables (never from what is displayed). */
 data class StoryState(

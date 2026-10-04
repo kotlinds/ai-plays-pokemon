@@ -91,6 +91,12 @@ object StateView {
                 screen.text?.let { put("text", it) }
                 if (screen.canCancel) put("can_cancel", "B now stops the evolution")
             }
+            is Screen.StarterChoice -> {
+                put("starters", JsonArray(screen.starters.map { JsonPrimitive("species:${it.id.value} = ${it.name}") }))
+                screen.starters.getOrNull(screen.front)?.let { put("in_front", "species:${it.id.value} = ${it.name}") }
+                put("stage", screen.stage.name.lowercase())
+                put("hint", "use choose_starter with the species id: it turns the machine, looks, picks and confirms")
+            }
             is Screen.Overworld -> screen.banner?.let { put("sign", it) }
             is Screen.Unknown -> screen.hint?.let { put("hint", it) }
             is Screen.Intro -> put("detail", screen.detail)

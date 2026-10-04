@@ -289,6 +289,8 @@ internal object MovePlans {
             val goalTiles = goalTiles(area, target)
             val isGoal: (Node) -> Boolean = target.isGoal ?: { node -> (node.x to node.y) in goalTiles }
             if (isGoal(start) && target.warp != true) return Walk.Arrived(field)
+            // On the targeted exit mat already (just came in through it): only the press towards the exit is left.
+            if (target.warp == true && target.exit != null && field.x == target.x && field.y == target.y) return takeExit(context, target.exit, field, options, steps)
             val access = FieldMoveWalk.access(context, state)
             val routeOptions = routeOptions(field, options, FieldMoveWalk.usable(access))
             // A tile target may be entered whatever it is (a warp, a scene trigger); targets reached with A never are.
@@ -400,21 +402,26 @@ internal object MovePlans {
             val end = context.navigator.settle()
             val endField = end.field ?: return Walk.Interrupted(end, steps)
             // Exit mats and stairs: standing on them isn't enough, the game waits for a press towards the exit.
-            if (target.warp == true && endField.mapId == field.mapId && target.exit != null) {
-                // Ladders and stairs: the press starts a climb then a fade; the map changes well after the press, so
-                // wait for the change itself before concluding (the step alone looks refused).
-                val pushed = stepOnce(context, target.exit, Node(Int.MIN_VALUE, Int.MIN_VALUE), options)
-                if (pushed is StepResult.Moved && pushed.field.mapId != field.mapId) return Walk.Arrived(pushed.field)
-                awaitMapChange(context, field.mapId)?.let { return Walk.Arrived(it) }
-                val now = context.navigator.settle()
-                if (now.screen !is Screen.Overworld || now.field == null) return Walk.Interrupted(now, steps)
-                return Walk.Stuck("the warp didn't take the player anywhere (still at ${now.field.x},${now.field.y})")
-            }
+            if (target.warp == true && endField.mapId == field.mapId && target.exit != null) return takeExit(context, target.exit, field, options, steps)
             val endNode = Node(endField.x, endField.y, pathfinder.levelAt(endField.x, endField.y, endField.height * HEIGHT_UNITS))
             if (!isGoal(endNode) && target.warp != true) return@repeat
             return Walk.Arrived(endField)
         }
         return Walk.Stuck("the game refused ${refused.size} steps on the way to ${target.id}")
+    }
+
+    /**
+     * Standing on an exit mat or stairs, the game waits for a press towards the exit. Ladders and stairs: the press
+     * starts a climb then a fade; the map changes well after the press, so wait for the change itself before
+     * concluding (the step alone looks refused).
+     */
+    private fun takeExit(context: PlanContext, exit: Direction, field: FieldState, options: MoveOptions, steps: Int): Walk {
+        val pushed = stepOnce(context, exit, Node(Int.MIN_VALUE, Int.MIN_VALUE), options)
+        if (pushed is StepResult.Moved && pushed.field.mapId != field.mapId) return Walk.Arrived(pushed.field)
+        awaitMapChange(context, field.mapId)?.let { return Walk.Arrived(it) }
+        val now = context.navigator.settle()
+        if (now.screen !is Screen.Overworld || now.field == null) return Walk.Interrupted(now, steps)
+        return Walk.Stuck("the warp didn't take the player anywhere (still at ${now.field.x},${now.field.y})")
     }
 
     /**

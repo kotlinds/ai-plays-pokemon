@@ -196,6 +196,17 @@ sealed interface Screen {
         val canCancel: Boolean = false,
     ) : Screen
 
+    /**
+     * The professor's machine with the starters' balls: [front] (an index into [starters]) is the ball facing the
+     * player, [stage] how far the choice went. The `choose_starter` action does the whole choice.
+     */
+    data class StarterChoice(
+        val starters: List<Named<SpeciesId>>,
+        val front: Int,
+        val stage: StarterStage,
+        override val awaiting: Awaiting,
+    ) : Screen
+
     /** A long animation with nothing to do (trade, egg hatching, cut scene...). */
     data class Animation(val kind: AnimationKind) : Screen {
         override val awaiting get() = Awaiting.ANIMATION
@@ -371,6 +382,9 @@ enum class TextSource {
 
     /** Messages of menus and apps (party menu, bag: "can't use that here"...). */
     MENU,
+
+    /** The professor's speech of a new game, before the player is in the world. */
+    INTRO,
 }
 
 /** Why the game waits for A on a [Screen.PressToContinue]. */
@@ -387,3 +401,15 @@ enum class PcMode { DEPOSIT, WITHDRAW, MOVE, MOVE_ITEMS }
 
 /** Kinds of [Screen.Animation]. */
 enum class AnimationKind { TRADE, EGG_HATCH, CUTSCENE, TRANSITION }
+
+/** How far the choice of a starter went on [Screen.StarterChoice]. */
+enum class StarterStage {
+    /** Looking at the machine: A looks at the ball in front, LEFT / RIGHT turn the machine. */
+    LOOKING,
+
+    /** Looking at the ball in front: A picks it (the professor then asks to confirm). */
+    INSPECTING,
+
+    /** The professor asks "do you want this one?": A takes it for good, B looks again. */
+    CONFIRMING,
+}

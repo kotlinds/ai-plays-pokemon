@@ -91,14 +91,27 @@ class PathfinderTest {
     }
 
     @Test
-    fun aRouteWithoutLedgesIsPreferredWhenItExists() {
+    fun aLedgeWithAWayBackIsJustAShortcut() {
+        // The way back goes up the right column: jumping is not one way, so it's taken without asking.
         val map = area(
             "....",
             "vvv.",
             "....",
         )
         val found = assertIs<Pathfinder.Result.Found>(Pathfinder(map).to(0, 2, Node(0, 0)))
-        assertTrue(found.route.edges.none { it is Edge.Jump })
+        assertTrue(found.route.edges.any { it is Edge.Jump })
+        assertTrue(RouteWarning.OneWay !in found.route.warnings)
+    }
+
+    @Test
+    fun withoutAWayBackTheRouteAvoidingLedgesIsPreferred() {
+        // The ledges cut the map in two except through the right column... which also has a ledge: no way back up.
+        val map = area(
+            "....",
+            "vvvv",
+            "....",
+        )
+        assertEquals(RouteFailure.OnlyOneWay, assertIs<Pathfinder.Result.Failed>(Pathfinder(map).to(0, 2, Node(0, 0))).failure)
     }
 
     @Test

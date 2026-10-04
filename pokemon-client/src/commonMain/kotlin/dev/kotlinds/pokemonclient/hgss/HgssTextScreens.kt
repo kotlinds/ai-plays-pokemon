@@ -298,8 +298,10 @@ internal object HgssPhoneScreens {
     fun decode(mem: HgssMemory, fs: Long): Screen? {
         val gear = mem.ptr(fs + A.FS_SUB0)?.let { mem.ptr(it + A.FSS0_SUB_APP) } ?: return null
         if (mem.fn(gear + A.OM_INIT) != T.FN_POKEGEAR_INIT) return null
-        val gearData = mem.ptr(gear + A.OM_DATA) ?: return null
-        val child = mem.ptr(gearData + T.GEAR_CHILD_APP) ?: return null
+        // Opening (an incoming call opens it by itself): no app inside yet, nothing to press.
+        val gearData = mem.ptr(gear + A.OM_DATA) ?: return Screen.Animation(AnimationKind.TRANSITION)
+        if (mem.s32(gear + A.OM_EXEC_STATE) != 2) return Screen.Animation(AnimationKind.TRANSITION)
+        val child = mem.ptr(gearData + T.GEAR_CHILD_APP) ?: return Screen.Animation(AnimationKind.TRANSITION)
         if (mem.u8(gearData + T.GEAR_APP) != T.GEAR_APP_PHONE || mem.fn(child + A.OM_INIT) != T.FN_PHONE_INIT) {
             return null
         }
@@ -476,11 +478,13 @@ internal object HgssOakIntroScreens {
     fun decode(mem: HgssMemory): Screen? {
         val data = mem.ptr(mem.version.mainAppState + A.MAIN_APP_OVERLAY_MANAGER)?.let { mem.ptr(it + A.OM_DATA) } ?: return null
         val menu = data + T.OAK_MENU
-        // A confirmed choice blinks for ~20 frames before the intro moves on.
-        if (mem.u8(menu + T.OAK_MENU_PRESS_DELAY) != 0) return Screen.Animation(AnimationKind.TRANSITION)
+        val state = mem.s32(data + T.OAK_STATE)
+        // A confirmed choice blinks for ~20 frames before the intro moves on (the delay byte stays set once the menu
+        // is gone: it only counts in the menu states).
+        if (state in T.OAK_MENU_STATES && mem.u8(menu + T.OAK_MENU_PRESS_DELAY) != 0) return Screen.Animation(AnimationKind.TRANSITION)
         val shown = mem.u8(menu + T.OAK_MENU_PAD_MODE) != 0
         val position = mem.u8(menu + T.OAK_MENU_CURSOR)
-        return when (mem.s32(data + T.OAK_STATE)) {
+        return when (state) {
             T.OAK_STATE_INFO_MENU -> {
                 val entries = T.OAK_INFO_LABELS.mapIndexed { i, label -> Entry("option:$i", label, touch = T.OAK_INFO_RECTS[i].center) }
                 Screen.ListMenu(
@@ -519,8 +523,38 @@ internal object HgssOakIntroScreens {
                     if (result in 1..2) Cursor.At(result - 1) else Cursor.Hidden, Topology.vertical(2), CancelBehavior.CONFIRMS_LAST,
                 )
             }
-            else -> null
+            else -> speech(mem, data)
         }
+    }
+
+    /**
+     * The professor's messages (OakSpeech_PrintDialogMsg / OakSpeech_PrintAndFadeFullScreenText, src/oaks_speech.c:936,
+     * 986). A dialog message can have several pages: while it is printed (state 1) its text printer
+     * (`data->textPrinter`) also waits for A at each page break; once printed, state 2 waits for A. A full-screen text
+     * waits for A or B (state 3). The text is `data->string`, freed (marked invalid) once printed but still readable
+     * until the next message; only the page on screen is shown.
+     */
+    private fun speech(mem: HgssMemory, data: Long): Screen? {
+        val strPtr = mem.ptr(data + A.OAK_STRING)
+        val printer = mem.ptr(mem.version.textPrinterTasks + 4L * mem.u8(data + T.OAK_TEXT_PRINTER))?.let { mem.ptr(it + A.SYSTASK_DATA) }
+        val awaiting = when {
+            mem.s32(data + T.OAK_PRINT_DIALOG_STATE) == T.OAK_DIALOG_PRINTING ->
+                if (printer != null && mem.u8(printer + A.TP_STATE) in A.TEXT_PRINTER_WAIT_STATES) Awaiting.INPUT else Awaiting.TEXT_PRINTING
+            mem.s32(data + T.OAK_PRINT_DIALOG_STATE) == T.OAK_DIALOG_WAIT_BUTTON -> Awaiting.INPUT
+            mem.s32(data + T.OAK_PRINT_FULL_SCREEN_STATE) == T.OAK_FULL_SCREEN_WAIT_BUTTON -> Awaiting.INPUT
+            // Every input of the speech is decoded (menus, yes / no, messages): anything else is the professor
+            // fading in, a picture moving... nothing to press.
+            else -> return Screen.Animation(AnimationKind.TRANSITION)
+        }
+        val text = strPtr?.takeIf { mem.gameString(it, allowFreed = true) != null }?.let { str ->
+            val size = mem.u16(str + A.STR_SIZE).coerceAtMost(2048)
+            val chars = mem.chars(str + A.STR_DATA, size)
+            // Printing: the page the printer is on (its current char); printed: the last page.
+            val printed = printer?.takeIf { awaiting != Awaiting.INPUT || mem.s32(data + T.OAK_PRINT_DIALOG_STATE) == T.OAK_DIALOG_PRINTING }
+                ?.let { ((mem.u32(it + A.TP_CURRENT_CHAR) - (str + A.STR_DATA)) / 2).toInt().takeIf { n -> n in 0..size } }
+            HgssText.visibleLines(chars, printed).replace('\n', ' ')
+        }.orEmpty()
+        return Screen.Dialogue(TextSource.INTRO, null, text, awaiting)
     }
 }
 
@@ -780,6 +814,13 @@ internal object HgssTextAddresses {
     const val OAK_STATE_GENDER = 65
     const val OAK_STATE_CONFIRM_GENDER = 69
     const val OAK_STATE_CONFIRM_NAME = 98
+    val OAK_MENU_STATES = setOf(OAK_STATE_INFO_MENU, OAK_STATE_GENDER, OAK_STATE_CONFIRM_GENDER, OAK_STATE_CONFIRM_NAME)
+    const val OAK_PRINT_DIALOG_STATE = 0x104L       // printDialogMsgState
+    const val OAK_TEXT_PRINTER = 0x10CL             // u32 textPrinter (its id)
+    const val OAK_PRINT_FULL_SCREEN_STATE = 0x108L  // printAndFadeFullScreenTextState
+    const val OAK_DIALOG_PRINTING = 1
+    const val OAK_DIALOG_WAIT_BUTTON = 2
+    const val OAK_FULL_SCREEN_WAIT_BUTTON = 3
     val OAK_INFO_LABELS = listOf("CONTROL INFO", "ADVENTURE INFO", "NO INFO NEEDED")
     val OAK_GENDER_LABELS = listOf("Boy", "Girl")
     /** `ov53_021E8650` and `sTouchscreenHitboxes_GenderSelect` (src/oaks_speech.c). */

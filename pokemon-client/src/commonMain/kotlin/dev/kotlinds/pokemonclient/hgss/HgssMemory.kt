@@ -35,10 +35,14 @@ class HgssMemory(val memory: Memory, val version: HgssVersion) {
 
     fun chars(addr: Long, count: Int): IntArray = IntArray(count) { u16(addr + 2L * it) }
 
-    /** Reads a game `String` object (include/pm_string.h) if its magic matches. */
-    fun gameString(strPtr: Long?): String? {
+    /**
+     * Reads a game `String` object (include/pm_string.h) if its magic matches. [allowFreed] also reads one that
+     * String_Delete just marked invalid: some screens free their message once printed, while it stays on screen.
+     */
+    fun gameString(strPtr: Long?, allowFreed: Boolean = false): String? {
         if (strPtr == null) return null
-        if (u32(strPtr + A.STR_MAGIC) != A.STRING_MAGIC) return null
+        val magic = u32(strPtr + A.STR_MAGIC)
+        if (magic != A.STRING_MAGIC && !(allowFreed && magic == A.STRING_INVAL)) return null
         val max = u16(strPtr + A.STR_MAXSIZE)
         val size = u16(strPtr + A.STR_SIZE)
         if (size > max || size > 2048) return null

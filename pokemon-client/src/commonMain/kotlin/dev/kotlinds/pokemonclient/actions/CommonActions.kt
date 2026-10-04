@@ -1,6 +1,8 @@
 package dev.kotlinds.pokemonclient.actions
 
 import dev.kotlinds.pokemonclient.Direction
+import dev.kotlinds.pokemonclient.state.Awaiting
+import dev.kotlinds.pokemonclient.state.StartMenuFeature
 import dev.kotlinds.pokemonclient.state.PersonRole
 import dev.kotlinds.pokemonclient.state.FieldObjectKind
 import kotlinx.serialization.json.booleanOrNull
@@ -252,9 +254,25 @@ object CommonActions {
         description = "Save the game (start menu → SAVE). Safe to do often.",
         parameters = emptyList(),
         modes = assisted,
-        availability = { state -> if (PartyBagPlans.inField(state)) Availability.Available() else Availability.Hidden },
+        availability = { state ->
+            locked(state, StartMenuFeature.SAVE) ?: if (PartyBagPlans.inField(state)) Availability.Available() else Availability.Hidden
+        },
         parse = { GameAction.SaveGame },
     ), FieldPlans.saveGame)
+
+    val chooseStarter = ActionDefinition(GameAction.ChooseStarter::class, spec(
+        name = "choose_starter",
+        description = "Take one of the starters on the professor's machine, for good: turns the machine to its ball, looks at it, " +
+            "picks it and confirms (each step checked on the machine's state).",
+        parameters = listOf(Parameter("starter", ParameterType.STRING, "The starter: its species id (species:155) or its name.")),
+        modes = assisted,
+        availability = { state ->
+            val screen = state.screen as? Screen.StarterChoice
+            if (screen == null) Availability.Hidden
+            else Availability.Available(mapOf("starter" to screen.starters.map { Choice("species:${it.id.value}", it.name) }))
+        },
+        parse = { json -> GameAction.ChooseStarter(string(json, "starter")) },
+    ), StarterPlans.chooseStarter)
 
     val softReset = ActionDefinition(GameAction.SoftReset::class, spec(
         name = "soft_reset",
@@ -269,7 +287,7 @@ object CommonActions {
     private val moveParameters = listOf(
         Parameter("avoid_tall_grass", ParameterType.BOOLEAN, "Avoid tall grass when another way exists (fewer wild battles).", required = false),
         Parameter("avoid_trainers", ParameterType.BOOLEAN, "Avoid the line of sight of trainers when another way exists.", required = false),
-        Parameter("accept_one_way", ParameterType.BOOLEAN, "Allow jumping down ledges (no way back the same way).", required = false),
+        Parameter("accept_one_way", ParameterType.BOOLEAN, "Allow a way with no way back (ledges you can't come back up by any path). Ledges that are only shortcuts are always taken.", required = false),
         Parameter("run", ParameterType.BOOLEAN, "Run (hold B) instead of walking.", required = false),
     )
 
@@ -318,8 +336,7 @@ object CommonActions {
         parameters = listOf(
             Parameter("direction", ParameterType.STRING, "north, south, west or east.", values = Direction.entries.map { it.name.lowercase() }),
             Parameter("tiles", ParameterType.INTEGER, "How many tiles (1-${MovePlans.MAX_STEP_TILES}, default 1).", required = false),
-            Parameter("run", ParameterType.BOOLEAN, "Run (hold B) instead of walking.", required = false),
-        ),
+        ) + moveParameters,
         modes = assisted,
         availability = { state -> if (MovePlans.canWalk(state, hasWorld = true)) Availability.Available() else Availability.Hidden },
         parse = { json ->
@@ -588,6 +605,7 @@ object CommonActions {
         ),
         modes = assisted,
         availability = { state ->
+            locked(state, StartMenuFeature.OPTIONS)?.let { return@spec it }
             if (!PartyBagPlans.inField(state) && !OptionsPlans.isOptionsScreen(state)) return@spec Availability.Hidden
             val now = state.options
             Availability.Available(now?.let {
@@ -612,9 +630,17 @@ object CommonActions {
 
     /** Every common action, in the order they are listed to agents. */
     val definitions: List<ActionDefinition<*>> get() =
-        listOf(advanceDialogue, choose, enterText, attack, switch, throwBall, learnMove, run, keepBattling, goTo, interact, step, findEncounter, heal, fly, fish, buy, setQuantity, deposit, withdraw, pc, reorderParty, useItem, giveItem, takeItem, teach, useKeyItem, registerItem, saveGame, softReset, setOptions, press, touch, wait)
+        listOf(advanceDialogue, choose, enterText, attack, switch, throwBall, learnMove, run, keepBattling, goTo, interact, step, findEncounter, heal, fly, fish, buy, setQuantity, deposit, withdraw, pc, reorderParty, useItem, giveItem, takeItem, teach, useKeyItem, registerItem, saveGame, softReset, setOptions, chooseStarter, press, touch, wait)
 
     // region Helpers
+
+    /** Walking around but the start menu has no [feature] yet: say so instead of failing on the menu. */
+    private fun locked(state: GameState, feature: StartMenuFeature): Availability.Unavailable? {
+        val walking = state.battle == null && (state.screen as? Screen.Overworld)?.awaiting == Awaiting.INPUT
+        if (!walking || state.startMenu?.contains(feature) != false) return null
+        val detail = if (StartMenuFeature.BAG !in state.startMenu) "The start menu doesn't open yet" else "The start menu has no ${feature.name.lowercase()} yet"
+        return Availability.Unavailable(UnavailableReason.NOT_UNLOCKED_YET, detail, "the story unlocks it (Mom gives it at the start)")
+    }
 
     private fun <A : GameAction> spec(
         name: String,
