@@ -367,4 +367,23 @@ class HgssPartyBagScreensTest {
         assertFalse(screen("pb_bag_items") is Screen.PartyGrid)
         assertFalse(screen("pb_grid6") is Screen.Bag)
     }
+
+    @Test
+    fun theRareCandyStatsPanelsWaitForAPress() {
+        for ((name, panel) in listOf("pb_rarecandy_gains" to "gains panel", "pb_rarecandy_totals" to "totals panel")) {
+            val screen = assertIs<Screen.PressToContinue>(screen(name), name)
+            assertEquals(dev.kotlinds.pokemonclient.state.ContinueReason.LEVEL_UP_STATS, screen.reason)
+            kotlin.test.assertTrue(screen.text.orEmpty().startsWith("HO-OH grew to Lv47 ($panel): Max HP 167"), screen.text)
+        }
+    }
+
+    @Test
+    fun theFieldLearnMoveQuestionSaysWhatYesMeansAndWhichMove() {
+        val screen = assertIs<Screen.YesNo>(screen("pb_rarecandy_learn"))
+        val offer = kotlin.test.assertNotNull(screen.learning)
+        assertEquals(dev.kotlinds.pokemonclient.state.LearnQuestion.FORGET_A_MOVE, offer.question)
+        assertEquals("PILOSWINE", offer.monName)
+        kotlin.test.assertTrue(offer.move.id.value > 0)
+        assertEquals(listOf("option:yes", "option:no"), screen.entries.map { it.id })
+    }
 }

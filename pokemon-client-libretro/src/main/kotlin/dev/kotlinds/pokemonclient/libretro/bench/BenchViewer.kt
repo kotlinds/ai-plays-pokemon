@@ -1,4 +1,4 @@
-package me.nathanfallet.aiplayspokemon.dev
+package dev.kotlinds.pokemonclient.libretro.bench
 
 import dev.kotlinds.pokemonclient.console.Frame
 import java.awt.Dimension

@@ -136,17 +136,59 @@ class Lookup(private val data: GameData, private val level: KnowledgeLevel) {
 
     // region Ids and names
 
-    private fun findSpecies(raw: String): SpeciesInfo =
-        idOrName(raw, "species", 1..data.speciesCount) { data.species(SpeciesId(it))?.name }?.let { data.species(SpeciesId(it)) }
-            ?: throw IllegalArgumentException("Unknown species `$raw`")
+    private fun findSpecies(raw: String): SpeciesInfo {
+        val name = { id: Int -> data.species(SpeciesId(id))?.name }
+        return idOrName(raw, "species", 1..data.speciesCount, name)?.let { data.species(SpeciesId(it)) }
+            ?: throw unknown("species", raw, 1..data.speciesCount, name)
+    }
 
-    private fun findMove(raw: String): MoveInfo =
-        idOrName(raw, "move", 1..data.moveCount) { data.move(MoveId(it))?.name }?.let { data.move(MoveId(it)) }
-            ?: throw IllegalArgumentException("Unknown move `$raw`")
+    private fun findMove(raw: String): MoveInfo {
+        val name = { id: Int -> data.move(MoveId(id))?.name }
+        return idOrName(raw, "move", 1..data.moveCount, name)?.let { data.move(MoveId(it)) }
+            ?: throw unknown("move", raw, 1..data.moveCount, name)
+    }
 
-    private fun findItem(raw: String): ItemInfo =
-        idOrName(raw, "item", 1..data.itemCount) { data.item(ItemId(it))?.name }?.let { data.item(ItemId(it)) }
-            ?: throw IllegalArgumentException("Unknown item `$raw`")
+    private fun findItem(raw: String): ItemInfo {
+        val name = { id: Int -> data.item(ItemId(id))?.name }
+        return idOrName(raw, "item", 1..data.itemCount, name)?.let { data.item(ItemId(it)) }
+            ?: throw unknown("item", raw, 1..data.itemCount, name)
+    }
+
+    /**
+     * "Unknown item `Revve`. Close matches: item:28 Revive, ..." — the names nearest to [raw] (names containing it,
+     * then by edit distance on the normalized spelling), so the agent can retry with a valid id.
+     */
+    private fun unknown(prefix: String, raw: String, range: IntRange, name: (Int) -> String?): IllegalArgumentException {
+        val wanted = normalize(raw.removePrefix("$prefix:"))
+        val close = if (wanted.isEmpty()) emptyList() else range.asSequence()
+            .mapNotNull { id -> name(id)?.takeIf { it.isNotBlank() }?.let { id to it } }
+            .mapNotNull { (id, label) ->
+                val n = normalize(label).takeIf { it.length >= MIN_NAME_LENGTH } ?: return@mapNotNull null
+                val score = if (n.contains(wanted) || wanted.contains(n)) 0 else editDistance(n, wanted)
+                Triple(id, label, score)
+            }
+            .filter { it.third <= maxOf(2, wanted.length / 3) }
+            .sortedWith(compareBy({ it.third }, { it.first }))
+            .take(MAX_SUGGESTIONS)
+            .map { (id, label) -> "$prefix:$id $label" }
+            .toList()
+        val suffix = if (close.isEmpty()) "" else ". Close matches: ${close.joinToString()}"
+        return IllegalArgumentException("Unknown $prefix `$raw`$suffix")
+    }
+
+    /** Levenshtein distance between two short strings. */
+    private fun editDistance(a: String, b: String): Int {
+        var previous = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            val current = IntArray(b.length + 1)
+            current[0] = i
+            for (j in 1..b.length) {
+                current[j] = minOf(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1)
+            }
+            previous = current
+        }
+        return previous[b.length]
+    }
 
     private fun findType(raw: String): PokemonType {
         val value = normalize(raw.removePrefix("type:"))
@@ -167,6 +209,10 @@ class Lookup(private val data: GameData, private val level: KnowledgeLevel) {
     // endregion
 
     private companion object {
+        const val MAX_SUGGESTIONS = 5
+
+        /** Placeholder names ("???", "-") are never suggested. */
+        const val MIN_NAME_LENGTH = 2
         val ACCENTS = mapOf('é' to 'e', 'è' to 'e', 'ê' to 'e', 'à' to 'a', 'â' to 'a', 'î' to 'i', 'ï' to 'i', 'ô' to 'o', 'ù' to 'u', 'û' to 'u', 'ç' to 'c')
     }
 }

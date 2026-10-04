@@ -91,9 +91,16 @@ sealed interface GameAction {
 
     // region Items, party, PC, shop
 
-    /** Uses an item (on [target] when it needs a Pokémon, and on [move] for PP restoring items). */
-    data class UseItem(val item: ItemRef, val target: MonId? = null, val move: MoveRef? = null) : GameAction {
-        override val key get() = "use_item(${item.raw}${target?.let { "→$it" } ?: ""})"
+    /**
+     * Uses an item (on [target] when it needs a Pokémon, and on [move] for PP restoring items like Ether), in the field
+     * or in battle. [batch] lists more uses done right after in the same bag session (field only: in battle one item
+     * takes the turn).
+     */
+    data class UseItem(val item: ItemRef, val target: MonId? = null, val move: MoveRef? = null, val batch: List<ItemUse> = emptyList()) : GameAction {
+        /** Every use, this one first. */
+        val uses: List<ItemUse> get() = listOf(ItemUse(item, target, move)) + batch
+
+        override val key get() = "use_item(" + uses.joinToString(", ") { it.key } + ")"
     }
 
     /** Teaches a TM / HM to [mon], forgetting [forget] if it already knows four moves. */
@@ -127,8 +134,39 @@ sealed interface GameAction {
         override val key get() = "release($mon)"
     }
 
-    data class Buy(val item: ItemRef, val quantity: Int) : GameAction {
-        override val key get() = "buy(${item.raw}x$quantity)"
+    /**
+     * Buys [purchases] in one visit to the counter (in order), from the overworld, the clerk's menu or the shop list.
+     * Empty: nothing to buy, the answer lists what the shop sells.
+     */
+    data class Buy(val purchases: List<Purchase>) : GameAction {
+        constructor(item: ItemRef, quantity: Int) : this(listOf(Purchase(item, quantity)))
+
+        override val key get() = "buy(${purchases.joinToString(",") { "${it.item.raw}x${it.quantity}" }})"
+    }
+
+    /** Sets the number shown on a quantity screen (shop, bag...), one checked press at a time; [confirm] presses A after. */
+    data class SetQuantity(val value: Int, val confirm: Boolean = false) : GameAction {
+        override val key get() = "set_quantity($value)"
+    }
+
+    /**
+     * Several PC storage operations in one session at the PC (it isn't switched off in between), in order.
+     */
+    data class Pc(val operations: List<PcOperation>) : GameAction {
+        override val key get() = "pc(${operations.joinToString(",") { it.key }})"
+    }
+
+    /** Sets the game's OPTIONS (null = leave as is), then leaves the options screen saving them. */
+    data class SetOptions(
+        val textSpeed: dev.kotlinds.pokemonclient.state.TextSpeed? = null,
+        val battleScene: Boolean? = null,
+        val battleStyle: dev.kotlinds.pokemonclient.state.BattleStyle? = null,
+    ) : GameAction {
+        override val key get() = "set_options(" + listOfNotNull(
+            textSpeed?.let { "text_speed=${it.name.lowercase()}" },
+            battleScene?.let { "battle_scene=${if (it) "on" else "off"}" },
+            battleStyle?.let { "battle_style=${it.name.lowercase()}" },
+        ).joinToString(",") + ")"
     }
 
     data class Sell(val item: ItemRef, val quantity: Int) : GameAction {
@@ -160,6 +198,11 @@ sealed interface GameAction {
         override val key = "save_game"
     }
 
+    /** Soft reset (L + R + START + SELECT), then CONTINUE: back to the last save, losing what came after. */
+    data object SoftReset : GameAction {
+        override val key = "soft_reset"
+    }
+
     /** Heals the party at a Pokémon Center (talks to the nurse). */
     data object Heal : GameAction {
         override val key = "heal"
@@ -169,14 +212,13 @@ sealed interface GameAction {
 
     // region World (phase 3)
 
-    /** Walks to a tile (absolute map coordinates) or next to a target, with the movement options. */
-    data class GoTo(val x: Int?, val y: Int?, val target: String?, val options: MoveOptions = MoveOptions()) : GameAction {
-        override val key get() = "go_to(${target ?: "$x,$y"})"
-    }
-
-    /** Walks as far as possible in [direction]. */
-    data class Explore(val direction: Direction, val options: MoveOptions = MoveOptions()) : GameAction {
-        override val key get() = "explore(${direction.name.lowercase()})"
+    /**
+     * Walks to a tile (absolute map coordinates, on [map] when given: another floor or map) or to a target: an
+     * object of this map, `exit:<direction>` (the map's edge towards a neighbouring map), a map's name, or
+     * `frontier`; through warps, holes and map edges when needed, with the movement options.
+     */
+    data class GoTo(val x: Int?, val y: Int?, val target: String?, val options: MoveOptions = MoveOptions(), val map: String? = null) : GameAction {
+        override val key get() = "go_to(${target ?: "$x,$y"}${map?.let { " on $it" } ?: ""})"
     }
 
     /** Walks next to [target] (a person, sign, object or item) and interacts with it (A). */
@@ -189,6 +231,14 @@ sealed interface GameAction {
         override val key = "find_encounter"
     }
 
+    /**
+     * Walks [tiles] tiles straight in [direction], turning first when the player faces elsewhere (a plain press of
+     * the D-pad then would only turn). Stops early when the way is blocked or something happens.
+     */
+    data class Step(val direction: Direction, val tiles: Int = 1, val options: MoveOptions = MoveOptions()) : GameAction {
+        override val key get() = "step(${direction.name.lowercase()},$tiles)"
+    }
+
     // endregion
 
     /** Writes a note the agent will get back with the state (survives context compaction). */
@@ -197,7 +247,35 @@ sealed interface GameAction {
     }
 }
 
-/** Movement options of [GameAction.GoTo] / [GameAction.Explore]. */
+/** One line of a [GameAction.Buy]: an item and how many (1-99). */
+data class Purchase(val item: ItemRef, val quantity: Int)
+
+/** One operation of a [GameAction.Pc] session. */
+sealed interface PcOperation {
+    val key: String
+
+    /** Party → the first box with room, or box [box] (0-based) when given. */
+    data class Deposit(val mon: MonId, val box: Int? = null) : PcOperation {
+        override val key get() = "deposit($mon${box?.let { "→box$it" } ?: ""})"
+    }
+
+    /** A box → the party. */
+    data class Withdraw(val mon: MonId) : PcOperation {
+        override val key get() = "withdraw($mon)"
+    }
+
+    /** A stored Pokémon → box [box] (0-based), with the PC's MOVE POKéMON mode. */
+    data class Move(val mon: MonId, val box: Int) : PcOperation {
+        override val key get() = "move($mon→box$box)"
+    }
+
+    /** Party Pokémon [partyMon] ↔ stored Pokémon [boxMon]: [partyMon] goes to the box, [boxMon] joins the party. */
+    data class Swap(val partyMon: MonId, val boxMon: MonId) : PcOperation {
+        override val key get() = "swap($partyMon↔$boxMon)"
+    }
+}
+
+/** Movement options of [GameAction.GoTo]. */
 data class MoveOptions(
     val avoidTallGrass: Boolean = false,
     val avoidTrainers: Boolean = false,
@@ -205,6 +283,11 @@ data class MoveOptions(
     val run: Boolean = false,
     val bike: Boolean = false,
 )
+
+/** One item use of [GameAction.UseItem]: the item, the Pokémon it is used on, the move for a PP restoring item. */
+data class ItemUse(val item: ItemRef, val target: MonId? = null, val move: MoveRef? = null) {
+    val key: String get() = item.raw + (target?.let { "→$it" } ?: "") + (move?.let { "/${it.raw}" } ?: "")
+}
 
 /** A move named by the agent: `move:<id>` or its name (case and spaces ignored). */
 data class MoveRef(val raw: String)

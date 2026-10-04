@@ -1,4 +1,4 @@
-package me.nathanfallet.aiplayspokemon.emulator.libretro
+package dev.kotlinds.pokemonclient.libretro
 
 import java.io.IOException
 import java.net.URI

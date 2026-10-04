@@ -2,9 +2,11 @@ package dev.kotlinds.pokemonclient.hgss
 
 import dev.kotlinds.pokemonclient.Direction
 import dev.kotlinds.pokemonclient.console.Button
+import dev.kotlinds.pokemonclient.data.ExpCurves
 import dev.kotlinds.pokemonclient.state.AnimationKind
 import dev.kotlinds.pokemonclient.state.Awaiting
 import dev.kotlinds.pokemonclient.state.BagItem
+import dev.kotlinds.pokemonclient.state.AbilityId
 import dev.kotlinds.pokemonclient.state.BattleKind
 import dev.kotlinds.pokemonclient.state.BattleStat
 import dev.kotlinds.pokemonclient.state.BattleState
@@ -28,6 +30,7 @@ import dev.kotlinds.pokemonclient.state.MoveId
 import dev.kotlinds.pokemonclient.state.MovementMode
 import dev.kotlinds.pokemonclient.state.Named
 import dev.kotlinds.pokemonclient.state.PlayerInfo
+import dev.kotlinds.pokemonclient.state.PlayTime
 import dev.kotlinds.pokemonclient.state.ReadWarning
 import dev.kotlinds.pokemonclient.state.Screen
 import dev.kotlinds.pokemonclient.state.SpeciesId
@@ -42,33 +45,82 @@ import dev.kotlinds.pokemonclient.state.PartyMon as CommonPartyMon
 /**
  * Turns the detailed HGSS reading ([HgssState]) into the common [GameState] model.
  *
- * Stateful on purpose: it remembers the last plausible reading of each Pokémon, so a party structure read
- * while the game rewrites it (after a capture, a switch, a map change...) is replaced by its last good value
- * instead of showing garbage like "Lv109, HP 10241/59961".
+ * Stateful on purpose: it remembers the last valid reading of each Pokémon (by [MonId]), so a party structure read
+ * while the game rewrites it (see [HgssPokemon.decode]) is replaced by the last valid reading of that same Pokémon
+ * instead of showing garbage like "Lv90, HP 20295/31940". Readings that fail [HgssMonCheck] are never shown nor
+ * remembered.
  */
 class HgssStateMapper {
 
-    private val lastGood = mutableMapOf<Int, CommonPartyMon>()
+    private val lastGood = mutableMapOf<MonId, CommonPartyMon>()
+
+    /** The last rejected reading of each personality and how many times in a row it was read the same. */
+    private val rejected = mutableMapOf<Long, Pair<PartyMon, Int>>()
+
+    /**
+     * True for a reading rejected only because its level or stats don't match the species data, but read the same
+     * [STABLE_READS] times in a row: a reading caught mid-rewrite changes from frame to frame, a real one doesn't
+     * (a safety net in case the game ever stores values the checks don't expect).
+     */
+    private fun stableDespiteData(mon: PartyMon): Boolean {
+        val semanticOnly = mon.problems.isNotEmpty() && mon.problems.all { it is HgssMonCheck.Problem.BadLevel || (it is HgssMonCheck.Problem.BadStat && it.expected != null) } &&
+            mon.copy(problems = emptyList()).plausible
+        if (!semanticOnly) return false.also { rejected.remove(mon.personality) }
+        val (previous, count) = rejected[mon.personality] ?: (null to 0)
+        val streak = if (previous == mon) count + 1 else 1
+        rejected[mon.personality] = mon to streak
+        return streak >= STABLE_READS
+    }
+
+    /** The last piece of the level-up stats panel left in the battle message buffer ("+2", "Sp. Def", "102"...). */
+    private var panelLeftover: String? = null
+
+    /**
+     * The battle message, without what the level-up stats panel writes: the game prints each cell of the panel
+     * through the battle message buffer (Task_GetExp, src/battle/battle_command.c), and the last cell stays there
+     * until the next real message.
+     */
+    private fun battleMessage(battle: BattleInfo, memory: HgssMemory?): String? {
+        val message = battle.message
+        if (memory != null && HgssPostBattleScreens.levelUpPanelUp(memory)) {
+            panelLeftover = message
+            return null
+        }
+        if (message != null && message == panelLeftover) return null
+        panelLeftover = null
+        return message
+    }
 
     /** Maps [state]; with [memory], the screen decoders ([HgssScreens]) read the screens [HgssState] doesn't cover. */
     fun map(state: HgssState, memory: HgssMemory? = null): GameState {
         val warnings = state.warnings.map { ReadWarning(ReadWarning.Kind.OTHER, it) }.toMutableList()
         val party = state.party.mapNotNull { mon ->
-            if (mon.plausible) mon.toCommon().also { lastGood[mon.slot] = it }
-            else lastGood[mon.slot]?.also {
-                warnings += ReadWarning(ReadWarning.Kind.POKEMON_CHECKSUM, "slot ${mon.slot}: unreadable right now, showing the last good reading")
-            }
+            if (mon.plausible || stableDespiteData(mon)) return@mapNotNull mon.toCommon().also { lastGood[it.id] = it }
+            // The personality is stored outside the encrypted data: it tells which Pokémon the slot holds even while
+            // the rest is being rewritten.
+            val kept = lastGood.values.singleOrNull { it.id.personality == mon.personality }?.copy(slot = mon.slot)
+            val who = kept?.let { ": ${it.displayName}, ${it.id}" } ?: ""
+            val why = mon.problems.joinToString { it.detail }.ifEmpty { "implausible values" }
+            warnings += ReadWarning(
+                ReadWarning.Kind.POKEMON_CHECKSUM,
+                "party slot ${mon.slot} (position ${mon.slot + 1}$who) is being rewritten by the game ($why): " +
+                    if (kept != null) "showing its last valid reading" else "left out until it reads correctly",
+            )
+            kept
         }
-        if (state.party.isNotEmpty()) lastGood.keys.retainAll(state.party.map { it.slot }.toSet())
+        if (state.party.isNotEmpty()) lastGood.keys.retainAll(party.map { it.id }.toSet())
+        val screen = if (state.fading) Screen.Animation(AnimationKind.TRANSITION) else memory?.let { decoded(it, state) } ?: screen(state, party)
         return GameState(
             frame = state.frame,
-            screen = if (state.fading) Screen.Animation(AnimationKind.TRANSITION) else memory?.let { decoded(it, state) } ?: screen(state, party),
-            player = state.player?.let { PlayerInfo(it.name, it.money, it.badges, it.trainerId) },
+            screen = screen,
+            player = state.player?.let { p ->
+                PlayerInfo(p.name, p.money, p.badges, p.trainerId, p.playTime?.let { (h, m, s) -> PlayTime(h, m, s) })
+            },
             party = party,
             bag = state.bag?.map { pocket ->
                 CommonBagPocket(pocket.pocket, pocket.items.map { BagItem(Named(ItemId(it.id), it.name), it.quantity) })
             },
-            battle = state.battle?.let { battle(it, party) },
+            battle = state.battle?.let { battle(it, party, (screen as? Screen.BattleCommand)?.actor).copy(message = battleMessage(it, memory)) },
             field = state.location?.takeIf { state.mode in FIELD_MODES }?.let { l ->
                 FieldState(
                     mapId = l.mapId,
@@ -83,6 +135,7 @@ class HgssStateMapper {
                         else -> MovementMode.WALK
                     },
                     moving = l.moving,
+                    trainerEncounter = state.dialogue?.engagedTrainer != null,
                     objects = state.surroundings?.objects.orEmpty().filterNot { it.hidden }.map { o ->
                         FieldObject(
                             id = "person:${o.id}",
@@ -105,6 +158,7 @@ class HgssStateMapper {
                                 "TREE" -> ObstacleKind.CUT_TREE
                                 "BREAKROCK" -> ObstacleKind.SMASH_ROCK
                                 "ROCK" -> ObstacleKind.BOULDER
+                                "ICE" -> ObstacleKind.ICE_BLOCK
                                 else -> null
                             },
                         )
@@ -280,13 +334,15 @@ class HgssStateMapper {
             Stat.SP_DEFENSE to (stats["spDef"] ?: 0),
         ),
         exp = exp,
-        expToNextLevel = null,
+        expToNextLevel = HgssData.gameData?.species(SpeciesId(species))?.growthRate
+            ?.takeIf { !isEgg }?.let { ExpCurves.expToNextLevel(it, level, exp) },
         isEgg = isEgg,
     )
 
-    private fun battle(b: BattleInfo, party: List<CommonPartyMon>): BattleState {
+    /** [commandActor]: who the command menu on screen is for (in doubles, the right Pokémon chooses second). */
+    private fun battle(b: BattleInfo, party: List<CommonPartyMon>, commandActor: BattlerRef?): BattleState {
         val battlers = (b.player + b.opponents).map { battler ->
-            val ref = HgssStatuses.battlerRef(battler.battlerId)
+            val ref = HgssStatuses.battlerRef(battler.battlerId, b.isDoubles)
             BattlerState(
                 ref = ref,
                 mon = if (ref.isPlayerSide) MonId(battler.personality, battler.otId) else null,
@@ -302,23 +358,31 @@ class HgssStateMapper {
                 }.toMap(),
                 types = battler.types,
                 moves = battler.moves.map { KnownMove(Named(MoveId(it.id), it.name), it.pp, it.maxPp, it.type) },
+                ability = battler.ability?.takeIf { battler.abilityId != 0 }?.let { Named(AbilityId(battler.abilityId), it) },
+                heldItem = battler.heldItem?.takeIf { battler.heldItemId != 0 }?.let { Named(ItemId(battler.heldItemId), it) },
+                abilityRevealed = HgssStatuses.abilityAnnounced(battler.announceFlags, battler.counters),
+                catchRate = if (b.isWild && !ref.isPlayerSide) HgssData.gameData?.species(SpeciesId(battler.species))?.catchRate else null,
             )
         }
         val bySlot = party.associateBy { it.slot }
         return BattleState(
             kind = if (b.isWild) BattleKind.WILD else BattleKind.TRAINER,
             isDouble = b.isDoubles,
-            actor = if (b.awaitingInput) BattlerRef.PLAYER_LEFT else null,
+            actor = commandActor ?: if (b.awaitingInput) BattlerRef.PLAYER_LEFT else null,
             battlers = battlers,
             trainers = b.trainers.map { "${it.trainerClass} ${it.name}".trim() },
             partyOrder = b.partyOrder.mapNotNull { bySlot[it]?.id },
             message = b.message,
+            turn = b.turn,
         )
     }
 
     // endregion
 
     private companion object {
+        /** Identical readings in a row after which a reading failing only the species-data checks is trusted. */
+        const val STABLE_READS = 30
+
         val FIELD_MODES = setOf(GameMode.OVERWORLD, GameMode.FIELD_BUSY, GameMode.SCRIPT, GameMode.DIALOGUE, GameMode.START_MENU)
 
         val STAGE_NAMES = mapOf(

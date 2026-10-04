@@ -41,8 +41,8 @@ For each screen or field, cross-check three sources:
    scripts, constants. Prefer reading the C; fall back to the asm. Keep `file:line` references in the KDoc.
 2. **The live game**, on the headless bench, from save states placed exactly in the situation:
    ```bash
-   POKEMON_ROM=/path/rom.nds ./gradlew -q devRun -PdevMain=me.nathanfallet.aiplayspokemon.dev.BenchKt \
-     "-PdevArgs=<data>|<out>|load:menu.state|step:1|scr|tap:DOWN|scr|shot:after|ram:after"
+   POKEMON_ROM=/path/rom.nds EMULATOR_CORE=desmume ./gradlew -q :pokemon-client-libretro:bench \
+     "-PbenchArgs=<data>|<out>|load:menu.state|step:1|scr|tap:DOWN|scr|shot:after|ram:after"
    ```
    For a cursor: capture the RAM and a screenshot at option 1, 2, 3…, diff the RAM between the captures to find the
    byte that follows the cursor, then confirm its meaning in the decomp. Always `step:1` after `load:`.

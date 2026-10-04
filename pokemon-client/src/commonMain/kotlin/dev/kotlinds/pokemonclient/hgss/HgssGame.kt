@@ -1,6 +1,7 @@
 package dev.kotlinds.pokemonclient.hgss
 
 import dev.kotlinds.NdsRom
+import dev.kotlinds.pokemonclient.world.SignKind
 import dev.kotlinds.pokemonclient.world.WorldSource
 import dev.kotlinds.pokemonclient.state.GameState
 import kotlinx.serialization.json.JsonObject
@@ -49,15 +50,37 @@ class HgssGame(private val version: HgssVersion, rom: NdsRom? = null) : PokemonG
 
     override val inputProbe = HgssInputProbe(version)
 
+    override fun fieldMoveRule(move: dev.kotlinds.pokemonclient.world.FieldMoveKind) = HgssFieldMoves.rule(move)
+
+    /**
+     * The registered item buttons of the field's bottom-screen menu (overlay 27, hitbox table `ov27_0225CF68`, entries
+     * 8 and 9: x 203-255, y 8-39 and 46-77), which set `FieldSystem.lastTouchMenuInput` to 9 / 10: the first / second
+     * registered item (src/field/field_control.c).
+     */
+    override fun registeredItemTouch(slot: Int): dev.kotlinds.pokemonclient.console.TouchPoint? = when (slot) {
+        0 -> dev.kotlinds.pokemonclient.console.TouchPoint(229, 23)
+        1 -> dev.kotlinds.pokemonclient.console.TouchPoint(229, 61)
+        else -> null
+    }
+
     private val mapper = HgssStateMapper()
+
+    /** PC boxes, options, trainers, shop catalogs and Fly permission ([HgssServices]). */
+    private val services = HgssServices()
 
     override fun state(memory: Memory): GameState {
         val reader = HgssReader(memory, version)
         val state = reader.read() ?: HgssState(frame = 0, mode = GameMode.UNKNOWN, modeDetail = "unreadable RAM")
-        val mapped = mapper.map(state, HgssMemory(memory, version))
+        val hgssMemory = HgssMemory(memory, version)
+        val mapped = services.enrich(mapper.map(state, hgssMemory), state, hgssMemory)
         val field = mapped.field ?: return mapped
-        val puzzle = HgssPuzzles.read(field.mapId, HgssPuzzles.reads(reader), world?.areaOf(field.mapId)) ?: return mapped
-        return mapped.copy(field = field.copy(puzzle = puzzle))
+        val area = world?.areaOf(field.mapId)
+        val puzzle = HgssPuzzles.read(field.mapId, HgssPuzzles.reads(reader), area)
+        val pickedUp = area?.signs.orEmpty()
+            .filter { it.zone == field.mapId && it.kind == SignKind.HIDDEN_ITEM && it.flag?.let(reader::flag) == true }
+            .map { "hidden_item:${it.id}" }.toSet()
+        if (puzzle == null && pickedUp.isEmpty()) return mapped
+        return mapped.copy(field = field.copy(puzzle = puzzle, pickedUp = pickedUp))
     }
 
     override fun observe(memory: Memory): Observation {

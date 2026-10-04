@@ -49,13 +49,17 @@ data class Parameter(
     val values: List<String> = emptyList(),
 )
 
-/** JSON types of parameters. */
-enum class ParameterType { STRING, INTEGER, BOOLEAN }
+/** JSON types of parameters. [ARRAY] is a list of objects (e.g. several item uses). */
+enum class ParameterType { STRING, INTEGER, BOOLEAN, ARRAY }
 
 /** Whether an action is usable now. */
 sealed interface Availability {
-    /** Usable; [choices] lists valid values per parameter when they depend on the situation (moves, Pokémon...). */
-    data class Available(val choices: Map<String, List<Choice>> = emptyMap()) : Availability
+    /**
+     * Usable; [choices] lists valid values per parameter when they depend on the situation (moves, Pokémon...).
+     * Not [listed]: accepted (typically chained in a sequence) but not worth offering on this screen (e.g.
+     * advance_dialogue on a choice, a no-op; keep_battling while the messages before the question still scroll).
+     */
+    data class Available(val choices: Map<String, List<Choice>> = emptyMap(), val listed: Boolean = true) : Availability
 
     /** Visible but not usable now, with the typed reason (e.g. Fly when nobody knows it). */
     data class Unavailable(val reason: UnavailableReason, val detail: String, val hint: String? = null) : Availability

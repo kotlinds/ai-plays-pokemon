@@ -6,6 +6,7 @@ import dev.kotlinds.pokemonclient.state.BattlerRef
 import dev.kotlinds.pokemonclient.state.CancelBehavior
 import dev.kotlinds.pokemonclient.state.Cursor
 import dev.kotlinds.pokemonclient.state.Entry
+import dev.kotlinds.pokemonclient.state.ItemId
 import dev.kotlinds.pokemonclient.state.MenuKind
 import dev.kotlinds.pokemonclient.state.MonId
 import dev.kotlinds.pokemonclient.state.MoveContext
@@ -145,6 +146,7 @@ internal object HgssBattleAddresses {
     const val BAG_STATE_MESSAGE_PRINTING = 9
     const val BAG_STATE_MESSAGE_WAITING = 0xA
     const val BAG_SLOTS_PER_PAGE = 6
+    const val BAG_MAX_ITEMS = 36             // items per pocket in BAG_ITEMS
     const val BAG_BUTTON_CANCEL_LIST = 6
 
     // --- Battle party (BattleParty T, BattlePartyContext P; ov08_0221BE98, verified live) ---
@@ -270,7 +272,7 @@ internal object HgssScreenMemory {
 
     /** Decodes the Pokémon structure (0xEC bytes) at [ptr]. */
     fun mon(mem: HgssMemory, ptr: Long?): HgssPokemon.Decoded? =
-        ptr?.let { mem.bytes(it, A.POKEMON_SIZE.toInt()) }?.let(HgssPokemon::decode)
+        ptr?.let { mem.bytes(it, A.POKEMON_SIZE.toInt()) }?.let { HgssPokemon.decode(it, HgssMonCheck::isPlausible) }
 
     fun HgssPokemon.Decoded.monId() = MonId(personality, otId)
 
@@ -560,7 +562,7 @@ internal object HgssBattleScreens : HgssScreenDecoder {
      * Target selection in doubles (§3, `BattleInput_CursorMove_TargetMenu` battle_input.c:3915). Entries: foe_left,
      * foe_right, ally_left, ally_right, cancel (grid [OL OR] [PL PR] [CANCEL]); cells out of the move's range are skipped,
      * fainted battlers in range are reachable but refused. Spread moves show one "all targets" entry above CANCEL.
-     * Not verified live (no double battle reachable from the test save).
+     * Verified live (Route 37 twins): the entry names match the battle state's [BattlerRef]s and the screen layout.
      */
     private fun target(mem: HgssMemory, root: HgssBattleRoot, t: Long): Screen? {
         val bi = root.battleInput(mem) ?: return null
@@ -618,6 +620,10 @@ internal object HgssBattleScreens : HgssScreenDecoder {
         return when (kind) {
             TwoOptionKind.SWITCH_OR_KEEP ->
                 Screen.ListMenu(MenuKind.BATTLE_SWITCH_OR_KEEP, entries, cursor, Topology.vertical(2), CancelBehavior.CONFIRMS_LAST)
+            TwoOptionKind.FORGET_MOVE, TwoOptionKind.GIVE_UP_MOVE -> Screen.YesNo(
+                root.message(mem), entries, cursor, Topology.vertical(2), CancelBehavior.CONFIRMS_LAST,
+                HgssPostBattleScreens.moveToLearn(mem),
+            )
             else -> Screen.YesNo(root.message(mem), entries, cursor, Topology.vertical(2), CancelBehavior.CONFIRMS_LAST)
         }
     }
@@ -648,6 +654,11 @@ internal object HgssBattleScreens : HgssScreenDecoder {
             val a = t + B.BAG_ITEMS + pocketIndex * B.BAG_POCKET_STRIDE + i * B.BAG_ITEM_SIZE
             return mem.u16(a) to mem.u16(a + 2)
         }
+        // Every pocket is filled when the bag opens (ov08): which pocket holds an item is known from the menu on.
+        fun contents(): Map<String, List<ItemId>> = POCKETS.withIndex().associate { (index, pocketId) ->
+            val count = mem.u8(t + B.BAG_COUNTS + index).coerceAtMost(B.BAG_MAX_ITEMS)
+            "pocket:${pocketId.first}" to (0 until count).map { item(index, it) }.filter { (id, qty) -> id != 0 && qty != 0 }.map { ItemId(it.first) }
+        }
         return when (mem.u8(t + B.BAG_STATE)) {
             B.BAG_STATE_MESSAGE_PRINTING, B.BAG_STATE_MESSAGE_WAITING -> Screen.Dialogue(
                 TextSource.BATTLE, null, mem.gameString(mem.ptr(t + B.BAG_STRING)) ?: "",
@@ -661,7 +672,7 @@ internal object HgssBattleScreens : HgssScreenDecoder {
                 )
                 // Buttons: 0 HP/PP, 1 STATUS, 2 BALLS, 3 BATTLE ITEMS, 4 LAST USED, 5 CANCEL (ov08_02225B4C / _02225D44).
                 val buttons = listOf(0, 1, 2, 3, 4, 5)
-                Screen.Bag(pocketNames[pocket], pocketNames, 0, 1, true, entries, cursor.cursor(buttons), cursor.topology(buttons))
+                Screen.Bag(pocketNames[pocket], pocketNames, 0, 1, true, entries, cursor.cursor(buttons), cursor.topology(buttons), pocketContents = contents())
             }
             B.BAG_STATE_LIST -> {
                 val count = mem.u8(t + B.BAG_COUNTS + pocket)
@@ -695,7 +706,7 @@ internal object HgssBattleScreens : HgssScreenDecoder {
                         else -> null
                     }
                 }
-                Screen.Bag(pocketNames[pocket], pocketNames, page, pages, true, entries, current, topology)
+                Screen.Bag(pocketNames[pocket], pocketNames, page, pages, true, entries, current, topology, pocketContents = contents())
             }
             B.BAG_STATE_USE -> {
                 val pages = mem.u8(t + B.BAG_LAST_PAGE + pocket) + 1

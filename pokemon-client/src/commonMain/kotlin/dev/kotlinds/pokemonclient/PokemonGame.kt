@@ -41,4 +41,16 @@ interface PokemonGame {
     fun scriptVariable(memory: Memory, id: Int): Int? = null
 
     val inputProbe: InputProbe
+
+    /**
+     * What field move [move] needs outside battle in this game (the move, the badge), or null when the game doesn't
+     * have it. Routes use the field moves whose rule the party meets (Surf, Waterfall, Cut...).
+     */
+    fun fieldMoveRule(move: dev.kotlinds.pokemonclient.world.FieldMoveKind): dev.kotlinds.pokemonclient.world.FieldMoveRule? = null
+
+    /**
+     * Where to touch the bottom screen in the field to use the registered item of [slot] (0 = the first one, also on
+     * Y), or null when this game has no such button.
+     */
+    fun registeredItemTouch(slot: Int): dev.kotlinds.pokemonclient.console.TouchPoint? = null
 }

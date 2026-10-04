@@ -1,4 +1,4 @@
-package me.nathanfallet.aiplayspokemon.dev
+package dev.kotlinds.pokemonclient.libretro.bench
 
 import dev.kotlinds.pokemonclient.view.MapView
 import dev.kotlinds.pokemonclient.hgss.HgssWorldSource
@@ -28,9 +28,9 @@ import kotlinx.serialization.json.jsonObject
 import dev.kotlinds.pokemonclient.runtime.kind
 import dev.kotlinds.pokemonclient.state.Awaiting
 import dev.kotlinds.pokemonclient.state.Screen
-import me.nathanfallet.aiplayspokemon.emulator.libretro.LibretroConsole
-import me.nathanfallet.aiplayspokemon.emulator.libretro.LibretroCoreSpec
-import me.nathanfallet.aiplayspokemon.game.PokemonGames
+import dev.kotlinds.pokemonclient.libretro.LibretroConsole
+import dev.kotlinds.pokemonclient.libretro.LibretroCoreSpec
+import dev.kotlinds.pokemonclient.PokemonGames
 import java.awt.image.BufferedImage
 import java.io.DataOutputStream
 import java.nio.file.Files
@@ -45,7 +45,7 @@ import kotlin.io.path.writeBytes
  * on real screens, take screenshots and capture RAM fixtures for tests.
  *
  * ```
- * ./gradlew devRun -PdevMain=me.nathanfallet.aiplayspokemon.dev.BenchKt -PdevArgs="<data dir>|<out dir>|<command>|..."
+ * ./gradlew :pokemon-client-libretro:bench -PbenchArgs="<data dir>|<out dir>|<command>|..."
  * ```
  * Environment: `POKEMON_ROM` (ROM path), `EMULATOR_CORE` (desmume / melonds), `BENCH_WINDOW=1` (watch it live). The data directory holds `cores/`,
  * `saves/` (the in-game save is loaded at boot) and `system/`, like the app's.
@@ -53,21 +53,26 @@ import kotlin.io.path.writeBytes
  * Commands (one per argument):
  * - `boot[:frames]`: from power-on, presses A until the overworld (continues the saved game);
  * - `load:<file>` / `save:<file>`: loads / saves a save state (relative to the out dir);
- * - `step:<n>`: emulates n frames; `tap:<BUTTON>[x<n>]`: self-checking taps; `touch:<x>,<y>`: touches the bottom screen;
+ * - `step:<n>`: emulates n frames; `tap:<BUTTON>[x<n>]`: self-checking taps; `hold:<B1+B2...>:<n>`: holds buttons n frames; `touch:<x>,<y>`: touches the bottom screen;
  * - `until:<kind>:<frames>`: steps until the screen kind starts with `kind` (e.g. `overworld`, `dialogue`);
  * - `shot:<name>`: PNG of both screens; `state`: prints the decoded GameState; `screen`: prints the screen only;
  *   `puzzle`: prints the position and the map puzzle (switches, shutters, teleports);
  * - `act:<json>`: executes a typed action through the action registry (e.g. `act:{"type":"choose","entry":"option:6"}`);
  *   `actions`: lists the actions available now;
+ * - `log`: prints the events recorded since the previous `log` (texts shown, screen changes, level ups...);
  * - `ram:<name>`: writes the full main RAM; `fixture:<name>`: writes a sparse RAM fixture (only the bytes the
  *   decoders read) for unit tests.
+ * - `watch:on|off`: after every frame, prints the raw party reading and what the state shows when they change
+ *   (`BENCH_WATCH_HEX=1` adds the raw bytes; `BENCH_WATCH_FIXTURE=<prefix>` [+ `BENCH_WATCH_FIXTURE_SLOT=n`] saves
+ *   fixtures of frames where a party slot is mid-rewrite); `rawmon`: raw party bytes; `box:<n>`: PC box n;
+ * - `record:on|off`: runs the app's Recorder on every frame; `events`: prints its events (screen changes left out).
  */
 fun main(args: Array<String>) {
     require(args.size >= 3) { "usage: <data dir>|<out dir>|<command>|..." }
     val data = Path.of(args[0])
     val out = Files.createDirectories(Path.of(args[1]))
     val rom = Path.of(System.getenv("POKEMON_ROM") ?: error("POKEMON_ROM is not set"))
-    val game = PokemonGames.detect(rom) ?: error("Unsupported ROM $rom")
+    val game = PokemonGames.detect(rom.readBytes()) ?: error("Unsupported ROM $rom")
     // BENCH_WINDOW=1 opens a live, muted window to watch the commands run at the console's speed.
     val viewer = if (System.getenv("BENCH_WINDOW") == "1") BenchViewer("Bench — ${rom.fileName}") else null
     val console = LibretroConsole(
@@ -88,7 +93,17 @@ fun main(args: Array<String>) {
 
 private class Bench(private val console: LibretroConsole, private val game: PokemonGame, private val out: Path, private val romPath: Path) {
 
-    private val scope = ActionScope(console, game.inputProbe)
+    /** Records every event (text shown, screen changes...) like the app does, printed by the `log` command. */
+    private val recorder = dev.kotlinds.pokemonclient.runtime.Recorder(game)
+    private var logCursor = 0L
+
+    /** `watch:on` prints, after every emulated frame, the raw party reading and what the state exposes when they change. */
+    private var watching = false
+    private var lastWatch: String? = null
+    private val scope: ActionScope = ActionScope(console, game.inputProbe, onFrame = {
+        if (watching) watchParty()
+        recorder.onFrame(console.frame) { scope.memory() }
+    })
     private val registry = ActionRegistry.of()
 
     fun run(command: String) {
@@ -103,7 +118,7 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
                 val button = Button.valueOf(arg.substringBefore('x').uppercase())
                 repeat(arg.substringAfter('x', "1").toInt()) { println("  ${scope.tap(button)}") }
             }
-            "hold" -> arg.split(':').let { (b, n) -> scope.step(n.toInt(), dev.kotlinds.pokemonclient.console.InputFrame.of(Button.valueOf(b.uppercase()))); scope.step(2) }
+            "hold" -> arg.split(':').let { (b, n) -> scope.step(n.toInt(), InputFrame(b.split('+').map { Button.valueOf(it.uppercase()) }.toSet())); scope.step(2) }
             "raw" -> dev.kotlinds.pokemonclient.hgss.HgssReader(scope.memory()).read()?.let { st ->
                 println("  mode=${st.mode} detail=${st.modeDetail} awaiting=${st.awaitingInput} fading=${st.fading}")
                 println("  loc=${st.location?.let { "${it.mapName} ${it.x},${it.z} ${it.facing}" }}")
@@ -135,9 +150,25 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
             "fixture" -> fixture(arg)
             "world" -> world(arg)
             "mapview" -> game.state(scope.memory()).field?.let { f ->
-                game.world?.areaOf(f.mapId)?.let { area -> MapView.render(area, f, game::zoneName) }
+                game.world?.areaOf(f.mapId)?.let { area -> MapView.render(area, f, game::zoneName, world = game.world) }
             }?.forEach { (k, v) -> println("  $k: " + (v as? kotlinx.serialization.json.JsonArray)?.joinToString("\n    ", "\n    ") { it.toString().trim('"') }.orEmpty().ifEmpty { v.toString() }) }
+            "area" -> area(arg.split(',').map { it.trim().toInt() })
+            "tiles" -> arg.split(',').map { it.trim().toInt() }.let { (x0, x1, y) ->
+                val f = game.state(scope.memory()).field
+                val ar = f?.let { game.world?.areaOf(it.mapId) }
+                (x0..x1).forEach { x -> println("  $x,$y ${ar?.tile(x, y)} zone=${ar?.zoneAt(x, y)}") }
+            }
             "trace" -> trace(arg.toInt())
+            "rawmon" -> HgssReader(scope.memory(), HgssVersion.HEARTGOLD_US).partyRaw().forEachIndexed { i, b ->
+                println("  slot $i: " + b.joinToString("") { "%02x".format(it) })
+            }
+            "box" -> HgssReader(scope.memory(), HgssVersion.HEARTGOLD_US).boxRaw(arg.toInt()).forEachIndexed { i, b ->
+                dev.kotlinds.pokemonclient.hgss.HgssPokemon.decode(b)?.let { m ->
+                    println("  $i: mon:%08x.%08x species ${m.species} ${dev.kotlinds.pokemonclient.hgss.HgssData.speciesName(m.species)} exp ${m.exp}".format(m.personality, m.otId))
+                }
+            }
+            "events" -> recorder.log.since(0).filterNot { it is dev.kotlinds.pokemonclient.state.GameEvent.ScreenChanged }.forEach { println("  $it") }
+            "watch" -> { watching = arg != "off"; lastWatch = null }
             "steps" -> steps(Button.valueOf(arg.substringBefore('x').uppercase()), arg.substringAfter('x', "1").toInt())
             "where" -> HgssReader(scope.memory(), HgssVersion.HEARTGOLD_US).read()?.let { st ->
                 println("  ${st.mode} ${st.modeDetail} at ${st.location?.x},${st.location?.z} facing ${st.location?.facing} map ${st.location?.mapName}")
@@ -150,14 +181,108 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
             "cur" -> println(describe(game.state(scope.memory()).screen).lineSequence().first())
             "act" -> {
                 val action = registry.parse(Json.parseToJsonElement(arg).jsonObject, ActionMode.ASSISTED).getOrThrow()
+                val startFrame = console.frame
                 val outcome = registry.execute(action, scope, game)
+                val actFrames = console.frame - startFrame
                 Navigator(scope, game).settle()
-                println("  $outcome")
+                println("  $outcome ($actFrames frames)")
                 println("  " + game.state(scope.memory()).screen)
+            }
+            "log" -> {
+                recorder.log.since(logCursor).forEach { println("  $it") }
+                logCursor = recorder.log.lastSeq
             }
             "actions" -> registry.available(game.state(scope.memory()), ActionMode.ASSISTED).forEach { println("  $it") }
             else -> error("unknown command $command")
         }
+    }
+
+    /** `area:x0,y0,x1,y1`: the ROM tiles of the current area as ASCII, with the live objects (B boulder, I ice, T tree, R rock, P person, @ you). */
+    private fun area(box: List<Int>) {
+        val state = game.state(scope.memory())
+        val field = state.field ?: return println("  not in the field")
+        val area = game.world?.areaOf(field.mapId) ?: return println("  no area")
+        val (x0, y0, x1, y1) = box
+        println("  x ${x0}..${x1} (tens: ${(x0..x1).joinToString("") { ((it / 10) % 10).toString() }})")
+        println("  units      ${(x0..x1).joinToString("") { (it % 10).toString() }}")
+        for (y in y0..y1) {
+            val row = (x0..x1).joinToString("") { x ->
+                val o = field.objects.firstOrNull { it.x == x && it.y == y && it.kind != dev.kotlinds.pokemonclient.state.FieldObjectKind.FOLLOWER }
+                when {
+                    field.x == x && field.y == y -> "@"
+                    o?.obstacle != null -> when (o.obstacle!!) {
+                        dev.kotlinds.pokemonclient.state.ObstacleKind.BOULDER -> "B"
+                        dev.kotlinds.pokemonclient.state.ObstacleKind.ICE_BLOCK -> if (o.facing == dev.kotlinds.pokemonclient.Direction.SOUTH) "I" else "i"
+                        dev.kotlinds.pokemonclient.state.ObstacleKind.CUT_TREE -> "T"
+                        dev.kotlinds.pokemonclient.state.ObstacleKind.SMASH_ROCK -> "R"
+                    }
+                    o != null -> "P"
+                    area.warps.any { it.x == x && it.y == y } -> "W"
+                    else -> when (val t = area.tile(x, y)) {
+                        null -> " "
+                        else -> when (val k = t.kind) {
+                            is dev.kotlinds.pokemonclient.world.TileKind.Water -> if (k.surfable) "~" else "#"
+                            dev.kotlinds.pokemonclient.world.TileKind.Whirlpool -> "%"
+                            dev.kotlinds.pokemonclient.world.TileKind.Waterfall -> "|"
+                            dev.kotlinds.pokemonclient.world.TileKind.Ice -> "*"
+                            dev.kotlinds.pokemonclient.world.TileKind.TallGrass -> "\""
+                            is dev.kotlinds.pokemonclient.world.TileKind.Ledge -> when (k.jump) {
+                                dev.kotlinds.pokemonclient.Direction.SOUTH -> "v"; dev.kotlinds.pokemonclient.Direction.NORTH -> "^"
+                                dev.kotlinds.pokemonclient.Direction.WEST -> "<"; dev.kotlinds.pokemonclient.Direction.EAST -> ">"
+                            }
+                            else -> if (t.blocked) "#" else "."
+                        }
+                    }
+                }
+            }
+            println("  ${y.toString().padStart(5)}      $row")
+        }
+    }
+
+    private fun watchParty() {
+        val memory = scope.memory()
+        val raw = HgssReader(memory, HgssVersion.HEARTGOLD_US).read() ?: return
+        val state = game.state(memory)
+        val rawLine = raw.party.joinToString(" | ") { "${it.slot}:${it.speciesName} L${it.level} ${it.hp}/${it.maxHp} x${it.exp} ${it.status}${if (it.checksumOk) "" else " CS!"}${if (it.plausible) "" else " IMPL"}" }
+        val shown = state.party.joinToString(" | ") { "${it.slot}:${it.species.name} L${it.level} ${it.hp}/${it.maxHp}" }
+        val line = "${brief(state.screen)}\n    raw  $rawLine\n    show $shown" + state.warnings.joinToString("") { "\n    warn ${it.detail}" }
+        if (line != lastWatch) println("  [${console.frame}] $line")
+        lastWatch = line
+        saveTornFixture(memory)
+        if (System.getenv("BENCH_WATCH_HEX") == "1") {
+            val bytes = HgssReader(memory, HgssVersion.HEARTGOLD_US).partyRaw().map { b -> b.joinToString("") { "%02x".format(it) } }
+            bytes.forEachIndexed { i, h -> if (lastHex.getOrNull(i) != h) println("    hex $i: $h") }
+            lastHex = bytes
+        }
+    }
+
+    private var lastHex: List<String> = emptyList()
+
+    /** `BENCH_WATCH_FIXTURE=<prefix>`: while watching, frames where a party slot is mid-rewrite are saved as fixtures. */
+    private var tornFixtures = 0
+
+    /**
+     * True when the plain reading the flags announce is wrong: the game is rewriting the Pokémon (blocks or party data
+     * caught encrypted / decrypted / torn, see HgssPokemon.decode).
+     */
+    private fun midRewrite(raw: ByteArray): Boolean {
+        val mon = dev.kotlinds.pokemonclient.hgss.HgssPokemon
+        val flags = mon.u16(raw, 4)
+        val checksum = mon.u16(raw, 6)
+        val box = raw.copyOfRange(8, 0x88).also { if (flags and 2 == 0) mon.crypt(it, 0, it.size, checksum.toLong()) }
+        val boxOk = (0 until 0x40).sumOf { mon.u16(box, 2 * it) } and 0xFFFF == checksum
+        val naive = mon.decode(raw) { true } ?: return false
+        return !boxOk || !dev.kotlinds.pokemonclient.hgss.HgssMonCheck.isPlausible(naive)
+    }
+
+    private fun saveTornFixture(memory: Memory) {
+        val prefix = System.getenv("BENCH_WATCH_FIXTURE") ?: return
+        if (tornFixtures >= 6) return
+        val torn = HgssReader(memory, HgssVersion.HEARTGOLD_US).partyRaw().withIndex().filter { midRewrite(it.value) }.map { it.index }
+            .filter { slot -> System.getenv("BENCH_WATCH_FIXTURE_SLOT")?.let { it.toInt() == slot } ?: true }
+        if (torn.isEmpty()) return
+        val name = "${prefix}_${tornFixtures++}_f${console.frame}_slot${torn.joinToString("-")}"
+        fixture(name)
     }
 
     private fun trace(frames: Int) {

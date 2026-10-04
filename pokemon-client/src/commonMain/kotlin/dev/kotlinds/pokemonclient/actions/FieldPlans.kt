@@ -140,18 +140,66 @@ internal object FieldPlans {
                 context.navigator.awaitChange(menu ?: context.state().screen)
             }
             Step.Failed(ActionError.Unavailable(UnavailableReason.NO_POKEMON_KNOWS_MOVE, "No Pokémon in the party can use Fly"))
-        }.andThen {
-            context.navigator.advanceUntil(FLY_WAITS) { it.screen is Screen.FlyMap }
-        }.andThen { state -> flyTarget(context, action.destination, state) }.andThen { target ->
-            context.scope.touch(target)
-            context.navigator.awaitChange(context.state().screen)
-            context.navigator.advanceUntil(FLY_WAITS) { it.screen is Screen.YesNo }
-        }.andThen {
-            context.navigator.choose(Screen.YesNo::class, "YES (fly)") { it.id == "option:yes" }
-        }.andThen {
-            context.navigator.advanceUntil(FLY_LANDING_WAITS) { it.screen is Screen.Overworld && it.field?.mapId != startMap }
+        }.andThen { awaitFlyMap(context) }
+            .andThen { state -> flyTarget(context, action.destination, state) }.andThen { target ->
+                context.scope.touch(target)
+                context.navigator.awaitChange(context.state().screen)
+                context.navigator.advanceUntil(FLY_WAITS) { it.screen is Screen.YesNo }
+            }.andThen {
+                context.navigator.choose(Screen.YesNo::class, "YES (fly)") { it.id == "option:yes" }
+            }.andThen { awaitLanding(context, startMap) }
+        if (result is Step.Failed) PartyBagPlans.closeToOverworld(context)
+        result.then { state -> ActionOutcome.Done("landed in ${state.field?.mapName}" + if (state.field?.mapId == startMap) " (the town you were in: in front of its Pokémon Center)" else "") }
+    }
+
+    /**
+     * After FLY: the fly map, or the game's refusal ("You can't use that here", a menu message read with A, then the
+     * party again): NOT_FLYABLE_HERE.
+     */
+    private fun awaitFlyMap(context: PlanContext): Step<GameState> {
+        var refused = false
+        repeat(FLY_WAITS) {
+            val state = context.navigator.settle()
+            when (state.screen) {
+                is Screen.FlyMap -> return Step.Done(state)
+                is Screen.Dialogue, is Screen.PressToContinue -> {
+                    refused = true
+                    context.scope.tap(Button.A)
+                    context.navigator.awaitChange(state.screen, maxFrames = 60)
+                }
+                is Screen.Animation -> context.scope.step(10)
+                else -> return Step.Failed(
+                    if (refused) ActionError.Unavailable(UnavailableReason.NOT_FLYABLE_HERE, "The game refused Fly here", "go outdoors")
+                    else ActionError.UnexpectedScreen("the fly map", state.screen.kind),
+                )
+            }
         }
-        result.then { state -> ActionOutcome.Done("landed in ${state.field?.mapName}") }
+        return Step.Failed(ActionError.Timeout("the fly map didn't open"))
+    }
+
+    /**
+     * Waits for the landing: the fly map closes, the flight plays, and the player can walk again — on another map, or
+     * on the same one when flying to the town the player is in (it lands in front of the Pokémon Center).
+     */
+    private fun awaitLanding(context: PlanContext, startMap: Int?): Step<GameState> {
+        var left = false
+        var frames = 0
+        while (frames < FLY_LANDING_FRAMES) {
+            val state = context.state()
+            val screen = state.screen
+            when {
+                screen is Screen.Overworld && screen.awaiting == Awaiting.INPUT && (left || state.field?.mapId != startMap) -> return Step.Done(context.navigator.settle())
+                screen is Screen.YesNo || screen is Screen.FlyMap -> Unit
+                (screen is Screen.Dialogue || screen is Screen.PressToContinue) && screen.awaiting == Awaiting.INPUT -> {
+                    left = true
+                    context.scope.tap(Button.A)
+                }
+                else -> left = true
+            }
+            context.scope.step(LANDING_POLL)
+            frames += LANDING_POLL
+        }
+        return Step.Failed(ActionError.Timeout("the flight didn't land"))
     }
 
     /**
@@ -166,20 +214,32 @@ internal object FieldPlans {
             (start.screen as? Screen.FlyMap)?.entries?.filter { it.selectable && it.id.startsWith("fly:") }?.map { "${it.id} (${it.label})" }.orEmpty()))
         if (!entry.selectable) return Step.Failed(ActionError.Unavailable(UnavailableReason.NOT_VISITED, "${entry.label} hasn't been visited yet"))
         entry.touch?.let { return Step.Done(it) }
-        for (button in listOf(Button.LEFT, Button.RIGHT, Button.UP, Button.DOWN)) {
-            repeat(MAP_SCROLL_PRESSES) {
-                val before = context.state().screen
-                context.scope.tap(button)
-                context.navigator.awaitChange(before, maxFrames = 20)
-                find(context.state())?.touch?.let { return Step.Done(it) }
-            }
+        // Off screen: steer the cursor towards the town's cell, one press at a time (the map scrolls with it), until
+        // the town can be touched. Each press is read back.
+        repeat(MAP_STEER_PRESSES) {
+            val map = context.navigator.settle().screen as? Screen.FlyMap ?: return Step.Failed(ActionError.UnexpectedScreen("the fly map", context.state().screen.kind))
+            find(context.state())?.touch?.let { return Step.Done(it) }
+            val from = map.cursorCell
+            val to = map.cells[entry.id]
+            val button = when {
+                from == null || to == null -> null
+                to.x < from.x -> Button.LEFT
+                to.x > from.x -> Button.RIGHT
+                to.y < from.y -> Button.UP
+                to.y > from.y -> Button.DOWN
+                else -> null
+            } ?: return@repeat
+            context.scope.tap(button)
+            context.navigator.awaitChange(map, maxFrames = 20)
         }
+        find(context.navigator.settle())?.touch?.let { return Step.Done(it) }
         return Step.Failed(ActionError.NotOnScreen(entry.label, "the fly map", emptyList()))
     }
 
     private const val FLY_WAITS = 40
-    private const val FLY_LANDING_WAITS = 200
-    private const val MAP_SCROLL_PRESSES = 16
+    private const val FLY_LANDING_FRAMES = 60 * 20
+    private const val LANDING_POLL = 4
+    private const val MAP_STEER_PRESSES = 80
 
     private fun GameState.isSaveEnd() = screen is Screen.Overworld || (screen as? Screen.ListMenu)?.kind == MenuKind.START_MENU
 

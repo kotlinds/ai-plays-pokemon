@@ -26,6 +26,8 @@ data class HgssMapHeader(
     val mapType: Int,
     /** Wild encounter bank (`ENCDATA_NA` = 0xFF when none). */
     val wildEncounterBank: Int,
+    /** `flyAllowed`: Fly (and Teleport) can be used from this zone (outdoors). */
+    val flyAllowed: Boolean = true,
 )
 
 /** Decodes the map header table from the (decompressed) ARM9 binary. */
@@ -38,7 +40,8 @@ object HgssMapHeaders {
      * Layout (include/map_header.h, 24 bytes): u8 wildEncounterBank, u8 areaDataBank, u16 bitfield (moveModelBank:4,
      * worldMapX:6, worldMapY:6), u16 matrixId, u16 scriptsBank, u16 scriptHeaderBank, u16 msgBank, u16 dayMusicId,
      * u16 nightMusicId, u16 eventsBank, u16 (mapsec:8, areaIcon:4, momCallIntroParam:4), u32 bitfield (regionNo:1,
-     * weather:7, mapType:4, cameraType:6, followMode:2, battleBg:5, flags...). mwcc allocates bitfields from bit 0.
+     * weather:7, mapType:4, cameraType:6, followMode:2, battleBg:5, bikeAllowed:1, runningAllowed:1,
+     * escapeRopeAllowed:1, flyAllowed:1 (bit 28), ...). mwcc allocates bitfields from bit 0.
      */
     fun decode(arm9: ByteArray, tableAddress: Long): List<HgssMapHeader> {
         val base = (tableAddress - HgssWorldAddresses.ARM9_LOAD_ADDRESS).toInt()
@@ -58,7 +61,11 @@ object HgssMapHeaders {
                 mapsec = u8(arm9, o + 18),
                 mapType = ((flags shr 8) and 0xF).toInt(),
                 wildEncounterBank = u8(arm9, o),
+                flyAllowed = (flags shr FLY_ALLOWED_BIT) and 1L == 1L,
             )
         }
     }
+
+    /** Bit of `flyAllowed` in the header's u32 bitfield (see [decode]). */
+    private const val FLY_ALLOWED_BIT = 28
 }

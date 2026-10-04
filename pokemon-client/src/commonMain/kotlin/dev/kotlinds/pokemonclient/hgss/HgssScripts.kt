@@ -1,5 +1,6 @@
 package dev.kotlinds.pokemonclient.hgss
 
+import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.s32
 import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.u16
 import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.u32
 
@@ -47,6 +48,59 @@ internal object HgssScripts {
         }
         return null
     }
+
+    /** A `Warp` to another zone found in a trigger script: the zone and the landing tile. */
+    data class ZoneWarpCommand(val zone: Int, val x: Int, val z: Int)
+
+    /**
+     * The `Warp` to another zone than [zone] run by event script [scriptId] (1-based) of [file], or null: the holes of
+     * Victory Road 3F (scr_seq_D43R0103_002..006) and Ice Path B1F (scr_seq_D39R0102_000..003). Those scripts set the
+     * landing tile in temporary variables then jump to a shared fall routine:
+     * `SetVar VAR_TEMP_x4000, x; SetVar VAR_TEMP_x4001, z; GoTo fall` … `Warp MAP_X, 0, VAR_TEMP_x4000, VAR_TEMP_x4001, dir`.
+     * The leading `SetVar`s and `GoTo`s are followed, then the routine is scanned for the `Warp` (literal
+     * coordinates, or the variables set before). [zoneCount] bounds the zone ids accepted.
+     */
+    fun zoneWarp(file: ByteArray, scriptId: Int, zone: Int, zoneCount: Int): ZoneWarpCommand? {
+        val starts = scriptStarts(file)
+        var pos = starts.getOrNull(scriptId - 1) ?: return null
+        val vars = HashMap<Int, Int>()
+        // Follow the prefix: SetVar (41: var, value) and GoTo (22: s32 offset from the end of the offset).
+        repeat(MAX_PREFIX_COMMANDS) {
+            if (pos + 6 > file.size) return null
+            when (u16(file, pos)) {
+                SETVAR_OPCODE -> {
+                    vars[u16(file, pos + 2)] = u16(file, pos + 4)
+                    pos += 6
+                }
+                GOTO_OPCODE -> {
+                    pos = pos + 6 + s32(file, pos + 2)
+                    if (pos !in file.indices) return null
+                }
+                else -> return@repeat
+            }
+        }
+        fun value(raw: Int): Int? = if (raw >= VAR_BASE) vars[raw] else raw
+        val end = minOf(pos + MAX_ZONE_WARP_SCAN, file.size)
+        for (o in pos..end - WARP_SIZE) {
+            if (u16(file, o) != WARP_OPCODE || u16(file, o + 4) != 0) continue
+            val target = u16(file, o + 2)
+            if (target == zone || target !in 0 until zoneCount) continue
+            val x = value(u16(file, o + 6)) ?: continue
+            val z = value(u16(file, o + 8)) ?: continue
+            if (x >= MAX_COORDINATE || z >= MAX_COORDINATE) continue
+            return ZoneWarpCommand(target, x, z)
+        }
+        return null
+    }
+
+    private const val SETVAR_OPCODE = 41
+    private const val GOTO_OPCODE = 22
+    private const val VAR_BASE = 0x4000
+    private const val MAX_PREFIX_COMMANDS = 8
+
+    /** The shared fall routine moves the player and the follower before warping: a bit longer than a pad's script. */
+    private const val MAX_ZONE_WARP_SCAN = 0x180
+    private const val MAX_COORDINATE = 4096
 
     /** `Warp` (script command 176, asm/macros/script.inc: map, 0, x, z, direction as u16). */
     private const val WARP_OPCODE = 176

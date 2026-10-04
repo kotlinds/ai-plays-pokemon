@@ -27,11 +27,37 @@ object HgssTileBehaviors {
     const val PUDDLE_NO_SPLASHING = 0x1D
     const val ICE = 0x20
     const val SAND = 0x21
+
+    /**
+     * `TILE_BEHAVIOR_34`: water only for a surfing player (sub_0205B78C in the surf check sub_02060E54, sprite of the
+     * surf blob): the top of the Tohjo Falls waterfall.
+     */
+    const val WATERFALL_TOP = 0x22
+
+    /** `TILE_BEHAVIOR_36`: no flag and no predicate in the game: plain floor (Safari Zone blocks). */
+    const val PLAIN_36 = 0x24
     const val MAGMA = 0x2C
     const val REFLECTIVE = 0x2D
 
     /** `TILE_BEHAVIOR_46`: a walkway crossing over another one (Goldenrod Gym): walkable on both levels (NOTES 17s). */
     const val BRIDGE = 0x2E
+    /**
+     * `TILE_BEHAVIOR_48`..`55`, `73`, `74`: floor with a railing on some sides. The movement check (sub_02060DEC) refuses
+     * to leave a tile through a blocked side and to enter one through it (sub_0205B8F4 north, sub_0205B918 south,
+     * sub_0205B93C west, sub_0205B960 east).
+     */
+    private val RAILINGS: Map<Int, Set<Direction>> = mapOf(
+        0x30 to setOf(Direction.EAST),
+        0x31 to setOf(Direction.WEST),
+        0x32 to setOf(Direction.NORTH),
+        0x33 to setOf(Direction.SOUTH),
+        0x34 to setOf(Direction.NORTH, Direction.EAST),
+        0x35 to setOf(Direction.NORTH, Direction.WEST),
+        0x36 to setOf(Direction.SOUTH, Direction.EAST),
+        0x37 to setOf(Direction.SOUTH, Direction.WEST),
+        0x49 to setOf(Direction.NORTH, Direction.SOUTH),
+        0x4A to setOf(Direction.WEST, Direction.EAST),
+    )
     const val JUMP_EAST = 0x38
     const val JUMP_WEST = 0x39
     const val JUMP_NORTH = 0x3A
@@ -61,6 +87,18 @@ object HgssTileBehaviors {
     const val WARP_NORTH = 0x6E
     const val WARP_SOUTH = 0x6F
 
+    /**
+     * Bridges (`TILE_BEHAVIOR_112`..`115`). Stepping on [BRIDGE_START] puts the player on the bridge (MapObject flag 28,
+     * sub_02060AB8); the flag stays while walking [BRIDGE], [BRIDGE_OVER_GRASS] and [BRIDGE_OVER_WATER] tiles
+     * (sub_0205BA30) and is cleared on any other tile. [BRIDGE_OVER_WATER] is water unless the flag is set
+     * (sub_02060E54): walked on from the bridge, surfed under otherwise. Route 26/27/47/48 wooden bridges, cave
+     * bridges (Victory Road 1F, Diglett's Cave).
+     */
+    const val BRIDGE_START = 0x70
+    const val BRIDGE_TILE = 0x71
+    const val BRIDGE_OVER_GRASS = 0x72
+    const val BRIDGE_OVER_WATER = 0x73
+
     /** `TILE_BEHAVIOR_128`: the game talks to the object one tile further when facing it (FieldSystem_GetFacingObject). */
     const val COUNTER = 0x80
 
@@ -88,12 +126,16 @@ object HgssTileBehaviors {
 
     /**
      * The common [TileKind] of a tile from its [behavior] and collision bit. Unrecognized behaviors stay
-     * [TileKind.Unknown] (raw) unless they are a plain wall; notably, with no common kind yet: the one-way edges
-     * 0x30-0x33/0x4A of raised walkways (Goldenrod Gym), the Cycling Road slope
-     * 0x71 (Route 17) and 0x70 (Routes 47/48/17/26/27, Olivine; with 0x71-0x73 in the fishing checks, likely
-     * bridges over water).
+     * [TileKind.Unknown] (raw) unless they are a plain wall. Every behavior found in the ROM's land data has a kind
+     * (checked by HgssWorldSourceTest).
      */
     fun kind(behavior: Int, blocked: Boolean): TileKind = when (behavior) {
+        BRIDGE_START -> if (blocked) TileKind.Wall else TileKind.Bridge(start = true)
+        BRIDGE_TILE, BRIDGE_OVER_GRASS -> if (blocked) TileKind.Wall else TileKind.Bridge()
+        BRIDGE_OVER_WATER -> TileKind.Bridge(overWater = true)
+        WATERFALL_TOP -> TileKind.Water(surfable = true, fishable = false)
+        PLAIN_36 -> if (blocked) TileKind.Wall else TileKind.Floor
+        in RAILINGS -> if (blocked) TileKind.Wall else TileKind.Railing(RAILINGS.getValue(behavior))
         TALL_GRASS, VERY_TALL_GRASS -> TileKind.TallGrass
         CAVE_FLOOR -> TileKind.Cave
         WHIRLPOOL -> TileKind.Whirlpool

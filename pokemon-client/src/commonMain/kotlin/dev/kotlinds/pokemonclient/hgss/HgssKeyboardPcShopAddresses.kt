@@ -89,6 +89,9 @@ object HgssKeyboardPcShopAddresses {
     /** OverlayManager proc state of the PC app: a message waits for A / B / touch, a yes / no prompt waits. */
     const val PC_STATE_MESSAGE = 6
     const val PC_STATE_YES_NO = 7
+    /** MOVE POKéMON with the party panel: nothing held (0x29) / a Pokémon held by the cursor (0x73), verified live. */
+    const val PC_STATE_MOVE_FREE = 0x29
+    const val PC_STATE_MOVE_HOLDING = 0x73
     /** Proc states 2..5 are fades and delays (ov14_021EAF8C state table). */
     val PC_STATES_ANIMATION = 2..5
 

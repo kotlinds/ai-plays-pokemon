@@ -8,7 +8,7 @@ import kotlinx.coroutines.flow.StateFlow
  * What the rest of the app (UI, AI agent) knows about an emulator.
  *
  * This is the seam between "an emulated console" and "everything that uses it": the libretro
- * implementation ([me.nathanfallet.aiplayspokemon.emulator.libretro.LibretroEmulator]) is one way
+ * implementation ([ConsoleHost] over `dev.kotlinds.pokemonclient.libretro.LibretroConsole`) is one way
  * to provide it, but another backend (a socket bridge to a standalone emulator, a GDB stub, a
  * pure-Kotlin emulator, a fake for tests...) only has to implement this interface.
  *

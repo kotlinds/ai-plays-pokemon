@@ -31,12 +31,10 @@ dependencies {
     implementation(libs.koog.openrouter) // OpenRouter: Gemini, Mistral, DeepSeek, Llama... behind one key
     runtimeOnly(libs.slf4j.nop) // Koog logs through SLF4J: silence it
 
-    // The Pokémon game client library of this repository (reads the game, typed actions)
+    // The Pokémon game client library of this repository (reads the game, typed actions), and its bridge to a
+    // libretro core (console adapter, DeSmuME / melonDS cores, saves, headless bench)
     implementation(project(":pokemon-client"))
-
-    // Emulator: loads a libretro core (melonDS) as a native library
-    implementation(libs.jna)
-    implementation(libs.libretro.kmp)
+    implementation(project(":pokemon-client-libretro"))
 
     // MCP server: lets an external agent (e.g. Claude Code) play through tools
     implementation(libs.mcp.server)
@@ -45,6 +43,7 @@ dependencies {
 
     // Test coverage: `./gradlew koverHtmlReport` covers the app and the pokemon-client library together.
     kover(project(":pokemon-client"))
+    kover(project(":pokemon-client-libretro"))
 
     testImplementation(libs.kotlin.test)
     testImplementation(libs.kotlinx.coroutines.test)

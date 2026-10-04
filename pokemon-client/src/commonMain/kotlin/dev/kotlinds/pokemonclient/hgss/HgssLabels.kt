@@ -25,7 +25,8 @@ object HgssLabels {
         "GSGENTLEMAN" to "gentleman",
         "GENTLEMAN" to "gentleman",
         "MONSTARBALL" to "item ball",
-        "ROCK" to "rock",
+        "ROCK" to "boulder (Strength)",
+        "ICE" to "ice block",
         "BREAKROCK" to "cracked rock (Rock Smash)",
         "TREE" to "small tree (Cut)",
         "GSLEADER1" to "Falkner (gym leader)",
@@ -45,8 +46,45 @@ object HgssLabels {
         "ROCKETM" to "Team Rocket grunt",
         "ROCKETW" to "Team Rocket grunt",
         "SUNGLASSES" to "man in sunglasses",
-        "MYSTERY" to "delivery man",
-        "MYSTERY_2" to "delivery man",
+        // MYSTERY is the psychic / medium trainer sprite (Psychic Eli on Route 27 uses MYSTERY_2), not a courier.
+        "MYSTERY" to "psychic",
+        "MYSTERY_2" to "psychic",
+        "DELIVERY" to "delivery man",
+        "DELIVERY2" to "delivery man",
+        "DANCER" to "Kimono Girl",
+        "GSBIGFOUR1" to "Will (Elite Four)",
+        "GSBIGFOUR2" to "Koga (Elite Four)",
+        "GSBIGFOUR3" to "Bruno (Elite Four)",
+        "GSBIGFOUR4" to "Karen (Elite Four)",
+        "GSLEADER9" to "Brock (gym leader)",
+        "GSLEADER10" to "Misty (gym leader)",
+        "GSLEADER11" to "Lt. Surge (gym leader)",
+        "GSLEADER12" to "Erika (gym leader)",
+        "GSLEADER13" to "Janine (gym leader)",
+        "GSLEADER14" to "Sabrina (gym leader)",
+        "GSLEADER15" to "Blaine (gym leader)",
+        "GSLEADER16" to "Blue (gym leader)",
+        "RED" to "Red",
+        "MASAKI" to "Bill",
+        "MINAKI" to "Eusine",
+        "COUNTERM" to "attendant",
+        "ITAKO" to "medium",
+        "ITAKO_" to "medium",
+        "MANIA" to "PokéManiac",
+        "JUGGRER" to "juggler",
+        "INSTRUCTOR" to "instructor",
+        "SUIT" to "man in a suit",
+        "CAPTAIN" to "captain",
+        "THIEF" to "burglar",
+        "FIRE" to "firebreather",
+        "BOARDER" to "boarder",
+        "SKIERW" to "skier",
+        "GANG" to "biker",
+        "AMBRELLA" to "parasol lady",
+        "GORGGEOUSM" to "rich boy",
+        "GORGGEOUSW" to "beauty",
+        "USOKKY" to "odd tree (Sudowoodo)",
+        "KABIGON" to "Snorlax",
         "STOP" to "sign",
         "SIGNSHOES" to "sign",
         "SIGNCLOTHES" to "sign",
@@ -66,6 +104,8 @@ object HgssLabels {
         "BOY" to "boy", "GIRL" to "girl", "WOMAN" to "woman", "MAN" to "man", "BADMAN" to "tough guy",
     )
 
+    private val PLACEHOLDER = Regex("BABYBOY1_\\d+")
+
     /** "Mom", "woman", "Totodile (Pokémon)"... from the sprite constant name (without the SPRITE_ prefix). */
     fun person(spriteName: String): String {
         namedSprites[spriteName]?.let { return it }
@@ -74,6 +114,8 @@ object HgssLabels {
             return species.lowercase().replaceFirstChar { it.uppercase() } + " (Pokémon)"
         }
         if (spriteName.startsWith("SPRITE_")) return "person"
+        // BABYBOY1_2, _5, _8.._13: placeholder sprites of scripted scenery (doors, statues...), not children.
+        if (PLACEHOLDER.matches(spriteName)) return "object"
         val base = spriteName.removePrefix("GS").trimEnd { it.isDigit() || it == '_' }
         return genericWords.firstOrNull { (key, _) -> base == key || base.startsWith(key) }?.second ?: "person"
     }

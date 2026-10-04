@@ -14,6 +14,7 @@ import dev.kotlinds.pokemonclient.data.LevelMove
 import dev.kotlinds.pokemonclient.data.MachineId
 import dev.kotlinds.pokemonclient.data.MoveCategory
 import dev.kotlinds.pokemonclient.data.MoveInfo
+import dev.kotlinds.pokemonclient.data.MoveTarget
 import dev.kotlinds.pokemonclient.data.PokemonType
 import dev.kotlinds.pokemonclient.data.SpeciesInfo
 import dev.kotlinds.pokemonclient.data.TextBankId
@@ -57,6 +58,9 @@ class HgssGameData(private val rom: NdsRom, val version: HgssVersion) : GameData
     /** Every line of text bank [bank] (empty when the bank doesn't exist). Decodes the whole bank: cache the result. */
     fun bank(bank: TextBankId): List<String> = messageFile(bank)?.lines() ?: emptyList()
 
+    /** The raw characters of line [line] of text bank [bank] (control codes kept), null when missing. */
+    fun rawLine(bank: TextBankId, line: Int): IntArray? = messageFile(bank)?.rawLine(line)
+
     /** A names bank: the PK / MN ligature glyphs (codes 0x1E0 / 0x1E1, charmap ₧ ₦) spelled "PK" / "MN". */
     private fun names(bank: TextBankId): List<String> = bank(bank).map { it.replace("₧", "PK").replace("₦", "MN") }
 
@@ -78,6 +82,29 @@ class HgssGameData(private val rom: NdsRom, val version: HgssVersion) : GameData
     val trainerClassNames: List<String> by lazy { names(HgssTextBanks.TRAINER_CLASS_NAMES) }
 
     private val typeNames: List<String> by lazy { names(HgssTextBanks.TYPE_NAMES) }
+
+    /** NPC trainer names, index = trainer id (src/trainer_data.c EnemyTrainerSet_Init). */
+    val trainerNames: List<String> by lazy { names(HgssTextBanks.TRAINER_NAMES) }
+
+    /** `TrainerData` records (include/trainer_data.h), index = trainer id. */
+    private val trainerFiles: List<ByteArray> by lazy { narc(TRAINER_NARC) }
+
+    /**
+     * "Class Name" of NPC trainer [id] as the battle names it (e.g. "Psychic Eli"), null when unknown. The rival's
+     * name comes from the save, not from the ROM: only the class is given for him.
+     */
+    fun trainerLabel(id: Int): String? {
+        val data = trainerFiles.getOrNull(id)?.takeIf { it.size > TRAINER_CLASS } ?: return null
+        val trainerClass = trainerClassName(u8(data, TRAINER_CLASS))
+        val name = trainerNames.getOrNull(id)?.takeIf { it.isNotBlank() }
+        return listOfNotNull(trainerClass, name).joinToString(" ").ifEmpty { null }
+    }
+
+    /** Number of trainer records (ids 0 until this). */
+    val trainerCount: Int get() = trainerFiles.size
+
+    /** The trainer class id of trainer [trainerId] (`TrainerData.trainerClass`, byte 1, include/trainer_data.h), or null. */
+    fun trainerClassOf(trainerId: Int): Int? = trainerFiles.getOrNull(trainerId)?.takeIf { it.size > 1 }?.let { u8(it, 1) }
 
     override val speciesCount: Int get() = personal.size
     override val moveCount: Int get() = moveFiles.size
@@ -153,7 +180,26 @@ class HgssGameData(private val rom: NdsRom, val version: HgssVersion) : GameData
             pp = u8(m, 6),
             priority = m[10].toInt(),
             effectChance = u8(m, 7),
+            fixedDamage = u16(m, 0) in FIXED_DAMAGE_EFFECTS,
+            target = moveTarget(u16(m, 8)),
         )
+    }
+
+    /** [MoveTarget] of a `MoveTbl.range` value (`RANGE_*` flags, include/constants/moves.h). */
+    private fun moveTarget(range: Int): MoveTarget = when {
+        range == 0 -> MoveTarget.SELECTED
+        range and 0x001 != 0 -> MoveTarget.DEPENDS
+        range and 0x002 != 0 -> MoveTarget.RANDOM_FOE
+        range and 0x004 != 0 -> MoveTarget.ALL_FOES
+        range and 0x008 != 0 -> MoveTarget.ALL_OTHERS
+        range and 0x010 != 0 -> MoveTarget.USER
+        range and 0x020 != 0 -> MoveTarget.USER_SIDE
+        range and 0x040 != 0 -> MoveTarget.FIELD
+        range and 0x080 != 0 -> MoveTarget.FOES_SIDE
+        range and 0x100 != 0 -> MoveTarget.ALLY
+        range and 0x200 != 0 -> MoveTarget.USER_OR_ALLY
+        range and 0x400 != 0 -> MoveTarget.FRONT
+        else -> MoveTarget.SELECTED
     }
 
     override fun item(id: ItemId): ItemInfo? {
@@ -207,8 +253,15 @@ class HgssGameData(private val rom: NdsRom, val version: HgssVersion) : GameData
         /** `NARC_poketool_personal_wotbl` (33). */
         const val LEARNSET_NARC = "a/0/3/3"
 
+
         /** `NARC_poketool_personal_evo` (34). */
         const val EVOLUTION_NARC = "a/0/3/4"
+
+        /** `NARC_poketool_trainer_trdata` (55). */
+        const val TRAINER_NARC = "a/0/5/5"
+
+        /** `TrainerData.trainerClass`. */
+        private const val TRAINER_CLASS = 1
 
         /** The battle overlay, holding `sTypeEffectiveness`. */
         const val BATTLE_OVERLAY = 12
@@ -216,6 +269,13 @@ class HgssGameData(private val rom: NdsRom, val version: HgssVersion) : GameData
         /** `ITEM_TM01` .. `ITEM_HM08` (include/constants/items.h). */
         const val ITEM_TM01 = 328
         const val ITEM_HM08 = 427
+
+        /**
+         * Battle effects whose damage ignores the type chart (include/constants/move_effects.h): Bide (26), one-hit KO
+         * (38), Super Fang (40), Dragon Rage (41), Seismic Toss / Night Shade (87), Psywave (88), Counter (89),
+         * SonicBoom (130), Mirror Coat (144), Endeavor (189), Metal Burst (227).
+         */
+        private val FIXED_DAMAGE_EFFECTS = setOf(26, 38, 40, 41, 87, 88, 89, 130, 144, 189, 227)
 
         private const val PERSONAL_SIZE = 0x2C
         private const val PERSONAL_TMHM = 0x1C

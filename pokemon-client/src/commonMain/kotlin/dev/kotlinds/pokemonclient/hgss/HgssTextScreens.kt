@@ -196,12 +196,30 @@ internal object HgssScriptScreens {
         return state.surroundings?.bgEvents?.any { it.scriptId == script && it.type == "sign" } == true
     }
 
-    /** The person talked to (`ScriptEnvironment.lastInteracted`), named from its sprite (display only). */
+    /**
+     * The person talked to (`ScriptEnvironment.lastInteracted`): a trainer is named like the battle names it
+     * ("Psychic Eli", from its trainer script); anyone else from its sprite (display only).
+     */
     private fun speaker(mem: HgssMemory, env: Long): String? {
         val obj = mem.ptr(env + A.SE_LAST_INTERACTED) ?: return null
+        trainerOfScript(mem.u16(obj + A.MO_SCRIPT_ID))?.let { trainer -> HgssData.gameData?.trainerLabel(trainer)?.let { return it } }
         val sprite = mem.s32(obj + A.MO_SPRITE_ID)
         return HgssLabels.person(HgssData.spriteName(sprite))
     }
+
+    /**
+     * The trainer id of an NPC trainer's script, null for other scripts (src/fieldmap.c ScriptNumToTrainerNum:
+     * `std_trainer` scripts 3000.., `std_trainer_2` (second trainer of a double) 5000.., FIRST_TRAINER_INDEX = 1).
+     */
+    fun trainerOfScript(script: Int): Int? = when (script) {
+        in STD_TRAINER until STD_TRAINER_2 -> script - STD_TRAINER + 1
+        in STD_TRAINER_2 until STD_TRAINER_2 + MAX_TRAINERS -> script - STD_TRAINER_2 + 1
+        else -> null
+    }
+
+    private const val STD_TRAINER = 3000
+    private const val STD_TRAINER_2 = 5000
+    private const val MAX_TRAINERS = 1000
 
     /** The top-screen yes/no (`ScrCmd_YesNo`, ListMenu2D at `ScriptEnvironment.unk24`). B answers NO. */
     private fun topYesNo(mem: HgssMemory, env: Long, question: String?): Screen {

@@ -85,6 +85,8 @@ data class PlayerInfo(
     /** Names of the badges owned (Zephyr, Hive, ... then Kanto Boulder, Cascade, ...). */
     val badges: List<String>,
     val badgeCount: Int,
+    /** Play time (PLAYERDATA.igt, include/igt.h): hours, minutes, seconds. */
+    val playTime: Triple<Int, Int, Int>? = null,
 )
 
 @Serializable
@@ -122,6 +124,8 @@ data class DialogueInfo(
     /** printing / waiting_button / yes_no / multichoice / waiting_movement / waiting_app / running / pause */
     val waitingFor: String,
     val scriptId: Int? = null,
+    /** Trainer id of the trainer who saw the player (its approach / intro script runs), null otherwise. */
+    val engagedTrainer: Int? = null,
 )
 
 @Serializable
@@ -230,13 +234,16 @@ data class PartyMon(
     val friendship: Int = 0,
     /** False if the checksum did not match after decryption (data may be garbage / being modified). */
     val checksumOk: Boolean = true,
+    /** Why this reading can't be trusted ([HgssMonCheck]); empty for a good reading. */
+    @kotlinx.serialization.Transient
+    val problems: List<HgssMonCheck.Problem> = emptyList(),
 ) {
     /**
      * False when the values can't be real: the structure was read while the game was rewriting it (capture,
      * switch, map change...) or is corrupted. Such a reading must not be shown as is (keep the last good one).
      */
     val plausible: Boolean
-        get() = checksumOk && species in 1..MAX_SPECIES && (isEgg || (level in 1..100 && maxHp > 0 && hp in 0..maxHp))
+        get() = checksumOk && problems.isEmpty() && species in 1..MAX_SPECIES && (isEgg || (level in 1..100 && maxHp > 0 && hp in 0..maxHp))
 
     companion object {
         /** Highest species id of Gen 4 games (Arceus). */
@@ -269,6 +276,12 @@ data class Battler(
     val moves: List<MoveInfo> = emptyList(),
     /** Stat stages -6..+6: atk, def, speed, spAtk, spDef, accuracy, evasion. */
     val statStages: Map<String, Int> = emptyMap(),
+    /** Ability id (`BattleMon.ability`), 0 = none. */
+    val abilityId: Int = 0,
+    /** Held item id (`BattleMon.item`), 0 = none. */
+    val heldItemId: Int = 0,
+    /** The flags word after the ability (`BattleMon.sendOutFlag...pressureFlag`): which switch-in abilities were announced. */
+    val announceFlags: Long = 0,
 )
 
 @Serializable
@@ -324,6 +337,8 @@ data class MapObjectInfo(
     val mapId: Int = -1,
     /** Event flag that hides this object once set (MapObject.flagId), 0 when none: its event isn't done yet. */
     val eventFlag: Int = 0,
+    /** First object parameter (`param[0]`): the sight range in tiles of a trainer (type 1), 0 otherwise. */
+    val param0: Int = 0,
 )
 
 @Serializable

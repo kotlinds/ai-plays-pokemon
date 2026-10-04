@@ -287,10 +287,11 @@ class PathfinderTest {
 
     @Test
     fun aFailedRouteNamesTheFieldMoveThatOpensTheWay() {
-        assertEquals(RouteFailure.NeedsFieldMove(FieldMoveKind.SURF, 2, 0), Pathfinder(area("..~~..")).to(5, 0, Node(0, 0)).needs())
+        // The failure tells the land tile to use it from, and the direction to face (not only the water tile).
+        assertEquals(RouteFailure.NeedsFieldMove(FieldMoveKind.SURF, 2, 0, Node(1, 0), Direction.EAST), Pathfinder(area("..~~..")).to(5, 0, Node(0, 0)).needs())
         assertEquals(FieldMoveKind.WHIRLPOOL, Pathfinder(area("~@~")).to(2, 0, Node(0, 0), RouteOptions(mode = MovementMode.SURF)).needs().move)
         assertEquals(FieldMoveKind.WATERFALL, Pathfinder(area("~|~")).to(2, 0, Node(0, 0), RouteOptions(mode = MovementMode.SURF)).needs().move)
-        assertEquals(RouteFailure.NeedsFieldMove(FieldMoveKind.ROCK_CLIMB, 1, 1), Pathfinder(area("##", ".C.")).to(2, 1, Node(0, 1)).needs())
+        assertEquals(RouteFailure.NeedsFieldMove(FieldMoveKind.ROCK_CLIMB, 1, 1, Node(0, 1), Direction.EAST), Pathfinder(area("##", ".C.")).to(2, 1, Node(0, 1)).needs())
         // Nothing opens a wall.
         assertEquals(RouteFailure.Unreachable, assertIs<Pathfinder.Result.Failed>(Pathfinder(area(".#.")).to(2, 0, Node(0, 0))).failure)
     }
@@ -303,16 +304,137 @@ class PathfinderTest {
             "#####",
         )
         val boulder = Overlay(listOf(LiveObject(2, 1, null, clearedBy = FieldMoveKind.STRENGTH)))
-        assertEquals(RouteFailure.NeedsFieldMove(FieldMoveKind.STRENGTH, 2, 1), Pathfinder(map, boulder).to(4, 1, Node(0, 1)).needs())
+        assertEquals(RouteFailure.NeedsFieldMove(FieldMoveKind.STRENGTH, 2, 1, Node(1, 1), Direction.EAST), Pathfinder(map, boulder).to(4, 1, Node(0, 1)).needs())
         // The fewest field moves: a way around a boulder is taken, and water is preferred to two obstacles.
         val open = area(
             ".....",
             ".....",
         )
         assertIs<Pathfinder.Result.Found>(Pathfinder(open, boulder).to(4, 1, Node(0, 1)))
-        // A person is not an obstacle a field move clears.
+        // A person is not an obstacle a field move clears: the failure names where they stand.
         val person = Overlay(listOf(LiveObject(2, 1, Direction.WEST)))
-        assertEquals(RouteFailure.Unreachable, assertIs<Pathfinder.Result.Failed>(Pathfinder(map, person).to(4, 1, Node(0, 1))).failure)
+        assertEquals(RouteFailure.BlockedByPerson(2, 1), assertIs<Pathfinder.Result.Failed>(Pathfinder(map, person).to(4, 1, Node(0, 1))).failure)
+    }
+
+    // endregion
+
+    // region Field moves used by routes
+
+    @Test
+    fun withSurfUsableTheRouteGoesFromTheShoreOntoTheWaterAndBack() {
+        val options = RouteOptions(fieldMoves = setOf(FieldMoveKind.SURF))
+        val found = assertIs<Pathfinder.Result.Found>(Pathfinder(area("..~~..")).to(5, 0, Node(0, 0), options))
+        val edges = found.route.edges
+        // One Surf (from the shore 1,0 facing east onto 2,0), then plain steps: landing is automatic.
+        val surf = assertIs<FieldMoveEdge>(edges[1])
+        assertEquals(FieldMoveKind.SURF, surf.move)
+        assertEquals(Node(2, 0), surf.to)
+        assertEquals(Direction.EAST, surf.direction)
+        assertEquals(1, edges.count { it is FieldMoveEdge })
+        assertEquals(Node(5, 0), found.route.end)
+    }
+
+    @Test
+    fun alreadySurfingWaterIsPlainSteps() {
+        val options = RouteOptions(mode = MovementMode.SURF, fieldMoves = setOf(FieldMoveKind.SURF))
+        val found = assertIs<Pathfinder.Result.Found>(Pathfinder(area("~~~~")).to(3, 0, Node(0, 0), options))
+        assertTrue(found.route.edges.all { it is Edge.Step })
+    }
+
+    @Test
+    fun waterfallsAreClimbedAndWhirlpoolsCrossedWhenUsable() {
+        val falls = area(
+            "~",
+            "|",
+            "|",
+            "~",
+        )
+        val climb = RouteOptions(mode = MovementMode.SURF, fieldMoves = setOf(FieldMoveKind.SURF, FieldMoveKind.WATERFALL))
+        val up = assertIs<Pathfinder.Result.Found>(Pathfinder(falls).to(0, 0, Node(0, 3), climb))
+        val waterfall = assertIs<FieldMoveEdge>(up.route.edges.single())
+        assertEquals(FieldMoveKind.WATERFALL, waterfall.move)
+        assertEquals(Direction.NORTH, waterfall.direction)
+        // Without Waterfall, the failure says so from the water tile below, facing north.
+        val surfOnly = RouteOptions(mode = MovementMode.SURF, fieldMoves = setOf(FieldMoveKind.SURF))
+        assertEquals(RouteFailure.NeedsFieldMove(FieldMoveKind.WATERFALL, 0, 2, Node(0, 3), Direction.NORTH), Pathfinder(falls).to(0, 0, Node(0, 3), surfOnly).needs())
+        // Going down needs no move: surfing into the waterfall from above slides the player to the bottom.
+        val down = assertIs<Pathfinder.Result.Found>(Pathfinder(falls).to(0, 3, Node(0, 0), surfOnly))
+        assertEquals(Node(0, 3), assertIs<Edge.Slide>(down.route.edges.single()).to)
+        val whirl = RouteOptions(mode = MovementMode.SURF, fieldMoves = setOf(FieldMoveKind.SURF, FieldMoveKind.WHIRLPOOL))
+        val across = assertIs<Pathfinder.Result.Found>(Pathfinder(area("~@~")).to(2, 0, Node(0, 0), whirl))
+        assertEquals(FieldMoveKind.WHIRLPOOL, assertIs<FieldMoveEdge>(across.route.edges.single()).move)
+    }
+
+    @Test
+    fun cutTreesAreCutWhenCutIsUsable() {
+        val map = area(
+            "#####",
+            ".....",
+            "#####",
+        )
+        val tree = Overlay(listOf(LiveObject(2, 1, null, clearedBy = FieldMoveKind.CUT)))
+        assertEquals(FieldMoveKind.CUT, Pathfinder(map, tree).to(4, 1, Node(0, 1)).needs().move)
+        val found = assertIs<Pathfinder.Result.Found>(Pathfinder(map, tree).to(4, 1, Node(0, 1), RouteOptions(fieldMoves = setOf(FieldMoveKind.CUT))))
+        val cut = assertIs<FieldMoveEdge>(found.route.edges[1])
+        assertEquals(Node(2, 1), cut.to)
+        assertTrue(cut.clearsObstacle)
+    }
+
+    @Test
+    fun strengthPushesArePlannedAsAPuzzle() {
+        // From the south, the boulder in the corridor must go north into the alcove to free the way east.
+        val map = area(
+            "##.###",
+            "......",
+            "##.###",
+            "##.###",
+        )
+        val boulder = Overlay(listOf(LiveObject(2, 1, null, clearedBy = FieldMoveKind.STRENGTH)))
+        val options = RouteOptions(fieldMoves = setOf(FieldMoveKind.STRENGTH))
+        assertIs<Pathfinder.Result.Failed>(Pathfinder(map, boulder).to(5, 1, Node(2, 3), options))
+        val route = assertIs<Route>(PushPlanner(map, boulder).route(Node(2, 3), options) { it.x == 5 && it.y == 1 })
+        val push = route.edges.filterIsInstance<PushEdge>().single()
+        assertEquals(Direction.NORTH, push.direction)
+        assertEquals(2 to 0, push.objectTo)
+        assertEquals(Node(5, 1), route.end)
+        // Without Strength, no plan.
+        assertEquals(null, PushPlanner(map, boulder).route(Node(2, 3), RouteOptions()) { it.x == 5 && it.y == 1 })
+    }
+
+    @Test
+    fun aBoulderJammedInADeadEndIsNotPushedThere() {
+        // Corridor with the boulder: pushed east, it ends on 5,1 against the wall, the goal behind it.
+        val map = area(
+            "######",
+            "......",
+            "######",
+        )
+        val boulder = Overlay(listOf(LiveObject(2, 1, null, clearedBy = FieldMoveKind.STRENGTH)))
+        val options = RouteOptions(fieldMoves = setOf(FieldMoveKind.STRENGTH))
+        // The goal is beyond the boulder's last free tile: impossible, the search ends (bounded) with no plan.
+        assertEquals(null, PushPlanner(map, boulder).route(Node(0, 1), options) { it.x == 5 && it.y == 1 })
+        // The tile before it is reachable by pushing it to the end (three pushes).
+        val route = assertIs<Route>(PushPlanner(map, boulder).route(Node(0, 1), options) { it.x == 4 && it.y == 1 })
+        assertEquals(3, route.edges.count { it is PushEdge })
+    }
+
+    @Test
+    fun slidingIntoAnIceBlockPushesItOn() {
+        // Sliding north from 3,3 stops against the block on 3,1, which slides on to 3,0; then the player can stop on
+        // 3,1 (against the block) and walk east.
+        val map = area(
+            "###*###",
+            "...*...",
+            "###*###",
+            "###.###",
+        )
+        val block = Overlay(listOf(LiveObject(3, 1, Direction.SOUTH, iceBlock = true)))
+        assertIs<Pathfinder.Result.Failed>(Pathfinder(map, block).to(6, 1, Node(3, 3)))
+        val route = assertIs<Route>(PushPlanner(map, block).route(Node(3, 3), RouteOptions()) { it.x == 6 && it.y == 1 })
+        val push = route.edges.filterIsInstance<PushEdge>().single()
+        assertEquals(3 to 1, push.objectFrom)
+        assertEquals(3 to 0, push.objectTo)
+        assertEquals(Node(6, 1), route.end)
     }
 
     // endregion

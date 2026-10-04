@@ -9,8 +9,11 @@ import kotlinx.serialization.Serializable
  */
 @Serializable
 data class PlayerSettings(
-    /** What the AI's options are: raw buttons, assisted actions, or a fast decider + slow planner. */
-    val mode: ControlMode = ControlMode.PURE,
+    /**
+     * What the AI's options are: assisted actions (the default: what every agent uses), raw buttons only, or a fast
+     * decider + slow planner.
+     */
+    val mode: ControlMode = ControlMode.ASSISTED,
     /** Freeze the game while the AI thinks, so it decides on the screen it actually sees. */
     val pauseWhileThinking: Boolean = true,
     /**
@@ -46,7 +49,7 @@ enum class ControlMode(val label: String, val description: String) {
     ),
     ASSISTED(
         "Assisted",
-        "The AI also gets actions handled by code: walk to an exit, talk to someone, pick a menu option, explore a direction.",
+        "The AI also gets actions handled by code: walk to an exit, talk to someone, pick a menu option, go to the next map.",
     ),
     HYBRID(
         "Hybrid",

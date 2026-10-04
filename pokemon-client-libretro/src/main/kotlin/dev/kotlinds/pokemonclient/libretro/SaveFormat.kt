@@ -1,4 +1,4 @@
-package me.nathanfallet.aiplayspokemon.emulator.libretro
+package dev.kotlinds.pokemonclient.libretro
 
 import java.nio.file.Files
 import java.nio.file.Path

@@ -34,8 +34,8 @@ sealed interface GameEvent {
     /** A Pokémon evolved. */
     data class Evolved(override val seq: Long, override val frame: Long, val mon: MonId, val from: String, val to: String) : GameEvent
 
-    /** A Pokémon gained a level. */
-    data class LevelUp(override val seq: Long, override val frame: Long, val mon: MonId, val level: Int) : GameEvent
+    /** A Pokémon gained a level ([name]: its nickname or species, for display). */
+    data class LevelUp(override val seq: Long, override val frame: Long, val mon: MonId, val level: Int, val name: String? = null) : GameEvent
 
     /** Items were added to the bag. */
     data class ItemReceived(override val seq: Long, override val frame: Long, val item: String, val quantity: Int) : GameEvent

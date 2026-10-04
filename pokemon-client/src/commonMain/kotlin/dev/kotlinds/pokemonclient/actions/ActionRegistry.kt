@@ -44,7 +44,7 @@ class ActionRegistry(private val definitions: List<ActionDefinition<*>>) {
     fun available(state: GameState, mode: ActionMode): List<AvailableAction> = definitions
         .filter { mode in it.spec.modes }
         .mapNotNull { def ->
-            (def.spec.availability(state) as? Availability.Available)?.let { AvailableAction(def.spec.name, def.spec.description, it.choices) }
+            (def.spec.availability(state) as? Availability.Available)?.takeIf { it.listed }?.let { AvailableAction(def.spec.name, def.spec.description, it.choices) }
         }
 
     /** Actions of [mode] shown but not usable now, with the reason (e.g. "nobody knows Fly"). */
@@ -56,7 +56,7 @@ class ActionRegistry(private val definitions: List<ActionDefinition<*>>) {
 
     /** Every concrete action worth offering now, by canonical key (for models that pick from a list). */
     fun enumerate(state: GameState, mode: ActionMode): Map<String, GameAction> = definitions
-        .filter { mode in it.spec.modes && it.spec.availability(state) is Availability.Available }
+        .filter { mode in it.spec.modes && (it.spec.availability(state) as? Availability.Available)?.listed == true }
         .flatMap { it.spec.enumerate(state) }
         .associateBy { it.key }
 
@@ -107,6 +107,7 @@ class ActionRegistry(private val definitions: List<ActionDefinition<*>>) {
                         def.spec.parameters.forEach { p ->
                             putJsonObject(p.name) {
                                 put("type", p.type.name.lowercase())
+                                if (p.type == ParameterType.ARRAY) putJsonObject("items") { put("type", "object") }
                                 put("description", p.description)
                                 if (p.values.isNotEmpty()) put("enum", JsonArray(p.values.map(::JsonPrimitive)))
                             }

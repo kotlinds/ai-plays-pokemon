@@ -21,6 +21,9 @@ object HgssTextBanks {
     /** Ability names, index = ability id (BufferAbilityName). */
     val ABILITY_NAMES = TextBankId(720)
 
+    /** NPC trainer names, index = trainer id (src/trainer_data.c EnemyTrainerSet_Init, msg_0729). */
+    val TRAINER_NAMES = TextBankId(729)
+
     /** Trainer class names, index = trainer class id (BufferTrainerClassName). */
     val TRAINER_CLASS_NAMES = TextBankId(730)
 
@@ -45,7 +48,7 @@ class HgssMessageFile(private val bytes: ByteArray) {
 
     private val key: Int = if (bytes.size >= 4) HgssRomBytes.u16(bytes, 2) else 0
 
-    /** The u16 character codes of line [index] (decrypted, possibly compressed), null when out of range. */
+    /** The u16 character codes of line [index] (decrypted, unpacked), null when out of range. */
     fun rawLine(index: Int): IntArray? {
         if (index !in 0 until count) return null
         val entryKey = ((key.toLong() * 765L * (index + 1)) and 0xFFFF).let { it or (it shl 16) }
@@ -58,7 +61,7 @@ class HgssMessageFile(private val bytes: ByteArray) {
             stream = (stream + 18749) and 0xFFFF
             c
         }
-        return if (chars.firstOrNull() == COMPRESSED) decompress(chars) else chars
+        return HgssText.unpack(chars)
     }
 
     /** Line [index] as text (control codes removed), null when out of range. */
@@ -68,28 +71,7 @@ class HgssMessageFile(private val bytes: ByteArray) {
     fun lines(): List<String> = (0 until count).map { line(it) ?: "" }
 
     companion object {
-        /** First character of a compressed line: the rest packs 9-bit codes (used by the Japanese releases). */
-        const val COMPRESSED = 0xF100
-
-        private const val COMPRESSED_END = 0x1FF
-
-        /** Unpacks a compressed line: 9-bit codes, least significant bits first, [COMPRESSED_END] ends the line. */
-        private fun decompress(chars: IntArray): IntArray {
-            val out = ArrayList<Int>()
-            var buffer = 0L
-            var bits = 0
-            for (i in 1 until chars.size) {
-                buffer = buffer or (chars[i].toLong() shl bits)
-                bits += 16
-                while (bits >= 9) {
-                    val code = (buffer and 0x1FF).toInt()
-                    buffer = buffer shr 9
-                    bits -= 9
-                    if (code == COMPRESSED_END) return (out + HgssText.EOS).toIntArray()
-                    out += code
-                }
-            }
-            return (out + HgssText.EOS).toIntArray()
-        }
+        /** First character of a compressed line (packed 9-bit codes, used by NPC trainer names): see [HgssText.unpack]. */
+        const val COMPRESSED = HgssText.TRAINER_NAME_CODE
     }
 }

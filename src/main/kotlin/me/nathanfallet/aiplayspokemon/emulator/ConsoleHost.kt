@@ -18,8 +18,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import me.nathanfallet.aiplayspokemon.emulator.audio.AudioPlayer
-import me.nathanfallet.aiplayspokemon.emulator.libretro.LibretroConsole
-import me.nathanfallet.aiplayspokemon.emulator.libretro.LibretroCoreSpec
+import dev.kotlinds.pokemonclient.libretro.LibretroConsole
+import dev.kotlinds.pokemonclient.libretro.LibretroCoreSpec
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentLinkedQueue

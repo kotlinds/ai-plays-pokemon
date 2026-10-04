@@ -1,6 +1,5 @@
-package me.nathanfallet.aiplayspokemon.emulator
+package dev.kotlinds.pokemonclient.libretro
 
-import me.nathanfallet.aiplayspokemon.emulator.libretro.SaveFormat
 import java.nio.file.Files
 import java.nio.file.attribute.FileTime
 import kotlin.io.path.readBytes

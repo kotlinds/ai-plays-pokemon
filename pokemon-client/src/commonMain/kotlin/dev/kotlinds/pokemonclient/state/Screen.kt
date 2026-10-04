@@ -33,6 +33,8 @@ sealed interface Screen {
         override val cursor: Cursor,
         override val topology: Topology,
         override val cancel: CancelBehavior = CancelBehavior.CONFIRMS_LAST,
+        /** For the "forget a move?" / "give up on the move?" prompts of a level up or evolution: who learns what. */
+        val learning: MoveOffer? = null,
     ) : Selectable
 
     /** A list or grid of options: multichoice, start menu, PC menus, BUY / SELL... */
@@ -105,6 +107,11 @@ sealed interface Screen {
         override val cursor: Cursor,
         override val topology: Topology,
         override val cancel: CancelBehavior = CancelBehavior.CLOSES,
+        /**
+         * The items of every pocket by pocket entry id (`pocket:hp_pp_restore` → items), when the bag holds them all
+         * at once (the battle bag): tells which pocket to open for an item. Empty when unknown.
+         */
+        val pocketContents: Map<String, List<ItemId>> = emptyMap(),
     ) : Selectable
 
     /** The naming keyboard: [buffer] is what is typed so far. */
@@ -129,6 +136,8 @@ sealed interface Screen {
         override val cancel: CancelBehavior = CancelBehavior.CLOSES,
         /** What the PC was opened for (null when unknown). */
         val mode: PcMode? = null,
+        /** In MOVE POKéMON, the Pokémon picked up and carried by the cursor (placed with A on a slot or a box tab). */
+        val holding: MonId? = null,
     ) : Selectable
 
     /** A shop's buy list. */
@@ -146,7 +155,14 @@ sealed interface Screen {
         override val cursor: Cursor,
         override val topology: Topology,
         override val cancel: CancelBehavior = CancelBehavior.CLOSES,
+        /** The map cell under the cursor (it moves one cell per D-pad press), when known. */
+        val cursorCell: MapCell? = null,
+        /** The cell of each destination, by entry id: lets a recipe steer the cursor to one that is off screen. */
+        val cells: Map<String, MapCell> = emptyMap(),
     ) : Selectable
+
+    /** A cell of a map screen's grid (the fly map), x to the east, y to the south. */
+    data class MapCell(val x: Int, val y: Int)
 
     /** A number to pick (shop quantity...): UP/DOWN change it, A confirms. */
     data class Quantity(val value: Int, val min: Int, val max: Int) : Screen {
@@ -166,8 +182,19 @@ sealed interface Screen {
         override val awaiting: Awaiting,
     ) : Screen
 
-    /** A Pokémon is evolving: wait (or press A); B cancels the evolution. */
-    data class Evolution(val from: Named<SpeciesId>, val to: Named<SpeciesId>?, override val awaiting: Awaiting) : Screen
+    /**
+     * A Pokémon is evolving: an animation to wait for ([canCancel]: B stops it now). The scene's messages ("What? X
+     * is evolving!", "Congratulations!...") are [Dialogue] screens and its prompts [YesNo] screens.
+     */
+    data class Evolution(
+        val from: Named<SpeciesId>,
+        val to: Named<SpeciesId>?,
+        override val awaiting: Awaiting,
+        /** The message shown in the scene's box, when one is (the scene's own text pages are [Dialogue] screens). */
+        val text: String? = null,
+        /** True while B stops the evolution (during the morphing, when the game allows it). */
+        val canCancel: Boolean = false,
+    ) : Screen
 
     /** A long animation with nothing to do (trade, egg hatching, cut scene...). */
     data class Animation(val kind: AnimationKind) : Screen {
@@ -298,7 +325,30 @@ enum class CancelBehavior {
 }
 
 /** Kinds of [Screen.ListMenu]. */
-enum class MenuKind { MULTICHOICE, START_MENU, PC, SHOP_ACTION, PHONE_CONTACTS, BATTLE_SWITCH_OR_KEEP, OTHER }
+enum class MenuKind {
+    MULTICHOICE, START_MENU, PC, SHOP_ACTION, PHONE_CONTACTS, BATTLE_SWITCH_OR_KEEP, OTHER,
+
+    /** The menu after the title screen: continue the saved game, new game... */
+    MAIN_MENU,
+}
+
+/** A Pokémon wanting to learn a move (level up, evolution): [mon] (null when unknown) and the new [move]. */
+data class MoveOffer(
+    val mon: MonId?,
+    val monName: String?,
+    val move: Named<MoveId>,
+    /** For a plain YES / NO prompt: what YES means. */
+    val question: LearnQuestion = LearnQuestion.FORGET_A_MOVE,
+)
+
+/** What YES answers on a learn-move YES / NO prompt (the field asks with plain YES / NO entries). */
+enum class LearnQuestion {
+    /** "Should a move be deleted and replaced with Y?": YES opens the list of moves to forget. */
+    FORGET_A_MOVE,
+
+    /** "Stop trying to teach Y?": YES gives up the new move. */
+    GIVE_UP,
+}
 
 /** Why a [Screen.MoveSelect] is shown. */
 enum class MoveContext {

@@ -64,6 +64,22 @@ internal object BattlePlans {
      * gives up learning the new move when it's null.
      */
     val learnMove = ActionPlan<GameAction.LearnMove> { action, context ->
+        val outcome = learnMoveSteps.run(action, context)
+        // Learning from the field (Rare Candy, TM): the bag / party menus the item was used from are still open.
+        if (outcome is ActionOutcome.Done) closeFieldMenus(context)
+        outcome
+    }
+
+    /** Out of battle, closes the bag / party menus left open behind a finished prompt (never during an evolution). */
+    private fun closeFieldMenus(context: PlanContext) {
+        val state = context.navigator.settle()
+        if (state.battle != null) return
+        val menus = state.screen is Screen.Bag || state.screen is Screen.PartyGrid || state.screen is Screen.ContextMenu ||
+            (state.screen as? Screen.Dialogue)?.source == dev.kotlinds.pokemonclient.state.TextSource.MENU
+        if (menus) PartyBagPlans.closeToOverworld(context)
+    }
+
+    private val learnMoveSteps = ActionPlan<GameAction.LearnMove> { action, context ->
         // Messages may come first ("Which move should be forgotten?"): read them up to the question or the list.
         val reached = context.navigator.advanceUntil(LEARN_WAITS) { it.screen is Screen.Selectable }
         if (reached is Step.Failed) return@ActionPlan ActionOutcome.Failed(reached.error)
@@ -72,17 +88,18 @@ internal object BattlePlans {
         val prompt = state.screen as? Screen.YesNo
         val toList = when {
             state.screen is Screen.MoveSelect -> Step.Done(state)
-            prompt != null && prompt.entries.any { it.id == "option:forget" } ->
-                if (forget == null) context.navigator.choose(Screen.YesNo::class, "KEEP OLD MOVES") { it.id == "option:keep" }
-                else context.navigator.choose(Screen.YesNo::class, "FORGET A MOVE") { it.id == "option:forget" }
+            prompt != null && forgetAnswer(prompt) != null ->
+                if (forget == null) context.navigator.choose(Screen.YesNo::class, "KEEP OLD MOVES") { it.id == keepAnswer(prompt) }
+                else context.navigator.choose(Screen.YesNo::class, "FORGET A MOVE") { it.id == forgetAnswer(prompt) }
             else -> Step.Failed(ActionError.UnexpectedScreen("the question about the new move", state.screen.toString()))
         }
         if (forget == null) {
             // "Give up on learning Y?" → yes.
             return@ActionPlan toList.andThen {
-                context.navigator.advanceUntil(LEARN_WAITS) { s -> (s.screen as? Screen.YesNo)?.entries?.any { it.id == "option:give_up" } == true }
-            }.andThen {
-                context.navigator.choose(Screen.YesNo::class, "GIVE UP") { it.id == "option:give_up" }
+                context.navigator.advanceUntil(LEARN_WAITS) { s -> (s.screen as? Screen.YesNo)?.let(::giveUpAnswer) != null }
+            }.andThen { s ->
+                val answer = (s.screen as Screen.YesNo).let(::giveUpAnswer)
+                context.navigator.choose(Screen.YesNo::class, "GIVE UP") { it.id == answer }
             }.then { ActionOutcome.Done("kept the old moves") }
         }
         toList.andThen {
@@ -93,6 +110,8 @@ internal object BattlePlans {
                 val id = e.id.removePrefix("move:").toIntOrNull() ?: return@firstOrNull false
                 e.id != "move:${list.newMove?.id?.value}" && matchesRef(forget.raw, "move", id, e.label.substringBefore(" ("))
             } ?: return@andThen Step.Failed(ActionError.InvalidParameter("forget", forget.raw, list.entries.filter { it.id.startsWith("move:") }.map { it.label }))
+            // The only moves these lists refuse are HMs ("HM moves can't be forgotten now").
+            if (!entry.selectable) return@andThen Step.Failed(ActionError.HmCannotForget(entry.label.substringBefore(" (")))
             context.navigator.choose(Screen.MoveSelect::class, entry.label) { it.id == entry.id }
         }.andThen {
             // In battle, "FORGET <move>" / CANCEL confirms the choice (it appears a few frames after the list).
@@ -113,9 +132,28 @@ internal object BattlePlans {
         }
     }
 
+    /**
+     * The entry answering "forget a move" on a learn prompt: `option:forget` in battle, YES on the field's plain YES /
+     * NO question ([dev.kotlinds.pokemonclient.state.LearnQuestion.FORGET_A_MOVE]). Null when it isn't such a prompt.
+     */
+    private fun forgetAnswer(prompt: Screen.YesNo): String? = when {
+        prompt.entries.any { it.id == "option:forget" } -> "option:forget"
+        prompt.learning?.question == dev.kotlinds.pokemonclient.state.LearnQuestion.FORGET_A_MOVE && prompt.entries.any { it.id == "option:yes" } -> "option:yes"
+        else -> null
+    }
+
+    private fun keepAnswer(prompt: Screen.YesNo): String = if (prompt.entries.any { it.id == "option:keep" }) "option:keep" else "option:no"
+
+    /** The entry giving up the new move: `option:give_up` in battle, YES on the field's "stop trying to teach?". */
+    private fun giveUpAnswer(prompt: Screen.YesNo): String? = when {
+        prompt.entries.any { it.id == "option:give_up" } -> "option:give_up"
+        prompt.learning?.question == dev.kotlinds.pokemonclient.state.LearnQuestion.GIVE_UP && prompt.entries.any { it.id == "option:yes" } -> "option:yes"
+        else -> null
+    }
+
     /** The screens [learnMove] starts from. */
     fun isLearnPrompt(state: GameState): Boolean = when (val s = state.screen) {
-        is Screen.YesNo -> s.entries.any { it.id == "option:forget" }
+        is Screen.YesNo -> forgetAnswer(s) != null
         is Screen.MoveSelect -> s.context != MoveContext.BATTLE
         else -> false
     }

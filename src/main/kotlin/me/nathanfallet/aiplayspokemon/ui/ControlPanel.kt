@@ -1,5 +1,6 @@
 package me.nathanfallet.aiplayspokemon.ui
 
+import me.nathanfallet.aiplayspokemon.mcp.AgentActivity
 import dev.kotlinds.pokemonclient.data.KnowledgeLevel
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -315,8 +316,10 @@ private fun McpSection(controller: AppController) {
             Text(
                 "Connect an agent, e.g.: claude mcp add --transport http pokemon ${running.url}\n" +
                     "Then ask it to play. Calls: ${activity.calls}" +
-                    (activity.lastAction?.let { "\nLast: $it" } ?: "") +
-                    (activity.lastReasoning?.let { "\n“$it”" } ?: "") +
+                    (activity.shown?.let { shown ->
+                        val head = if (shown.phase == AgentActivity.Phase.IN_PROGRESS) "In progress" else "Last"
+                        "\n$head: ${shown.action}" + (shown.result?.let { " → $it" } ?: "") + (shown.reasoning?.let { "\n“$it”" } ?: "")
+                    } ?: "") +
                     (if (blind.isEmpty()) "" else "\nUndecoded screens used blindly: " +
                         blind.entries.sortedByDescending { it.value }.joinToString { "${it.key} ×${it.value}" }),
                 style = MaterialTheme.typography.bodySmall,

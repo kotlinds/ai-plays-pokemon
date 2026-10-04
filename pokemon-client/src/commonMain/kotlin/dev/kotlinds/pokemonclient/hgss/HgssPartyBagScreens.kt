@@ -1,5 +1,10 @@
 package dev.kotlinds.pokemonclient.hgss
 
+import dev.kotlinds.pokemonclient.state.Named
+import dev.kotlinds.pokemonclient.state.MoveId
+import dev.kotlinds.pokemonclient.state.MoveOffer
+import dev.kotlinds.pokemonclient.state.LearnQuestion
+import dev.kotlinds.pokemonclient.state.ContinueReason
 import dev.kotlinds.pokemonclient.console.Button
 import dev.kotlinds.pokemonclient.console.TouchPoint
 import dev.kotlinds.pokemonclient.state.AnimationKind
@@ -8,6 +13,7 @@ import dev.kotlinds.pokemonclient.state.CancelBehavior
 import dev.kotlinds.pokemonclient.state.Cursor
 import dev.kotlinds.pokemonclient.state.Entry
 import dev.kotlinds.pokemonclient.state.ItemId
+import dev.kotlinds.pokemonclient.state.MenuKind
 import dev.kotlinds.pokemonclient.state.MonId
 import dev.kotlinds.pokemonclient.state.PartyPurpose
 import dev.kotlinds.pokemonclient.state.Screen
@@ -73,7 +79,12 @@ internal object HgssPartyMenuScreen {
 
             P.STATE_CONTEXT_MENU -> contextMenu(mem, state, pm, submenu = false)
             P.STATE_SUBCONTEXT_MENU -> contextMenu(mem, state, pm, submenu = true)
-            P.STATE_YES_NO, P.STATE_YESNO_SWITCH_ITEMS -> yesNo(mem, pm)
+            P.STATE_YES_NO, P.STATE_YESNO_SWITCH_ITEMS -> yesNo(mem, state, pm)
+            P.STATE_SELECT_MOVE -> selectMove(mem, state, pm)
+            // An item's effect (HP bar, then "X's HP was restored..."): the message is shown while its printer runs; A
+            // ends it at once (else the menu waits for the text's own delay before closing, ~2-3 s).
+            P.STATE_ITEM_USE_CB -> levelUpPanel(mem, state, pm)
+                ?: if (HgssScreenMemory.textPrinting(mem)) message(mem, pm) else Screen.Animation(AnimationKind.TRANSITION)
             in P.MESSAGE_STATES -> message(mem, pm)
             else -> Screen.Animation(AnimationKind.TRANSITION)
         }
@@ -102,6 +113,24 @@ internal object HgssPartyMenuScreen {
         companion object {
             fun of(raw: Int) = entries.firstOrNull { it.raw == raw } ?: OTHER
         }
+    }
+
+    /**
+     * The stats panel after a Rare Candy (`PartyMenu_ItemUseFunc_LevelUpLearnMovesLoop`, src/party_menu_items.c:607):
+     * step 1 shows the gains, step 2 the new totals; both wait for A / B (or a touch). Null otherwise. The stats
+     * before the level are no longer in RAM by then (the game overwrites `levelUpStatsTmp` with the new ones for the
+     * totals panel), so the text gives the new stats on both panels.
+     */
+    private fun levelUpPanel(mem: HgssMemory, state: HgssState, pm: Long): Screen? {
+        if (mem.u32(pm + P.PM_ITEM_USE_CALLBACK) and 1L.inv() != P.FN_LEVEL_UP_LEARN_MOVES_LOOP) return null
+        val step = mem.u8(pm + P.PM_LEVEL_UP_LOOP_STATE)
+        if (step != 1 && step != 2) return null
+        val mon = state.party.firstOrNull { it.slot == mem.u8(pm + P.PM_PARTY_MON_INDEX) } ?: return null
+        val now = listOf(mon.maxHp) + listOf("atk", "def", "spAtk", "spDef", "speed").map { mon.stats[it] ?: 0 }
+        val names = listOf("Max HP", "Attack", "Defense", "Sp. Atk", "Sp. Def", "Speed")
+        val panel = if (step == 1) "gains panel" else "totals panel"
+        val stats = names.indices.joinToString(", ") { i -> "${names[i]} ${now[i]}" }
+        return Screen.PressToContinue(ContinueReason.LEVEL_UP_STATS, "${mon.nickname ?: mon.speciesName} grew to Lv${mon.level} ($panel): $stats")
     }
 
     private fun grid(mem: HgssMemory, state: HgssState, pm: Long, context: PartyContext, procState: Int): Screen {
@@ -226,14 +255,60 @@ internal object HgssPartyMenuScreen {
     /** ITEM / MAIL submenu: a vertical ring, LEFT / RIGHT ignored (`sDpadNavParam_ContextMenu`, party_context_menu.c:183). */
     fun submenuTopology(count: Int) = Topology.vertical(count, wrap = true)
 
+    /**
+     * "Restore which move?" / "Boost which move?" (PP restoring items, PP Up: `PartyMenu_SelectMoveForPpRestoreOrPpUp`,
+     * party_menu_items.c:927): a list of the Pokémon's moves (list value = move slot) then QUIT, on the context menu
+     * cursor, read with the submenu input (a vertical ring; B = QUIT). Entries are `move:<id>` (+ `option:cancel`).
+     */
+    private fun selectMove(mem: HgssMemory, state: HgssState, pm: Long): Screen? {
+        val cursor = mem.ptr(pm + P.PM_CONTEXT_MENU_CURSOR, align = 1) ?: return null
+        val count = mem.u8(cursor + P.CMC_NUM_ITEMS)
+        if (count !in 2..5) return null
+        val items = mem.ptr(cursor + P.CMC_ITEMS) ?: return null
+        val slot = mem.u8(pm + P.PM_PARTY_MON_INDEX)
+        val mon = state.party.firstOrNull { it.slot == slot } ?: return null
+        val entries = (0 until count).map { i ->
+            val label = mem.gameString(mem.ptr(items + P.LIST_ITEM_SIZE * i + P.LIST_ITEM_TEXT)).orEmpty().trim()
+            val value = mem.u32(items + P.LIST_ITEM_SIZE * i + P.LIST_ITEM_VALUE)
+            val move = mon.moves.getOrNull(value.toInt()).takeIf { value in 0L..3L }
+            if (move != null) Entry("move:${move.id}", "${move.name} (${move.pp}/${move.maxPp} PP)") else Entry(ID_CANCEL, label.ifEmpty { "QUIT" })
+        }
+        val selection = mem.u8(cursor + P.CMC_SELECTION)
+        return Screen.ListMenu(
+            MenuKind.OTHER, entries,
+            if (selection < count) Cursor.At(selection) else Cursor.Hidden,
+            submenuTopology(count), CancelBehavior.CLOSES,
+        )
+    }
+
     /** "Switch items?", "Send the removed Mail to your PC?": a `YesNoPrompt` (include/yes_no_prompt.h). */
-    private fun yesNo(mem: HgssMemory, pm: Long): Screen? =
-        yesNoPrompt(mem, mem.ptr(pm + P.PM_YES_NO_PROMPT), mem.gameString(mem.ptr(pm + P.PM_FORMATTED_STR_BUF))?.trimEnd())
+    private fun yesNo(mem: HgssMemory, state: HgssState, pm: Long): Screen? {
+        val screen = yesNoPrompt(mem, mem.ptr(pm + P.PM_YES_NO_PROMPT), mem.gameString(mem.ptr(pm + P.PM_FORMATTED_STR_BUF))?.trimEnd())
+        // The learn-move questions after a Rare Candy (party_menu_items.c:640-750): which one it is comes from the
+        // callback YES leads to, the move from PartyMenuArgs.moveId.
+        val question = when (mem.u32(pm + P.PM_YES_CALLBACK) and 1L.inv()) {
+            P.FN_LEVEL_UP_PROMPT_FORGET_MOVE -> LearnQuestion.FORGET_A_MOVE
+            P.FN_LEVEL_UP_DID_NOT_LEARN_MOVE -> LearnQuestion.GIVE_UP
+            else -> return screen
+        }
+        val yesNo = screen as? Screen.YesNo ?: return screen
+        val move = mem.ptr(pm + P.PM_ARGS)?.let { mem.u16(it + P.ARGS_MOVE_ID) }?.takeIf { it != 0 } ?: return screen
+        val mon = state.party.firstOrNull { it.slot == mem.u8(pm + P.PM_PARTY_MON_INDEX) }
+        return yesNo.copy(learning = MoveOffer(
+            mon?.let { MonId(it.personality, it.otId) }, mon?.let { it.nickname ?: it.speciesName },
+            Named(MoveId(move), HgssData.moveName(move)), question,
+        ))
+    }
 
     /** A message printed in the party menu's message box (take item, field move refused, item used...). */
     private fun message(mem: HgssMemory, pm: Long): Screen {
-        val text = mem.gameString(mem.ptr(pm + P.PM_FORMATTED_STR_BUF)).orEmpty().trimEnd()
-        return Screen.Dialogue(TextSource.MENU, speaker = null, text = text, awaiting = Awaiting.INPUT)
+        val string = mem.ptr(pm + P.PM_FORMATTED_STR_BUF)
+        val text = mem.gameString(string).orEmpty().trimEnd()
+        // While its printer prints (or waits for the heal sound effect), A does nothing: only a printer waiting for a
+        // key, or gone, waits for A (verified live: A ~20 frames after "X's HP was restored" is ignored).
+        val printed = string?.let { HgssTextPrinter.read(mem, it, mem.u8(pm + P.PM_TEXT_PRINTER_ID)) }
+        val awaiting = if (printed != null && printed.printerAlive) printed.awaiting else Awaiting.INPUT
+        return Screen.Dialogue(TextSource.MENU, speaker = null, text = text, awaiting = awaiting)
     }
 
     /**
@@ -490,7 +565,17 @@ internal object HgssPartyBagAddresses {
     const val FLAG_CANCEL_DISABLED = 0x80
     const val FLAG_SECOND_CURSOR = 0x40
     const val DONOR_SLOT_MASK = 0x3F
+    const val PM_TEXT_PRINTER_ID = 0xC64L       // u8 textPrinterId of the message box (window 34)
     const val PM_PARTY_MON_INDEX = 0xC65L       // u8 grid cursor: 0-5 slot, 7 CANCEL button
+    const val PM_ITEM_USE_CALLBACK = 0xC54L     // int (*itemUseCallback)(PartyMenu *)
+    const val PM_YES_CALLBACK = 0xC58L          // int (*yesCallback)(PartyMenu *): what YES leads to
+    const val ARGS_MOVE_ID = 0x2AL              // PartyMenuArgs.moveId (u16): the move being learned
+    /** PartyMenu_ItemUseFunc_LevelUpPromptForgetMove / _LevelUpDidNotLearnMove (xMAP), without the Thumb bit. */
+    const val FN_LEVEL_UP_PROMPT_FORGET_MOVE = 0x02081F8CL
+    const val FN_LEVEL_UP_DID_NOT_LEARN_MOVE = 0x02082038L
+    const val PM_LEVEL_UP_LOOP_STATE = 0xC67L   // u8 levelUpLearnMovesLoopState
+    /** PartyMenu_ItemUseFunc_LevelUpLearnMovesLoop (xMAP), without the Thumb bit. */
+    const val FN_LEVEL_UP_LEARN_MOVES_LOOP = 0x02081C50L
     const val PM_OPENED_ON_SLOT = 0xC66L        // u8 unk_C66: slot the menu opened on (its parity picks CANCEL's UP/DOWN order)
     const val PM_YES_NO_PROMPT = 0xC88L         // YesNoPrompt *
     const val PM_BUTTON_ANIM_ACTIVE = 0xC9CL    // BOOL contextMenuButtonAnim.active
@@ -518,6 +603,8 @@ internal object HgssPartyBagAddresses {
     const val STATE_MAIN = 1
     const val STATE_CONTEXT_MENU = 2
     const val STATE_USE_ITEM_SELECT_MON = 4
+    const val STATE_ITEM_USE_CB = 5
+    const val STATE_SELECT_MOVE = 6
     const val STATE_GIVE_ITEM_SELECT_MON = 8
     const val STATE_YESNO_SWITCH_ITEMS = 10
     const val STATE_SUBCONTEXT_MENU = 15

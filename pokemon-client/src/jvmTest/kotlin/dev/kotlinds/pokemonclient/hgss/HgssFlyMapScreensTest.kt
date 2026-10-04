@@ -6,6 +6,7 @@ import dev.kotlinds.pokemonclient.state.CancelBehavior
 import dev.kotlinds.pokemonclient.state.Cursor
 import dev.kotlinds.pokemonclient.state.Screen
 import kotlin.test.Test
+import kotlin.test.assertTrue
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
@@ -110,5 +111,16 @@ class HgssFlyMapScreensTest {
     fun confirmationCursorOnQuit() {
         val yesNo = assertIs<Screen.YesNo>(screen("fly_confirm_cancel"))
         assertEquals(Cursor.At(1), yesNo.cursor)
+    }
+
+    @Test
+    fun everyDestinationHasACellAndTheCursorIsOnTheTownItOpenedOn() {
+        val map = assertIs<Screen.FlyMap>(screen("fly_map_ecruteak"))
+        val destinations = map.entries.filter { it.id.startsWith("fly:") }
+        assertTrue(destinations.all { it.id in map.cells }, "a cell for every destination")
+        val cursor = assertIs<dev.kotlinds.pokemonclient.state.Cursor.At>(map.cursor).index
+        val here = map.cells.getValue(map.entries[cursor].id)
+        val at = map.cursorCell!!
+        assertTrue(kotlin.math.abs(here.x - at.x) <= 1 && kotlin.math.abs(here.y - at.y) <= 1, "cursor $at on the town's cell $here")
     }
 }

@@ -1,4 +1,4 @@
-package me.nathanfallet.aiplayspokemon.emulator.libretro
+package dev.kotlinds.pokemonclient.libretro
 
 import dev.kotlinds.libretrokmp.Device
 import dev.kotlinds.libretrokmp.JoypadButton

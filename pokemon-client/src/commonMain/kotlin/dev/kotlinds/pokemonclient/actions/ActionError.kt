@@ -41,6 +41,22 @@ sealed interface ActionError {
         override val message get() = "$label can't be chosen for $target"
     }
 
+    /** The move to forget is an HM: the game never lets an HM be forgotten (only a Move Deleter can). */
+    data class HmCannotForget(val move: String) : ActionError {
+        override val code = "HM_CANNOT_FORGET"
+        override val message get() = "$move is an HM move: it can't be forgotten. Choose another move to forget, or keep the old moves (no `forget`)"
+    }
+
+    /**
+     * One step of a batch (several item uses in one action) failed: the steps before it are done ([done]), the ones
+     * after it were not tried. [code] is the failed step's own code.
+     */
+    data class BatchStepFailed(val step: Int, val stepKey: String, val done: List<String>, val cause: ActionError) : ActionError {
+        override val code get() = cause.code
+        override val message get() = "Step ${step + 1} ($stepKey) failed: ${cause.message}" +
+            if (done.isEmpty()) "" else ". Done before it: ${done.joinToString("; ")}"
+    }
+
     /** The cursor could not be brought onto the target (the verification rule refused to confirm). */
     data class VerificationFailed(val step: String, val expected: String, val actual: String, val attempts: Int) : ActionError {
         override val code = "VERIFICATION_FAILED"

@@ -6,6 +6,9 @@ import dev.kotlinds.pokemonclient.state.Awaiting
 import dev.kotlinds.pokemonclient.state.EventLog
 import dev.kotlinds.pokemonclient.state.GameEvent
 import dev.kotlinds.pokemonclient.state.GameState
+import dev.kotlinds.pokemonclient.state.ItemId
+import dev.kotlinds.pokemonclient.state.MonId
+import dev.kotlinds.pokemonclient.state.PartyMon
 import dev.kotlinds.pokemonclient.state.Screen
 import dev.kotlinds.pokemonclient.state.TextSource
 
@@ -26,6 +29,25 @@ class Recorder(
     private var lastText: String? = null
     private var lastBattleMessage: String? = null
 
+    /** A battle message read once, recorded when the next poll reads it again (see [record]). */
+    private var pendingBattleMessage: String? = null
+
+    /**
+     * The last valid reading of every Pokémon seen in the party (by id, kept after it leaves the party): party events
+     * compare against it, never against a single previous frame, so a reading caught mid-rewrite or a Pokémon going
+     * to the PC and back can't make up "reached level 89" or "obtained" events. Levels only go up.
+     */
+    private val known = mutableMapOf<MonId, PartyMon>()
+
+    /** Readings with a party so far, up to [SEED_POLLS]. */
+    private var partyPolls = 0
+
+    /** Bag increases waiting for confirmation (by item id), see [recordItems]. */
+    private val pendingItems = mutableMapOf<ItemId, PendingItem>()
+
+    /** An increase of [delta] to [quantity] of [name] first seen at [since]. */
+    private data class PendingItem(val name: String, val delta: Int, val quantity: Int, val since: Long)
+
     /** The last state decoded by the recorder (null before the first one). */
     val latest: GameState? get() = previous
 
@@ -43,47 +65,51 @@ class Recorder(
     }
 
     private fun record(frame: Long, before: GameState?, now: GameState) {
-        // Text: a field / sign / phone page once it is fully printed, each battle message once.
+        // Text: a field / sign / phone page once it is fully printed (waiting for A, or for a fanfare like "ACE found
+        // one PP Up!"), each battle message once.
         val screen = now.screen
-        if (screen is Screen.Dialogue && screen.source != TextSource.BATTLE && screen.awaiting == Awaiting.INPUT && screen.text != lastText) {
+        if (screen is Screen.Dialogue && screen.source != TextSource.BATTLE && screen.awaiting != Awaiting.TEXT_PRINTING && screen.text != lastText) {
             lastText = screen.text
             log.append { GameEvent.TextShown(it, frame, screen.source, screen.speaker, screen.text) }
         }
-        if (screen !is Screen.Dialogue) lastText = null
+        // A sign's text shows in a banner while the player can still walk (read with A, or walking into the sign).
+        val banner = (screen as? Screen.Overworld)?.banner?.takeIf { it.isNotBlank() && screen.awaiting == Awaiting.INPUT }
+        if (banner != null && banner != lastText) {
+            lastText = banner
+            log.append { GameEvent.TextShown(it, frame, TextSource.SIGN, null, banner) }
+        }
+        // A short transition (a fade while the box stays up) doesn't end the text: it isn't recorded twice.
+        if (screen !is Screen.Dialogue && banner == null && screen !is Screen.Animation) lastText = null
+        // A battle message is recorded once two polls in a row read the same text: the emulated frame can end while
+        // the game is still writing its message buffer, and such a half-written read ("The foe's MAGNETON fai") is
+        // never read twice. Messages stay on screen far longer than two polls.
         val message = now.battle?.message?.takeIf { it.isNotBlank() }
         if (message != null && message != lastBattleMessage) {
-            lastBattleMessage = message
-            log.append { GameEvent.TextShown(it, frame, TextSource.BATTLE, null, message) }
+            if (message == pendingBattleMessage) {
+                lastBattleMessage = message
+                pendingBattleMessage = null
+                log.append { GameEvent.TextShown(it, frame, TextSource.BATTLE, null, message) }
+            } else {
+                pendingBattleMessage = message
+            }
+        } else {
+            pendingBattleMessage = null
         }
         if (now.battle == null) lastBattleMessage = null
 
-        if (before == null) return
+        if (before == null) {
+            now.party.forEach { known[it.id] = it }
+            return
+        }
         val from = before.screen.kind
         val to = screen.kind
         if (from != to) log.append { GameEvent.ScreenChanged(it, frame, from, to) }
 
         // Party: new Pokémon, evolutions, level ups (by stable id, so reordering isn't a change).
-        val old = before.party.associateBy { it.id }
-        for (mon in now.party) {
-            val was = old[mon.id]
-            when {
-                was == null -> if (before.party.isNotEmpty() || now.party.size == 1) {
-                    log.append { GameEvent.PokemonObtained(it, frame, mon.id, mon.displayName) }
-                }
-                was.species != mon.species && !mon.isEgg && !was.isEgg ->
-                    log.append { GameEvent.Evolved(it, frame, mon.id, was.species.name, mon.species.name) }
-                mon.level > was.level -> log.append { GameEvent.LevelUp(it, frame, mon.id, mon.level) }
-            }
-        }
+        recordParty(frame, now.party)
 
-        // Bag: quantities that went up.
-        val oldItems = before.bag?.flatMap { it.items }?.associate { it.item.id to it.quantity }
-        if (oldItems != null) {
-            now.bag?.flatMap { it.items }?.forEach { stack ->
-                val delta = stack.quantity - (oldItems[stack.item.id] ?: 0)
-                if (delta > 0) log.append { GameEvent.ItemReceived(it, frame, stack.item.name, delta) }
-            }
-        }
+        // Bag: quantities that went up, once they stay up for a moment (see [recordItems]).
+        recordItems(frame, before, now)
 
         // Badges.
         val oldBadges = before.player?.badges.orEmpty().toSet()
@@ -91,7 +117,70 @@ class Recorder(
             if (before.player != null) log.append { GameEvent.BadgeReceived(it, frame, badge) }
         }
     }
+
+    /**
+     * Items received: quantities that went up and are still up [ITEM_CONFIRM_FRAMES] frames later. During a battle
+     * the game uses a copy of the bag and writes it back a frame after the battle ends: in between, the save's
+     * older bag shows (balls thrown not yet taken out), which must not look like items received.
+     */
+    private fun recordItems(frame: Long, before: GameState, now: GameState) {
+        val stacks = now.bag?.flatMap { it.items } ?: return
+        val current = stacks.associate { it.item.id to it.quantity }
+        val old = before.bag?.flatMap { it.items }?.associate { it.item.id to it.quantity }
+        if (old != null) stacks.forEach { stack ->
+            val delta = stack.quantity - (old[stack.item.id] ?: 0)
+            if (delta > 0) {
+                val pending = pendingItems[stack.item.id]
+                pendingItems[stack.item.id] = PendingItem(stack.item.name, delta + (pending?.delta ?: 0), stack.quantity, pending?.since ?: frame)
+            }
+        }
+        val iterator = pendingItems.iterator()
+        while (iterator.hasNext()) {
+            val (id, pending) = iterator.next()
+            val quantity = current[id] ?: 0
+            when {
+                quantity < pending.quantity -> iterator.remove()
+                frame - pending.since >= ITEM_CONFIRM_FRAMES -> {
+                    log.append { GameEvent.ItemReceived(it, pending.since, pending.name, pending.delta) }
+                    iterator.remove()
+                }
+            }
+        }
+    }
+
+    /**
+     * Party events from [party] (the state's party: only valid readings, see HgssStateMapper), against [known]: a
+     * Pokémon never seen before was obtained, a new species is an evolution, a level above the highest seen is a
+     * level up.
+     */
+    private fun recordParty(frame: Long, party: List<PartyMon>) {
+        // Right after a save is loaded, the party becomes readable slot by slot: the first readings only teach the
+        // recorder who is there (nobody can be obtained within a second of loading).
+        if (party.isNotEmpty() && partyPolls < SEED_POLLS) {
+            partyPolls++
+            party.forEach { mon -> known[mon.id] = known[mon.id]?.takeIf { it.level > mon.level }?.let { mon.copy(level = it.level) } ?: mon }
+            return
+        }
+        for (mon in party) {
+            val was = known[mon.id]
+            when {
+                was == null -> if (known.isNotEmpty() || party.size == 1) {
+                    log.append { GameEvent.PokemonObtained(it, frame, mon.id, mon.displayName) }
+                }
+                was.species != mon.species && !mon.isEgg && !was.isEgg ->
+                    log.append { GameEvent.Evolved(it, frame, mon.id, was.species.name, mon.species.name) }
+                mon.level > was.level -> log.append { GameEvent.LevelUp(it, frame, mon.id, mon.level, mon.displayName) }
+            }
+            known[mon.id] = if (was != null && mon.level < was.level) mon.copy(level = was.level) else mon
+        }
+    }
 }
+
+/** Readings with a party during which the recorder only learns the party (see [Recorder.recordParty]). */
+internal const val SEED_POLLS = 30
+
+/** Frames a bag increase must last before it is recorded as items received. */
+private const val ITEM_CONFIRM_FRAMES = 8L
 
 /** A short name for the kind of screen, for [GameEvent.ScreenChanged] and logs. */
 val Screen.kind: String

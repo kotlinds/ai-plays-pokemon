@@ -30,6 +30,10 @@ data class GameState(
      * walkthrough-level knowledge: shown to agents only at [dev.kotlinds.pokemonclient.data.KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH].
      */
     val story: StoryState? = null,
+    /** The PC boxes (from the save data, readable anywhere), null when unreadable. */
+    val storage: PcStorage? = null,
+    /** The game's OPTIONS (text speed, battle scene, battle style), null when unreadable. */
+    val options: GameOptions? = null,
 )
 
 /** The story's progress, read from the game's flags and variables (never from what is displayed). */
@@ -62,7 +66,15 @@ data class PlayerInfo(
     val money: Long,
     val badges: List<String>,
     val trainerId: Long,
+    /** Time played, as the game counts it (the "Continue" screen and the trainer card show it). */
+    val playTime: PlayTime? = null,
 )
+
+/** A play time counter. */
+data class PlayTime(val hours: Int, val minutes: Int, val seconds: Int) {
+    /** "24:59" as the game shows it (hours:minutes). */
+    override fun toString() = "$hours:${minutes.toString().padStart(2, '0')}"
+}
 
 /** One bag pocket. */
 data class BagPocket(val name: String, val items: List<BagItem>)
@@ -86,6 +98,17 @@ data class FieldState(
     val objects: List<FieldObject> = emptyList(),
     /** The puzzle of this map (switches, shutters, teleports) and its live state, when the game knows one here. */
     val puzzle: PuzzleState? = null,
+    /**
+     * Map things already taken, by target id (`hidden_item:N` whose flag is set): still in the ROM's events, but
+     * gone from the game.
+     */
+    val pickedUp: Set<String> = emptySet(),
+    /** A trainer saw the player: it walks up to them and a battle follows (until the battle starts). */
+    val trainerEncounter: Boolean = false,
+    /** Whether the map lets the player fly away (outdoors), null when unknown. */
+    val flyAllowed: Boolean? = null,
+    /** Whether the map has a PC (Pokémon storage), null when unknown. */
+    val hasPc: Boolean? = null,
 )
 
 /** A person or object standing on the map. */
@@ -102,6 +125,10 @@ data class FieldObject(
     val role: PersonRole? = null,
     /** For an [FieldObjectKind.OBSTACLE]: which one (it tells the field move that clears it). */
     val obstacle: ObstacleKind? = null,
+    /** For a trainer: who it is, whether it's beaten, how far it sees. */
+    val trainer: FieldTrainer? = null,
+    /** For a shop clerk: what the shop sells, when known before talking. */
+    val catalog: List<ShopItem>? = null,
 )
 
 /** Obstacles placed on the map as objects, told by their sprite. */
@@ -114,6 +141,12 @@ enum class ObstacleKind {
 
     /** A boulder: Strength pushes it one tile. */
     BOULDER,
+
+    /**
+     * An ice block (the Mahogany Gym): sliding on the ice into it pushes it, until it stops against something; two
+     * blocks meeting freeze together (both then face north and can't be pushed).
+     */
+    ICE_BLOCK,
 }
 
 /** People actions look for, told by their sprite (never by what they say). */

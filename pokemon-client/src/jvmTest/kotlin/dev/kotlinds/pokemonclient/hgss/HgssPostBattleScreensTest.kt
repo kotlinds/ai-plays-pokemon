@@ -28,13 +28,17 @@ class HgssPostBattleScreensTest {
 
     private val ampharos = "mon:8dd175d1.76f3a6fb"
 
+    /**
+     * Ampharos (slot 0) and Gyarados (slot 4) fought; Ampharos got its experience first, so Task_GetExp's start slot
+     * is 1 (Kenya) while Gyarados, in slot 4, levels up: the panel used to show Kenya with negative gains.
+     */
     @Test
     fun levelUpPanelWaitsForAWithTheGains() {
-        for (name in listOf("pb_levelup", "pb_levelup_totals")) {
+        for (name in listOf("bt_levelup_slot4", "bt_levelup_slot4_totals")) {
             val s = assertIs<Screen.PressToContinue>(screen(name))
             assertEquals(ContinueReason.LEVEL_UP_STATS, s.reason)
             assertEquals(
-                "GYARADOS Lv35: Max HP 119 (+3), Attack 105 (+4), Defense 61 (+1), Sp. Atk 43 (+1), Sp. Def 82 (+2), Speed 72 (+2)",
+                "GYARADOS Lv35: Max HP 119 (+3), Attack 105 (+4), Defense 61 (+1), Sp. Atk 43 (+1), Sp. Def 82 (+2), Speed 73 (+3)",
                 s.text,
             )
         }

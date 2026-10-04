@@ -76,57 +76,92 @@ object HgssPokemon {
     }
 
     /**
-     * Recovers the blocks of a Pokémon caught in the middle of being encrypted or decrypted. The game decrypts a
-     * Pokémon to read it and encrypts it again right after, one word at a time, with the flags cleared first
-     * (`ReleaseMonLock`, src/pokemon.c:135-146): a frame can end in the middle of that loop, and a field task reads
-     * the lead Pokémon every frame. The words before some split point are then in one state and the rest in the
-     * other. Tries every split, both ways, and keeps the one whose sum gives the checksum (a 1 in 65536 chance per
-     * split of matching by accident: the plausibility check of the decoded values backs it up). Read only: RAM is
-     * never written.
+     * The plain box blocks (0x80 bytes) that [raw]'s blocks can be, most likely first, keeping only those whose sum
+     * gives the checksum.
+     *
+     * The game decrypts a Pokémon to read or write it and encrypts it again right after, one word at a time, and a
+     * frame can end anywhere in that loop (a field task reads the lead Pokémon every frame):
+     * - `GetMonData` / `SetMonData` (src/pokemon.c:410, 886) decrypt the party data then the blocks, work, and encrypt
+     *   both again **without touching the flags**: with flags "encrypted" the blocks can be encrypted, plain, or torn
+     *   either way;
+     * - `AcquireMonLock` sets the flags first then decrypts; `ReleaseMonLock` clears them first then encrypts.
+     * A torn loop leaves the words before some split in one state and the rest in the other: every split is tried,
+     * both ways (a 1 in 65536 chance per split of matching by accident, which the plausibility checks back up).
+     * Read only: RAM is never written.
      */
-    private fun torn(raw: ByteArray, off: Int, checksum: Int): ByteArray? {
+    private fun boxCandidates(raw: ByteArray, off: Int, checksum: Int, flaggedPlain: Boolean): List<ByteArray> {
         val words = A.BOX_BLOCKS_SIZE / 2
-        val encrypted = raw.copyOfRange(off, off + A.BOX_BLOCKS_SIZE)
-        val decrypted = encrypted.copyOf().also { crypt(it, 0, it.size, checksum.toLong()) }
-        for (split in 1 until words) {
-            // Being encrypted: words before the split are already encrypted, the rest still plain.
-            val encrypting = decrypted.copyOf().also { encrypted.copyInto(it, split * 2, split * 2, encrypted.size) }
-            if (blockSum(encrypting, 0) == checksum) return encrypting
-            // Being decrypted: words before the split are already plain, the rest still encrypted.
-            val decrypting = decrypted.copyOf().also { encrypted.copyInto(it, 0, 0, split * 2) }
-            if (blockSum(decrypting, 0) == checksum) return decrypting
-        }
-        return null
+        val asIs = raw.copyOfRange(off, off + A.BOX_BLOCKS_SIZE)
+        val decrypted = asIs.copyOf().also { crypt(it, 0, it.size, checksum.toLong()) }
+        val whole = (if (flaggedPlain) listOf(asIs, decrypted) else listOf(decrypted, asIs)).filter { blockSum(it, 0) == checksum }
+        if (whole.isNotEmpty()) return whole
+        return (1 until words).asSequence().flatMap { split ->
+            sequenceOf(
+                // Being encrypted: words before the split are already encrypted, the rest still plain.
+                decrypted.copyOf().also { asIs.copyInto(it, split * 2, split * 2, asIs.size) },
+                // Being decrypted: words before the split are already plain, the rest still encrypted.
+                decrypted.copyOf().also { asIs.copyInto(it, 0, 0, split * 2) },
+            )
+        }.filter { blockSum(it, 0) == checksum }.take(MAX_BOX_CANDIDATES).toList()
     }
 
-    /** Decodes a 0xEC-byte party Pokémon (or a 0x88-byte box Pokémon when `raw.size < 0xEC`). Returns null for empty slots. */
-    fun decode(raw: ByteArray): Decoded? {
-        if (raw.size < 0x88) return null
-        val data = raw.copyOf()
-        val pid = u32(data, 0)
-        val flags = u16(data, A.BOX_FLAGS.toInt())
-        val checksum = u16(data, A.BOX_CHECKSUM.toInt())
-        val boxDecrypted = flags and 2 != 0
-        val partyDecrypted = flags and 1 != 0
-        val blocksOff = A.BOX_BLOCKS.toInt()
-        if (!boxDecrypted) crypt(data, blocksOff, A.BOX_BLOCKS_SIZE, checksum.toLong())
-        var sum = blockSum(data, blocksOff)
-        var checksumOk = boxDecrypted || sum == checksum
-        if (!checksumOk) torn(raw, blocksOff, checksum)?.let { fixed ->
-            fixed.copyInto(data, blocksOff)
-            sum = checksum
-            checksumOk = true
+    /**
+     * The plain party data (0x64 bytes) that [raw]'s can be, most likely first. It has no checksum: the caller's
+     * plausibility check (level against experience, stats against the base stats...) picks the right one. Same
+     * torn loops as [boxCandidates]; only the first [PARTY_CHECKED_WORDS] words (status, level, HP, stats) are shown,
+     * so later splits give the same values as the whole states.
+     */
+    private fun partyCandidates(raw: ByteArray, off: Int, pid: Long, flaggedPlain: Boolean): Sequence<ByteArray> {
+        val asIs = raw.copyOfRange(off, off + A.PARTY_DATA_SIZE)
+        val decrypted = asIs.copyOf().also { crypt(it, 0, it.size, pid) }
+        val whole = if (flaggedPlain) sequenceOf(asIs, decrypted) else sequenceOf(decrypted, asIs)
+        val torn = (1 until PARTY_CHECKED_WORDS).asSequence().flatMap { split ->
+            sequenceOf(
+                decrypted.copyOf().also { asIs.copyInto(it, split * 2, split * 2, asIs.size) },
+                decrypted.copyOf().also { asIs.copyInto(it, 0, 0, split * 2) },
+            )
         }
-        if (pid == 0L && checksum == 0 && sum == 0) return null // empty slot
-        val order = A.POKEMON_BLOCK_OFFSETS[((pid shr 13) and 31).toInt()]
-        fun block(which: Int) = data.copyOfRange(blocksOff + order[which], blocksOff + order[which] + 0x20)
-        val party = if (raw.size >= 0xEC) {
-            val pOff = A.PARTY_DATA.toInt()
-            if (!partyDecrypted) crypt(data, pOff, A.PARTY_DATA_SIZE, pid)
-            data.copyOfRange(pOff, pOff + A.PARTY_DATA_SIZE)
-        } else null
-        return Decoded(pid, block(0), block(1), block(2), block(3), party, checksumOk)
+        return whole + torn
     }
+
+    /**
+     * Decodes a 0xEC-byte party Pokémon (or a 0x88-byte box Pokémon when `raw.size < 0xEC`). Returns null for empty
+     * slots.
+     *
+     * The structure may be caught while the game encrypts or decrypts it (see [boxCandidates]): every way it can be
+     * is tried, and the first one [accept] takes is returned (the plausibility check of the caller, see
+     * [HgssMonCheck]). When none is accepted, the most likely reading is returned as is (the caller then rejects it);
+     * its [Decoded.checksumOk] is false when no box reading matched the checksum.
+     */
+    fun decode(raw: ByteArray, accept: (Decoded) -> Boolean = { it.checksumOk }): Decoded? {
+        if (raw.size < 0x88) return null
+        val pid = u32(raw, 0)
+        val flags = u16(raw, A.BOX_FLAGS.toInt())
+        val checksum = u16(raw, A.BOX_CHECKSUM.toInt())
+        val blocksOff = A.BOX_BLOCKS.toInt()
+        val boxes = boxCandidates(raw, blocksOff, checksum, flaggedPlain = flags and 2 != 0)
+        if (pid == 0L && checksum == 0 && boxes.isNotEmpty()) return null // empty slot (zeroed then encrypted)
+        val order = A.POKEMON_BLOCK_OFFSETS[((pid shr 13) and 31).toInt()]
+        fun decoded(box: ByteArray, party: ByteArray?, checksumOk: Boolean): Decoded {
+            fun block(which: Int) = box.copyOfRange(order[which], order[which] + 0x20)
+            return Decoded(pid, block(0), block(1), block(2), block(3), party, checksumOk)
+        }
+        val parties = if (raw.size >= 0xEC) partyCandidates(raw, A.PARTY_DATA.toInt(), pid, flaggedPlain = flags and 1 != 0) else sequenceOf(null)
+        for (box in boxes) for (party in parties) {
+            val mon = decoded(box, party, checksumOk = true)
+            if (accept(mon)) return mon
+        }
+        // Nothing plausible: the most likely reading, for the caller's diagnostics.
+        val box = boxes.firstOrNull()
+            ?: raw.copyOfRange(blocksOff, blocksOff + A.BOX_BLOCKS_SIZE).also { if (flags and 2 == 0) crypt(it, 0, it.size, checksum.toLong()) }
+        return decoded(box, parties.first(), checksumOk = boxes.isNotEmpty())
+    }
+
+    /** Box readings matching the checksum tried at most (normally one). */
+    private const val MAX_BOX_CANDIDATES = 4
+
+    /** Words of the party data that are shown and checked: status (2), level and capsule, HP, max HP, 5 stats. */
+    private const val PARTY_CHECKED_WORDS = 10
 
     /** Status condition word (STATUS_* include/constants/battle.h:296). */
     fun statusName(status: Long, hp: Int? = null): String {

@@ -37,13 +37,26 @@ class HgssMessagesTest {
 
     @Test
     fun `decompresses 9-bit lines`() {
-        val codes = listOf(0x12B, 0x150, 0x15F) // three printable codes below 0x1FF
+        // Packed like NPC trainer names: 9-bit codes, 15 bits per u16 (src/pm_string.c String_Cat_HandleTrainerName).
+        val codes = listOf(0x12B, 0x150, 0x15F, 0x14C) // printable codes below 0x1FF
         var bits = 0L
         var n = 0
         for (c in codes + 0x1FF) { bits = bits or (c.toLong() shl n); n += 9 }
-        val packed = (0 until (n + 15) / 16).map { ((bits shr (it * 16)) and 0xFFFF).toInt() }
+        // 15 bits per u16 (String_Cat_HandleTrainerName, src/pm_string.c), the top bit unused.
+        val packed = (0 until (n + 14) / 15).map { ((bits shr (it * 15)) and 0x7FFF).toInt() }
         val file = HgssMessageFile(encrypt(7, listOf(listOf(HgssMessageFile.COMPRESSED) + packed)))
         assertEquals(codes.joinToString("") { HgssCharmap.table.getValue(it) }, file.line(0))
+    }
+
+    @Test
+    fun `decodes a packed trainer name read from RAM`() {
+        val codes = listOf(0x12D, 0x145, 0x156) // "C", "a", "r"
+        var bits = 0L
+        var n = 0
+        for (c in codes + 0x1FF) { bits = bits or (c.toLong() shl n); n += 9 }
+        val packed = listOf(HgssText.TRAINER_NAME_CODE) + (0 until (n + 14) / 15).map { ((bits shr (it * 15)) and 0x7FFF).toInt() }
+        val name = (packed + List(8 - packed.size) { 0 }).toIntArray()
+        assertEquals(codes.joinToString("") { HgssCharmap.table.getValue(it) }, HgssText.decode(name))
     }
 
     /** Builds a message file with the game's encryption (inverse of src/msgdata.c Decrypt1 / Decrypt2). */

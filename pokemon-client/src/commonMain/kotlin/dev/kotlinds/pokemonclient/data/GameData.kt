@@ -270,7 +270,60 @@ data class MoveInfo(
     val priority: Int,
     /** Chance in percent of the secondary effect, 0 when none. */
     val effectChance: Int,
+    /**
+     * True for moves whose damage ignores type effectiveness (Seismic Toss, Night Shade, Dragon Rage, SonicBoom, Super
+     * Fang, Psywave, Endeavor, Counter, Mirror Coat, Metal Burst, Bide, one-hit KO moves): only a type immunity
+     * (no effect) applies, never x2 / x0.5.
+     */
+    val fixedDamage: Boolean = false,
+    /** Who the move hits (one target, both foes, everyone but the user...). */
+    val target: MoveTarget = MoveTarget.SELECTED,
 )
+
+/**
+ * Who a move hits, from the game's move range (`RANGE_*` flags, include/constants/moves.h). In single battles every
+ * move hits the one foe (or the user); the difference matters in double battles.
+ */
+enum class MoveTarget {
+    /** One target chosen by the player (any adjacent battler). */
+    SELECTED,
+
+    /** One target picked by the move itself (Curse depends on the user's type, Counter on who hit last...). */
+    DEPENDS,
+
+    /** A random foe (Thrash, Outrage...). */
+    RANDOM_FOE,
+
+    /** Both foes at once (Icy Wind, Rock Slide, Blizzard...). */
+    ALL_FOES,
+
+    /** Every other battler, the ally included (Earthquake, Surf, Discharge, Explosion...). */
+    ALL_OTHERS,
+
+    /** The user only (Swords Dance, Recover...). */
+    USER,
+
+    /** The user's side of the field (Reflect, Light Screen...). */
+    USER_SIDE,
+
+    /** The whole field (weather, Trick Room...). */
+    FIELD,
+
+    /** The foes' side of the field (Spikes...). */
+    FOES_SIDE,
+
+    /** The ally only (Helping Hand). */
+    ALLY,
+
+    /** The user or its ally (Acupressure). */
+    USER_OR_ALLY,
+
+    /** One foe in front (Me First). */
+    FRONT;
+
+    /** True when the move hits several battlers at once (its power is reduced in doubles, it may hit the ally). */
+    val isSpread: Boolean get() = this == ALL_FOES || this == ALL_OTHERS
+}
 
 /** Data of one item. */
 data class ItemInfo(

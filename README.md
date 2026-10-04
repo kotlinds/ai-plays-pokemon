@@ -18,7 +18,8 @@ What every AI gets:
 - **hands**, depending on the mode you pick:
   - **Pure**: the controller, nothing more: "which button do I press?" among the 12 DS buttons (+ wait);
   - **Assisted**: the buttons plus actions carried out by code ("walk to the stairs and take them", "talk to Mom",
-    "choose YES", "explore north"): the AI still decides what to do, code does the walking;
+    "choose YES", "go to Route 30", "surf across"): the AI still decides what to do, code does the walking (across
+    floors and maps, with Surf, Cut, Strength, Waterfall... used on the way);
   - **Hybrid**: assisted actions picked by a fast decision model (Jev), with an LLM planner called when it hesitates,
     loops, or periodically, whose goal the fast model then follows.
 
@@ -54,9 +55,11 @@ gets four tools, always the same:
 - `get_state`: the screen (with the ids of its entries), messages and events since the last call, the team, the
   battle (with the estimated effectiveness of each move at the Pokédex knowledge level), a text map of the
   surroundings with the ids of exits, people and signs, and the actions possible now with their valid values;
-- `act`: one typed action (`{"type": "buy", "item": "Poke Ball", "quantity": 5}`, `{"type": "go_to", "target":
-  "warp:3"}`, `{"type": "attack", "move": "move:85"}`...), optionally followed by up to 8 more (`then`), a note to
-  itself and a short reasoning; a refused action always says why (typed error);
+- `act`: one typed action (`{"type": "buy", "items": [{"item": "Poke Ball", "quantity": 5}]}`, `{"type": "go_to",
+  "map": "Route 30"}`, `{"type": "attack", "move": "move:85"}`, `pc`, `step`, `set_options`, `soft_reset`...),
+  optionally followed by up to 8 more (`then`), a note to itself and a short reasoning; a refused action always says
+  why (typed error). The answer is compact by default (only what changed: messages, screen, position, team or "team
+  unchanged"); `detail: "full"` returns the whole state like `get_state`;
 - `lookup`: game knowledge from the ROM (species, moves, items, types, learnsets, TMs), within the knowledge level;
 - `screenshot`: both screens, for anything the state doesn't describe.
 
@@ -119,7 +122,7 @@ server implementing the same `POST /v1/systemone` protocol, e.g. an open-weight 
  └────────────────────────────────────────────────────────────────────────┘
 ```
 
-Two modules:
+Three modules:
 
 - **`pokemon-client`** (Kotlin Multiplatform, as much as possible in `commonMain`) is the library: it knows Pokémon,
   not emulators. A game reads the RAM into one common, typed model: `GameState` with a sealed `Screen` (every menu
@@ -133,15 +136,17 @@ Two modules:
   a single console thread that drives time (agents get a lease; the human can always take over), and connects the
   deciders: our loop (`PokemonPlayer` with Jev, LLMs through Koog, or `claude -p`) or an external agent through MCP.
 
-A headless **bench** (`me.nathanfallet.aiplayspokemon.dev.BenchKt`, see its KDoc) runs commands and actions without
-the window (`BENCH_WINDOW=1` shows it live), and writes sparse RAM fixtures for the unit tests:
+- **`pokemon-client-libretro`** (JVM) plugs the library into a libretro core: `LibretroConsole` (the `ConsolePort`
+  over libretro-kmp), save formats, and a headless **bench** (`dev.kotlinds.pokemonclient.libretro.bench.BenchKt`,
+  see its KDoc) that runs commands and actions without the app (`BENCH_WINDOW=1` shows it live) and writes sparse RAM
+  fixtures for the unit tests. A new game can be brought up with the library and this module only:
 
 ```bash
-POKEMON_ROM=/path/to/rom.nds ./gradlew -q devRun -PdevMain=me.nathanfallet.aiplayspokemon.dev.BenchKt \
-  "-PdevArgs=<data dir>|<out dir>|load:my.state|step:1|act:{\"type\":\"heal\"}|shot:after"
+POKEMON_ROM=/path/to/rom.nds EMULATOR_CORE=desmume ./gradlew -q :pokemon-client-libretro:bench \
+  "-PbenchArgs=<data dir>|<out dir>|load:my.state|step:1|act:{\"type\":\"heal\"}|shot:after"
 ```
 
-Tests: `./gradlew :pokemon-client:jvmTest test` (with `POKEMON_ROM` set, the ROM tests run too); coverage with
+Tests: `./gradlew :pokemon-client:jvmTest :pokemon-client-libretro:test test` (with `POKEMON_ROM` set, the ROM tests run too); coverage with
 `./gradlew koverHtmlReport`.
 
 ### Pure, assisted, hybrid: why several modes?

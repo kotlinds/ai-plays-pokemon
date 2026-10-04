@@ -41,6 +41,22 @@ class LookupTest {
         assertEquals("300", none.lookup(LookupKind.ITEM, "Potion").getOrThrow()["price"]!!.jsonPrimitive.content)
         assertTrue(lookup().lookup(LookupKind.MOVE, "no such move").isFailure)
     }
+
+    @Test
+    fun itemsAreFoundByTheirNames() {
+        val none = lookup(KnowledgeLevel.NONE)
+        for ((name, id) in listOf("Revive" to 28, "REVIVE" to 28, "Full Restore" to 23, "Poke Ball" to 4, "Poké Ball" to 4, "Max Repel" to 77, "HP Up" to 45, "Parlyz Heal" to 22, "X Sp. Def" to 62)) {
+            assertEquals("item:$id", none.lookup(LookupKind.ITEM, name).getOrThrow()["id"]!!.jsonPrimitive.content, name)
+        }
+    }
+
+    @Test
+    fun unknownNamesListCloseMatches() {
+        val error = lookup(KnowledgeLevel.NONE).lookup(LookupKind.ITEM, "Revve").exceptionOrNull()?.message.orEmpty()
+        assertTrue("Revive" in error, error)
+        val move = lookup().lookup(LookupKind.MOVE, "thunderbol").exceptionOrNull()?.message.orEmpty()
+        assertTrue("Thunderbolt" in move, move)
+    }
 }
 
 /** Estimated effectiveness on a real battle fixture with the ROM's type chart (skipped without `POKEMON_ROM`). */

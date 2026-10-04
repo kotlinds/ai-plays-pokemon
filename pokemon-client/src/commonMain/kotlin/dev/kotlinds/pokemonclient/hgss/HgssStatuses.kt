@@ -42,7 +42,7 @@ object HgssStatuses {
         val bind = (s2 shr 13) and 0x7
         if (bind != 0) add(VolatileStatus.Bound(bind))
         val attract = (s2 shr 16) and 0xF
-        if (attract != 0) add(VolatileStatus.Infatuated(BattlerRef.entries.firstOrNull { attract and (1 shl it.battlerId) != 0 }))
+        if (attract != 0) add(VolatileStatus.Infatuated((0 until 4).firstOrNull { attract and (1 shl it) != 0 }?.let { battlerRef(it) }))
         if (s2 and (1 shl 20) != 0) add(VolatileStatus.FocusEnergy)
         if (s2 and (1 shl 21) != 0) add(VolatileStatus.Transformed)
         if (s2 and (1 shl 22) != 0) add(VolatileStatus.Recharging)
@@ -64,20 +64,29 @@ object HgssStatuses {
         if ((c shr 8) and 0x7 != 0) add(VolatileStatus.Taunted)
     }
 
-    /** Battler ids used by the game: 0 player (left), 1 foe (left), 2 player (right), 3 foe (right). */
-    private val BattlerRef.battlerId: Int
-        get() = when (this) {
-            BattlerRef.PLAYER_LEFT -> 0
-            BattlerRef.FOE_LEFT -> 1
-            BattlerRef.PLAYER_RIGHT -> 2
-            BattlerRef.FOE_RIGHT -> 3
-        }
-
-    /** The [BattlerRef] of a game battler id. */
-    fun battlerRef(battlerId: Int): BattlerRef = when (battlerId) {
+    /**
+     * The [BattlerRef] of a game battler id. Battler `i` has the touch-screen layout slot `i`
+     * (`BATTLER_TYPE_*_SIDE_SLOT_n`, see `sTouchscreenRectTargetMenuButtons`, src/battle/battle_input.c:464): 0 the
+     * player's left, 1 the opponent's RIGHT (its first Pokémon stands on the right as the player sees it), 2 the
+     * player's right, 3 the opponent's left. Verified live in a double battle (Route 37 twins: battler 1 Marill is
+     * drawn on the right, on both screens). In a single battle the only foe (battler 1) is called [BattlerRef.FOE_LEFT].
+     */
+    fun battlerRef(battlerId: Int, doubles: Boolean = false): BattlerRef = when (battlerId) {
         0 -> BattlerRef.PLAYER_LEFT
-        1 -> BattlerRef.FOE_LEFT
+        1 -> if (doubles) BattlerRef.FOE_RIGHT else BattlerRef.FOE_LEFT
         2 -> BattlerRef.PLAYER_RIGHT
-        else -> BattlerRef.FOE_RIGHT
+        else -> BattlerRef.FOE_LEFT
     }
+
+    /**
+     * True when the ability of a battler was announced on screen: one of the switch-in announcement flags of
+     * `BattleMon` (+0x28: intimidate, trace, download, anticipation, forewarn, slow start, frisk, mold breaker,
+     * pressure; each only set when the battler has that ability, overlay_12_0224E4FC.c:3196+), or Flash Fire
+     * activated (bit 31 of the counters word, `UnkBattlemonSub.flashFire`).
+     */
+    fun abilityAnnounced(announceFlags: Long, counters: Long): Boolean =
+        announceFlags and ANNOUNCED_ABILITY_BITS != 0L || (counters shr 31) and 1L == 1L
+
+    /** Bits 1-6 and 8-10 of the `BattleMon` flags word (bit 0 is "sent out", bit 7 "slow start ended"). */
+    private const val ANNOUNCED_ABILITY_BITS = 0x77EL
 }

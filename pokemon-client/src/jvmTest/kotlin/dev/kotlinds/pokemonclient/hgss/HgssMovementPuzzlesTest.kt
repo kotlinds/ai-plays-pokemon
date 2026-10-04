@@ -1,5 +1,7 @@
 package dev.kotlinds.pokemonclient.hgss
 
+import dev.kotlinds.pokemonclient.Direction
+
 import dev.kotlinds.pokemonclient.world.Edge
 import dev.kotlinds.pokemonclient.world.FieldMoveKind
 import dev.kotlinds.pokemonclient.world.LiveObject
@@ -58,6 +60,7 @@ class HgssMovementPuzzlesTest {
         val area = world.areaOf(237)!!
         val boulder = Overlay(listOf(LiveObject(18, 12, null, clearedBy = FieldMoveKind.STRENGTH)))
         val failed = assertIs<Pathfinder.Result.Failed>(Pathfinder(area, boulder).route(Node(23, 6), RouteOptions()) { it.x == 18 && it.y == 12 })
-        assertEquals(RouteFailure.NeedsFieldMove(FieldMoveKind.STRENGTH, 18, 12), failed.failure)
+        // With the tile to use it from and the direction to face.
+        assertEquals(RouteFailure.NeedsFieldMove(FieldMoveKind.STRENGTH, 18, 12, Node(19, 12), Direction.WEST), failed.failure)
     }
 }

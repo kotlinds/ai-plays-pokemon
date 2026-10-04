@@ -64,12 +64,11 @@ class GameMcpServer(
     private val mutex = Mutex()
     private var engine: EmbeddedServer<*, *>? = null
 
-    private val _activity = MutableStateFlow(Activity())
+    private val _activity = MutableStateFlow(AgentActivity())
 
     /** Calls made by the external agent, shown in the UI. */
-    val activity: StateFlow<Activity> = _activity.asStateFlow()
+    val activity: StateFlow<AgentActivity> = _activity.asStateFlow()
 
-    data class Activity(val calls: Int = 0, val lastAction: String? = null, val lastReasoning: String? = null)
 
     val url get() = "http://localhost:$port/mcp"
 
@@ -110,7 +109,10 @@ class GameMcpServer(
             ),
         ) { request ->
             val full = request.arguments?.get("detail")?.jsonPrimitive?.contentOrNull == "full"
-            mutex.withLock { text(session.describe(full).encode()) }
+            mutex.withLock {
+                val started = System.currentTimeMillis()
+                text(session.describe(full).encode()).also { deliver(started) }
+            }
         }
         addTool(
             name = "act",
@@ -122,11 +124,16 @@ class GameMcpServer(
                     put("action", session.registry.jsonSchema(mode()))
                     putJsonObject("then") {
                         put("type", "array")
-                        put("description", "Optional further actions done right after, only when sure (max 8); stops at the first problem.")
+                        put("description", "Optional further actions done right after, only when sure (max 8); stops at the first problem (or after ~35 s: `not_done` lists what was left). The answer covers every step: `performed` and all the messages.")
                     }
                     putJsonObject("note") {
                         put("type", "string")
                         put("description", "Optional note to yourself (goal, plan), given back with the full state.")
+                    }
+                    putJsonObject("detail") {
+                        put("type", "string")
+                        put("enum", JsonArray(listOf("compact", "full").map { kotlinx.serialization.json.JsonPrimitive(it) }))
+                        put("description", "compact (default): the screen, messages, errors, position and battle; the team only when it changed, the map only when you moved, action names only. full: everything, like get_state.")
                     }
                     putJsonObject("reasoning") {
                         put("type", "string")
@@ -139,22 +146,26 @@ class GameMcpServer(
             val arguments = request.arguments ?: JsonObject(emptyMap())
             val reasoning = arguments["reasoning"]?.jsonPrimitive?.contentOrNull
             mutex.withLock {
-                val actions = listOfNotNull(arguments["action"] as? JsonObject) + (arguments["then"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>().take(MAX_THEN)
-                if (actions.isEmpty()) return@withLock error("`action` must be an object like {\"type\": \"press\", \"button\": \"a\"}")
-                arguments["note"]?.jsonPrimitive?.contentOrNull?.let { session.act(GameAction.Note(it)) }
-                var result: JsonObject? = null
-                val performed = mutableListOf<String>()
-                for (json in actions) {
-                    val action = session.registry.parse(json, mode()).getOrElse { error ->
+                val json = listOfNotNull(arguments["action"] as? JsonObject) + (arguments["then"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>().take(MAX_THEN)
+                if (json.isEmpty()) return@withLock error("`action` must be an object like {\"type\": \"press\", \"button\": \"a\"}")
+                arguments["note"]?.jsonPrimitive?.contentOrNull?.let { session.addNote(it) }
+                val actions = json.map { step ->
+                    session.registry.parse(step, mode()).getOrElse { error ->
                         val message = (error as? ActionException)?.error?.message ?: error.message ?: "invalid action"
                         return@withLock error("$message. Call get_state for the valid actions.")
                     }
-                    result = running { session.act(action) }
-                    performed += action.key
-                    if (result["ok"]?.jsonPrimitive?.contentOrNull != "true") break
                 }
-                _activity.update { it.copy(calls = it.calls + 1, lastAction = performed.joinToString(" → "), lastReasoning = reasoning) }
-                text(result!!.encode())
+                val label = actions.joinToString(" → ") { it.key }
+                // Shown as in progress right away: the comment appears while the action happens.
+                _activity.update { it.started(label, reasoning) }
+                val started = System.currentTimeMillis()
+                // One response for the whole chain: every step's messages, every step performed.
+                val compact = arguments["detail"]?.jsonPrimitive?.contentOrNull != "full"
+                val result = running { session.act(actions, budgetMillis = THEN_BUDGET_MILLIS, compact = compact) }
+                deliver(started)
+                val ok = result["ok"]?.jsonPrimitive?.contentOrNull == "true"
+                _activity.update { it.finished(ok, if (ok) null else result["error"]?.let { e -> (e as? JsonObject)?.get("code")?.jsonPrimitive?.contentOrNull ?: e.toString() }) }
+                text(result.encode())
             }
         }
         addTool(
@@ -193,6 +204,15 @@ class GameMcpServer(
         }
     }
 
+    /**
+     * The response of a call that started at [started] is about to be sent: unless it took so long that the client
+     * has probably given up on it (its request timeout), what it tells is forgotten; otherwise it is repeated with
+     * the next response (see [GameSession.confirmDelivered]).
+     */
+    private fun deliver(started: Long) {
+        if (System.currentTimeMillis() - started < DELIVERY_TIMEOUT_MILLIS) session.confirmDelivered()
+    }
+
     /** Runs [block] with the free run allowed, then freezes the game again while the agent thinks (if enabled). */
     private suspend fun <T> running(block: suspend () -> T): T {
         host.resume()
@@ -217,6 +237,12 @@ class GameMcpServer(
     private companion object {
         val json = Json { prettyPrint = false }
         const val MAX_THEN = 8
+
+        /** MCP clients give up on a request after 60 s by default: a response slower than this may be lost. */
+        const val DELIVERY_TIMEOUT_MILLIS = 50_000L
+
+        /** A `then` chain starts no further step after this long, so the whole call stays under the client's timeout. */
+        const val THEN_BUDGET_MILLIS = 35_000L
 
         const val INSTRUCTIONS =
             "You are playing a Pokémon game on a Nintendo DS through this server. Call get_state to see the screen (decoded from " +

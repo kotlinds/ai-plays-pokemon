@@ -68,31 +68,83 @@ internal object PartyBagPlans {
         }
     }
 
-    /** Uses an item out of battle: bag → item → USE → the Pokémon when it asks for one. */
+    /**
+     * Uses one or several items ([GameAction.UseItem.uses]) in one bag session: bag → item → USE → the Pokémon when it
+     * asks for one → the move for a PP restoring item ("Restore which move?"), then A through the effect's message (it
+     * would otherwise close on its own after a few seconds) and on to the next item, the bag still open. Each use is
+     * checked on the item's quantity (consumed = it worked; "It won't have any effect" keeps it). In battle, the
+     * battle recipe ([BattleItemPlans.useItem]) is used instead.
+     */
     val useItem = ActionPlan<GameAction.UseItem> { action, context ->
-        val countBefore = quantity(context.state(), action.item)
-        bagItem(context, action.item).andThen { itemEntry ->
+        if (context.state().battle != null) return@ActionPlan BattleItemPlans.useItem.run(action, context)
+        val done = mutableListOf<String>()
+        for ((index, use) in action.uses.withIndex()) {
+            when (val outcome = useOneItem(use, context)) {
+                is ActionOutcome.Done -> done += use.key + (outcome.detail?.let { ": $it" } ?: "")
+                is ActionOutcome.Failed -> {
+                    closeToOverworld(context)
+                    val error = if (action.uses.size == 1) outcome.error else ActionError.BatchStepFailed(index, use.key, done, outcome.error)
+                    return@ActionPlan ActionOutcome.Failed(error)
+                }
+            }
+        }
+        closeToOverworld(context)
+        ActionOutcome.Done(done.joinToString("; "))
+    }
+
+    /** One field item use, from the overworld or from the bag left open by the previous use. */
+    private fun useOneItem(use: ItemUse, context: PlanContext): ActionOutcome {
+        val countBefore = quantity(context.state(), use.item)
+        val reached = bagItem(context, use.item).andThen { itemEntry ->
             context.navigator.choose(Screen.Bag::class, itemEntry.label) { it.id == itemEntry.id }
         }.andThen {
             context.navigator.choose(Screen.ContextMenu::class, "USE") { it.id == "option:use" }
         }.andThen { after ->
-            val grid = after.screen as? Screen.PartyGrid
-            if (grid != null) {
-                val mon = action.target
-                    ?: return@andThen Step.Failed(ActionError.InvalidParameter("target", "none", grid.entries.filter { it.id.startsWith("mon:") }.map { it.id }))
-                context.navigator.choose(Screen.PartyGrid::class, "the Pokémon") { it.id == mon.toString() }
-            } else Step.Done(after)
-        }.then {
-            closeToOverworld(context)
-            // Consumable items leave the bag when they work; "It won't have any effect" keeps them (checked on the
-            // quantity, never on the message's words).
-            val countAfter = quantity(context.state(), action.item)
-            when {
-                countAfter < countBefore -> ActionOutcome.Done("${countBefore - countAfter} used, $countAfter left")
-                else -> ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.NO_EFFECT, "${action.item.raw} had no effect", "the item stays in the bag"))
+            val grid = after.screen as? Screen.PartyGrid ?: return@andThen Step.Done(after)
+            val mon = use.target
+                ?: return@andThen Step.Failed(ActionError.InvalidParameter("target", "none", grid.entries.filter { it.id.startsWith("mon:") && it.selectable }.map { it.id }))
+            context.navigator.choose(Screen.PartyGrid::class, "the Pokémon") { it.id == mon.toString() }
+        }.andThen { after ->
+            // Ether, PP Up...: "Restore which move?".
+            if (!isMoveList(after.screen)) return@andThen Step.Done(after)
+            chooseMove(context, after.screen as Screen.Selectable, use.move)
+        }
+        if (reached is Step.Failed) return ActionOutcome.Failed(reached.error)
+        // The effect: A through its messages, until the bag (or the field) is back, or the party grid when the game
+        // refused the item. Never a burst of blind presses: only messages are answered.
+        effect@ for (press in 0 until EFFECT_PRESSES) {
+            val state = context.navigator.settle(maxFrames = EFFECT_SETTLE_FRAMES)
+            when (val screen = state.screen) {
+                is Screen.Dialogue, is Screen.PressToContinue -> {
+                    context.scope.tap(Button.A)
+                    context.navigator.awaitChange(screen, maxFrames = 60)
+                }
+                is Screen.Animation -> context.scope.step(4)
+                else -> break@effect
             }
         }
+        val countAfter = quantity(context.state(), use.item)
+        return when {
+            countAfter < countBefore -> ActionOutcome.Done("${countBefore - countAfter} used, $countAfter left")
+            else -> ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.NO_EFFECT, "${use.item.raw} had no effect", "the item stays in the bag"))
+        }
     }
+
+    /** "Restore which move?" lists: the field one (moves + QUIT) and the battle one (moves + CANCEL). */
+    internal fun isMoveList(screen: Screen): Boolean =
+        screen is Screen.ListMenu && screen.entries.any { it.id.startsWith("move:") } && screen.entries.all { it.id.startsWith("move:") || it.id.startsWith("option:") || it.id.startsWith("slot:") }
+
+    /** Picks [move] on a "Restore which move?" list (typed error listing the moves when it's missing or unknown). */
+    internal fun chooseMove(context: PlanContext, list: Screen.Selectable, move: MoveRef?): Step<GameState> {
+        val moves = list.entries.filter { it.id.startsWith("move:") }
+        val entry = move?.let { ref ->
+            moves.firstOrNull { e -> matchesRef(ref.raw, "move", e.id.removePrefix("move:").toIntOrNull() ?: -1, e.label.substringBefore(" (")) }
+        } ?: return Step.Failed(ActionError.InvalidParameter("move", move?.raw ?: "none", moves.map { "${it.id} = ${it.label}" }))
+        return context.navigator.choose(list::class, entry.label) { it.id == entry.id }
+    }
+
+    private const val EFFECT_PRESSES = 12
+    private const val EFFECT_SETTLE_FRAMES = 240
 
     /** How many of [item] the bag holds. */
     private fun quantity(state: GameState, item: ItemRef): Int = state.bag.orEmpty().flatMap { it.items }
@@ -155,7 +207,7 @@ internal object PartyBagPlans {
      * The value says which way it went.
      */
     fun activateKeyItem(context: PlanContext, item: ItemRef): Step<String> {
-        if (quickUse(context, item)) return Step.Done("with Y")
+        quickUse(context, item)?.let { return Step.Done(it) }
         return bagItem(context, item).andThen { entry ->
             context.navigator.choose(Screen.Bag::class, entry.label) { it.id == entry.id }
         }.andThen {
@@ -183,17 +235,21 @@ internal object PartyBagPlans {
     }
 
     /**
-     * Uses [item] with Y when it's the first registered item and the player stands in the field. Returns false
-     * (nothing pressed) otherwise.
+     * Uses [item] without the bag when it's registered and the player stands in the field: Y for the first registered
+     * item, the game's touch button for the second one ([dev.kotlinds.pokemonclient.PokemonGame.registeredItemTouch]).
+     * Returns how ("with Y"...), or null (nothing pressed) otherwise.
      */
-    fun quickUse(context: PlanContext, item: ItemRef): Boolean {
+    fun quickUse(context: PlanContext, item: ItemRef): String? {
         val state = context.navigator.settle()
-        val onY = state.registeredItems.firstOrNull() ?: return false
-        if (!matchesRef(item.raw, "item", onY.value, state.itemName(onY.value))) return false
-        if (state.screen !is Screen.Overworld || state.screen.awaiting != Awaiting.INPUT) return false
-        context.scope.tap(Button.Y)
+        if (state.screen !is Screen.Overworld || state.screen.awaiting != Awaiting.INPUT) return null
+        val slot = state.registeredItems.indexOfFirst { id -> id != null && matchesRef(item.raw, "item", id.value, state.itemName(id.value)) }
+        val how = when (slot) {
+            0 -> "with Y".also { context.scope.tap(Button.Y) }
+            1 -> "with its touch button".also { context.scope.touch(context.game.registeredItemTouch(1) ?: return null) }
+            else -> return null
+        }
         context.navigator.awaitChange(state.screen)
-        return true
+        return how
     }
 
     private fun GameState.itemName(id: Int) = bag.orEmpty().flatMap { it.items }.firstOrNull { it.item.id.value == id }?.item?.name ?: ""
@@ -260,6 +316,8 @@ internal object PartyBagPlans {
             val state = context.navigator.settle()
             when (state.screen) {
                 is Screen.Overworld -> return
+                // A question about learning a move (Rare Candy...) is the agent's to answer: B would give the move up.
+                is Screen.YesNo, is Screen.MoveSelect -> if (state.battle == null && BattlePlans.isLearnPrompt(state)) return else context.scope.tap(Button.B)
                 is Screen.Dialogue, is Screen.PressToContinue -> context.scope.tap(Button.A)
                 else -> context.scope.tap(Button.B)
             }
@@ -271,13 +329,28 @@ internal object PartyBagPlans {
 
     private const val MAX_CLOSE_PRESSES = 8
 
-    /** Field actions need the player free to act: walking around, or already in a field menu. */
+    /**
+     * Field actions need the player free to act: walking around, or already in a field menu (start menu, the party,
+     * the bag and their menus). Not in the PC's menus: their actions (DEPOSIT, MARKING...) aren't the party's.
+     */
     fun inField(state: GameState): Boolean = state.battle == null && when (val s = state.screen) {
         is Screen.Overworld -> s.awaiting == Awaiting.INPUT
         is Screen.ListMenu -> s.kind == MenuKind.START_MENU
-        is Screen.PartyGrid, is Screen.Bag, is Screen.ContextMenu -> true
+        is Screen.PartyGrid -> true
+        is Screen.Bag -> !s.inBattle
+        is Screen.ContextMenu -> !isPcMenu(s)
         else -> false
     }
+
+    /**
+     * True for the menu opened on a PC box slot: it has entries only the PC offers (DEPOSIT, WITHDRAW, MARKING,
+     * RELEASE, HELD ITEMS), or is the MOVE ITEMS menu (a single GIVE / TAKE then EXIT).
+     */
+    fun isPcMenu(menu: Screen.ContextMenu): Boolean =
+        menu.item == null && (menu.entries.any { it.id in PC_ONLY_ENTRIES } ||
+            (menu.entries.size == 2 && menu.entries[0].id in setOf("option:give", "option:take")))
+
+    private val PC_ONLY_ENTRIES = setOf("option:deposit", "option:withdraw", "option:marking", "option:release", "option:held_items")
 
     fun owns(state: GameState, mon: MonId) = state.party.any { it.id == mon }
 }

@@ -137,6 +137,7 @@ object HgssAddresses {
     const val MO_EVENT_FLAG = 0x1CL
     const val MO_SCRIPT_ID = 0x20L
     const val MO_FACING = 0x28L              // DIR_NORTH 0, SOUTH 1, WEST 2, EAST 3
+    const val MO_PARAM0 = 0x38L              // param[0]: for a trainer (type 1), its sight range in tiles
     const val MO_PREVIOUS_X = 0x58L
     const val MO_PREVIOUS_Z = 0x60L
     const val MO_X = 0x64L                   // global tile X (matrix-wide)
@@ -258,6 +259,7 @@ object HgssAddresses {
     const val SE_LAST_INTERACTED = 0x2CL
     const val SE_SCRIPT_CONTEXTS = 0x38L     // ScriptContext *[3]
     const val SE_STRING_BUFFER_0 = 0x48L     // String *: fully expanded message currently printed (ovFieldMain_ReadAndExpandMsgDataViaBuffer)
+    const val SE_ENGAGED_TRAINER_0_ID = 0x60L // int engagedTrainers[0].trainerId (EngagedTrainer[2] at 0x54, 0x1C each): set when a trainer sees the player
     const val SE_SPECIAL_VARS = 0x8CL        // u16[] VAR_SPECIAL 0x8000..
 
     const val SC_MODE = 0x01L                // 0 stopped, 1 bytecode, 2 native
@@ -330,6 +332,7 @@ object HgssAddresses {
     const val SAVE_BLOCK_NUM = 42
     const val SAVE_PLAYERDATA = 1
     const val SAVE_PARTY = 2
+    const val SAVE_PC_STORAGE = 41           // PCStorage (include/constants/save_arrays.h)
     const val SAVE_BAG = 3
     const val SAVE_FLAGS = 4                 // SaveVarsFlags {u16 vars[0x170]; u8 flags[...]}
     const val SAVE_LOCAL_FIELD_DATA = 5
@@ -347,6 +350,7 @@ object HgssAddresses {
     // PLAYERDATA (include/player_data.h): Options options; PlayerProfile profile; u16 coins; IGT igt
     const val PD_PROFILE = 0x04L
     const val PD_COINS = 0x24L
+    const val PD_PLAY_TIME = 0x26L           // IGT {u16 hours; u8 minutes; u8 seconds} (include/player_data.h)
     const val PP_NAME = 0x00L                // u16[8]
     const val PP_ID = 0x10L
     const val PP_MONEY = 0x14L
@@ -394,6 +398,13 @@ object HgssAddresses {
     const val BS_CTX = 0x30L
     const val BS_MAX_BATTLERS = 0x44L
     const val BS_TRAINER_PARTY = 0x68L       // Party *[4]
+    const val BS_BAG = 0x58L                 // Bag *bag: balls thrown and items used are taken out of it (battle_controller_player.c:1756)
+
+    // BattleSetup (include/battle/battle_setup.h) = OverlayManager.args of the battle app, alive for the whole app
+    // (intro, battle, end, evolutions). It holds copies of the player's party and bag, used by the battle and written
+    // back to the save only when the app ends (sub_0205239C, src/battle/battle_setup.c:418).
+    const val SETUP_PARTY = 0x04L            // Party *party[4]; [0] = the player's
+    const val SETUP_BAG = 0x108L             // Bag *bag (same layout as the save's bag)
     const val BS_TRAINER_ID = 0xA0L          // u16[4]
     const val BS_TRAINERS = 0xACL            // Trainer[4], size 0x34: +1 trainerClass, +0x14 name u16[8]
     const val TRAINER_SIZE = 0x34L
@@ -417,6 +428,7 @@ object HgssAddresses {
     const val BM_TYPE1 = 0x24L
     const val BM_TYPE2 = 0x25L
     const val BM_ABILITY = 0x27L
+    const val BM_ANNOUNCE_FLAGS = 0x28L      // u32: bit0 sendOut, 1 intimidate, 2 trace, 3 download, 4 anticipation, 5 forewarn, 6 slowStart, 8 frisk, 9 moldBreaker, 10 pressure
     const val BM_PP_CUR = 0x2CL
     const val BM_PP_MAX = 0x30L           // u8 movePP[4]: actually the PP Ups (max PP is computed)
     const val BM_LEVEL = 0x34L

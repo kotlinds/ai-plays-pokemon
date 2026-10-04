@@ -1,11 +1,8 @@
-package me.nathanfallet.aiplayspokemon.game
+package dev.kotlinds.pokemonclient
 
 import dev.kotlinds.NdsRom
-import dev.kotlinds.pokemonclient.PokemonGame
 import dev.kotlinds.pokemonclient.hgss.HgssGame
 import dev.kotlinds.pokemonclient.hgss.HgssVersion
-import java.nio.file.Path
-import kotlin.io.path.readBytes
 
 /**
  * Registry of supported ROMs, keyed by the NDS game code.
@@ -21,15 +18,15 @@ object PokemonGames {
         HgssVersion.ALL.forEach { version -> put(version.gameCode) { rom -> HgssGame(version, rom) } }
     }
 
-    /** Returns the reader for [rom], or null when the game isn't supported by the agent. */
-    fun detect(rom: Path): PokemonGame? {
-        val image = runCatching { NdsRom.parse(rom.readBytes()) }.getOrNull() ?: return null
-        return games[image.gameCode]?.invoke(image)
-    }
+    /** The game of [rom] (its maps and data read from it), or null when it isn't supported. */
+    fun detect(rom: NdsRom): PokemonGame? = games[rom.gameCode]?.invoke(rom)
+
+    /** The game of the ROM file contents [bytes], or null when unreadable or not supported. */
+    fun detect(bytes: ByteArray): PokemonGame? = runCatching { NdsRom.parse(bytes) }.getOrNull()?.let(::detect)
 
     /**
-     * The 4-letter game code of an NDS ROM header (read with kotlinds), e.g. "IPKE":
-     * I = DS game, PK = Pokémon HeartGold, E = USA.
+     * The 4-letter game code of an NDS ROM (read with kotlinds), e.g. "IPKE": I = DS game, PK = Pokémon HeartGold,
+     * E = USA. Null when unreadable.
      */
-    fun ndsGameCode(rom: Path): String? = runCatching { NdsRom.parse(rom.readBytes()).gameCode }.getOrNull()
+    fun ndsGameCode(bytes: ByteArray): String? = runCatching { NdsRom.parse(bytes).gameCode }.getOrNull()
 }

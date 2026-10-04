@@ -156,6 +156,7 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
         var app: AppInfo? = null
         var battle: BattleInfo? = null
         var battleSystem: Long? = null
+        var battleSetup: Long? = null
 
         if (subApp != null) {
             val appInit = fn(subApp + A.OM_INIT)
@@ -163,6 +164,7 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             val name = v.appByInit[appInit] ?: A.APP_BY_OVERLAY[appOvy] ?: "app(ovy=$appOvy,init=0x${appInit.toString(16)})"
             if (name == "battle") {
                 mode = GameMode.BATTLE
+                battleSetup = ptr(subApp + A.OM_ARGS)
                 val procState = s32(subApp + A.OM_PROC_STATE)
                 val appExec = s32(subApp + A.OM_EXEC_STATE)
                 if (appExec == 2 && procState == A.BATTLE_STATE_MAIN) {
@@ -223,9 +225,16 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
         // In battle the game works on its own copy of the party (BattleSystem.trainerParty[0], same slot order as the
         // save, values updated live: HP, status, PP); the save's party is only written back when the battle ends.
         val battleParty = if (battle != null) battleSystem?.let { bs -> ptr(bs + A.BS_TRAINER_PARTY)?.let { runCatching { readPartyAt(ctx, it) }.getOrNull() } } else null
+        // Outside the battle proper (intro, end of battle, evolutions after it) the battle app's setup holds the party
+        // the game works on; the save's is only updated when the app ends.
+        val setupParty = if (battleParty.isNullOrEmpty()) battleSetup?.let { ptr(it + A.SETUP_PARTY) }?.let { runCatching { readPartyAt(ctx, it) }.getOrNull() } else null
         val party = battleParty?.takeIf { it.isNotEmpty() }
+            ?: setupParty?.takeIf { it.isNotEmpty() }
             ?: saveData?.let { runCatching { readParty(ctx, it) }.getOrNull() } ?: emptyList()
-        val bag = saveData?.let { runCatching { readBag(it) }.getOrNull() }
+        // Same for the bag: balls thrown and items used in battle come out of the setup's copy.
+        val bag = (battleSystem?.let { ptr(it + A.BS_BAG) } ?: battleSetup?.let { ptr(it + A.SETUP_BAG) })
+            ?.let { runCatching { readBagAt(it) }.getOrNull() }
+            ?: saveData?.let { runCatching { readBag(it) }.getOrNull() }
         val registered = saveData?.let { sd -> saveArray(sd, A.SAVE_BAG) }
             ?.let { b -> (0 until 2).map { u16(b + A.BAG_REGISTERED_ITEMS + 2L * it) } }.orEmpty()
         val story = saveData?.let { runCatching { readStory(it) }.getOrNull() }
@@ -375,6 +384,7 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             messageBoxOpen = open,
             waitingFor = waitingFor,
             scriptId = u16(env + A.SE_ACTIVE_SCRIPT),
+            engagedTrainer = s32(env + A.SE_ENGAGED_TRAINER_0_ID).takeIf { it in 1..MAX_TRAINER_ID },
         )
     }
 
@@ -566,12 +576,30 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             coins = u16(pd + A.PD_COINS),
             badges = badges,
             badgeCount = badges.size,
+            playTime = Triple(u16(pd + A.PD_PLAY_TIME), u8(pd + A.PD_PLAY_TIME + 2), u8(pd + A.PD_PLAY_TIME + 3))
+                .takeIf { (_, m, s) -> m < 60 && s < 60 },
         )
     }
 
     private fun moveInfo(id: Int, pp: Int, maxPp: Int): MoveInfo {
         val d = HgssData.moveData[id]
         return MoveInfo(id, HgssData.moveName(id), pp, maxPp, d?.type, d?.category, d?.power, d?.accuracy)
+    }
+
+    /** Raw bytes of the save's party slots (0xEC each), for diagnostics and fixtures. */
+    fun partyRaw(): List<ByteArray> {
+        val saveData = ptr(v.saveDataPtr) ?: return emptyList()
+        val party = saveArray(saveData, A.SAVE_PARTY) ?: return emptyList()
+        val count = s32(party + A.PARTY_CUR_COUNT).takeIf { it in 0..6 } ?: return emptyList()
+        return (0 until count).mapNotNull { bytes(party + A.PARTY_MONS + it * A.POKEMON_SIZE, A.POKEMON_SIZE.toInt()) }
+    }
+
+    /** Raw bytes of the slots of PC box [box] (0x88 each), for diagnostics. */
+    fun boxRaw(box: Int): List<ByteArray> {
+        val saveData = ptr(v.saveDataPtr) ?: return emptyList()
+        val storage = saveArray(saveData, A.SAVE_PC_STORAGE) ?: return emptyList()
+        val k = HgssKeyboardPcShopAddresses
+        return (0 until k.BOX_SLOTS).mapNotNull { bytes(storage + box * k.PCS_BOX_STRIDE + it * k.BOX_MON_SIZE, k.BOX_MON_SIZE) }
     }
 
     private fun readParty(ctx: Ctx, saveData: Long): List<PartyMon> {
@@ -588,11 +616,9 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
         }
         return (0 until count).mapNotNull { i ->
             val raw = bytes(party + A.PARTY_MONS + i * A.POKEMON_SIZE, A.POKEMON_SIZE.toInt()) ?: return@mapNotNull null
-            val mon = HgssPokemon.decode(raw) ?: return@mapNotNull null
-            val mon2 = toPartyMon(i, mon)
-            if (!mon.checksumOk) ctx.warnings += "party slot $i: checksum mismatch"
-            if (!mon2.plausible) ctx.warnings += "party slot $i: implausible values (species ${mon2.species}, level ${mon2.level}, hp ${mon2.hp}/${mon2.maxHp})"
-            mon2
+            // Every way the structure can be while the game rewrites it is tried; problems name what is still wrong.
+            val mon = HgssPokemon.decode(raw, HgssMonCheck::isPlausible) ?: return@mapNotNull null
+            toPartyMon(i, mon).copy(problems = HgssMonCheck.problems(mon))
         }
     }
 
@@ -628,8 +654,11 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
         )
     }
 
-    private fun readBag(saveData: Long): List<BagPocket>? {
-        val bag = saveArray(saveData, A.SAVE_BAG) ?: return null
+    private fun readBag(saveData: Long): List<BagPocket>? = saveArray(saveData, A.SAVE_BAG)?.let(::readBagAt)
+
+    /** Reads a `Bag` struct (the save's, or the battle's copy). */
+    private fun readBagAt(bag: Long): List<BagPocket>? {
+        if (!inRam(bag, A.BAG_REGISTERED_ITEMS + 4)) return null
         return A.BAG_POCKETS.map { (name, off, n) ->
             val items = (0 until n).mapNotNull { i ->
                 val id = u16(bag + off + 4L * i)
@@ -917,6 +946,7 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
                 label = if (kind == "follower") "your Pokémon (following you)" else HgssLabels.person(spriteName),
                 mapId = s32(o + A.MO_MAP_ID),
                 eventFlag = s32(o + A.MO_EVENT_FLAG),
+                param0 = s32(o + A.MO_PARAM0),
             )
         }
         return out.sortedBy { Math.abs(it.dx) + Math.abs(it.dz) }
@@ -1022,8 +1052,11 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
         /** Half size of the area read around the player (the loaded blocks never reach further). */
         const val AREA_HALF_SIZE = 32
 
+        /** Highest NPC trainer id (trdata has 737 records in HG/SS): beyond, the field is garbage. */
+        const val MAX_TRAINER_ID = 1000
+
         /** Map objects that are things, not people: Cut trees, Rock Smash rocks, boulders. */
-        val OBSTACLE_SPRITES = setOf("TREE", "ROCK", "BREAKROCK")
+        val OBSTACLE_SPRITES = setOf("TREE", "ROCK", "BREAKROCK", "ICE")
 
         /** Every story flag read into [StoryInfo]: the early-game ones and those of the story table. */
         val STORY_FLAGS: List<Int> by lazy { (HgssProgress.FLAGS + HgssStoryTable.flagIds).distinct().sorted() }
@@ -1249,6 +1282,9 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
             heldItem = item.takeIf { it != 0 }?.let { HgssData.itemName(it) },
             moves = moves,
             statStages = stages,
+            abilityId = u8(m + A.BM_ABILITY),
+            heldItemId = item,
+            announceFlags = u32(m + A.BM_ANNOUNCE_FLAGS),
         )
     }
 }

@@ -32,7 +32,7 @@ class HgssWorldFormatsTest {
             .s32((4 shl 8) or (1 shl 1)).bytes()
         header.copyInto(arm9, 0x100 + 80 * HgssWorldAddresses.MAP_HEADER_SIZE)
         val headers = HgssMapHeaders.decode(arm9, HgssWorldAddresses.ARM9_LOAD_ADDRESS + 0x100)
-        assertEquals(HgssMapHeader(80, 90, 77, 922, 695, 614, 133, 4, 0xFF), headers[80])
+        assertEquals(HgssMapHeader(80, 90, 77, 922, 695, 614, 133, 4, 0xFF, flyAllowed = false), headers[80])
         assertEquals(0, headers[79].matrixId)
         assertFailsWith<IllegalArgumentException> { HgssMapHeaders.decode(arm9, HgssWorldAddresses.ARM9_LOAD_ADDRESS + 0x200) }
         assertEquals(0x020F6BE0L, HgssWorldAddresses.mapHeadersAddress("IPKE"))
@@ -153,7 +153,16 @@ class HgssWorldFormatsTest {
         assertEquals(TileKind.Pc, kind(0x83, true))
         assertEquals(TileKind.RockClimb, kind(0x4B, true))
         assertEquals(TileKind.RockClimb, kind(0x4C, true))
-        assertEquals(TileKind.Unknown(0x30), kind(0x30))
+        // Railings (sub_0205B8F4..B960), bridges (sub_0205BA24/BA30/BA54), the waterfall top (sub_0205B78C).
+        assertEquals(TileKind.Railing(setOf(Direction.EAST)), kind(0x30))
+        assertEquals(TileKind.Railing(setOf(Direction.WEST, Direction.EAST)), kind(0x4A))
+        assertEquals(TileKind.Bridge(start = true), kind(0x70))
+        assertEquals(TileKind.Bridge(), kind(0x71))
+        assertEquals(TileKind.Bridge(), kind(0x72))
+        assertEquals(TileKind.Bridge(overWater = true), kind(0x73))
+        assertEquals(TileKind.Water(surfable = true, fishable = false), kind(0x22))
+        assertEquals(TileKind.Floor, kind(0x24))
+        assertEquals(TileKind.Unknown(0xF0), kind(0xF0))
         assertTrue(HgssTileBehaviors.isSurfable(0x15) && !HgssTileBehaviors.isSurfable(0x17))
 
         assertEquals(Direction.SOUTH, HgssTileBehaviors.warpDirection(0x65))

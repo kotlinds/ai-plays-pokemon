@@ -99,7 +99,7 @@ internal data class StoredMon(val id: MonId, val name: String, val level: Int?, 
         /** Decodes the box or party Pokémon at [addr] ([size] 0x88 or 0xEC); null for an empty or unreadable slot. */
         fun read(mem: HgssMemory, addr: Long, size: Int): StoredMon? {
             val raw = mem.bytes(addr, size) ?: return null
-            val mon = HgssPokemon.decode(raw) ?: return null
+            val mon = HgssPokemon.decode(raw, HgssMonCheck::isPlausible) ?: return null
             if (mon.species == 0 || mon.species > PartyMon.MAX_SPECIES) return null
             val name = when {
                 mon.isEgg -> "Egg"
@@ -253,7 +253,7 @@ enum class HgssPcLayout(val menu: IntRange?) {
 internal object HgssPcBox {
 
     /** OverlayManager proc states where the GridInputHandler reads input (verified live per mode). */
-    private val INPUT_STATES = setOf(0x0C, 0x24, 0x3D, 0x51, 0x5B, 0x61, 0x75)
+    private val INPUT_STATES = setOf(0x0C, 0x24, 0x3D, 0x51, 0x5B, 0x61, 0x75, K.PC_STATE_MOVE_FREE, K.PC_STATE_MOVE_HOLDING)
 
     /** Questions of the PC yes / no prompts (`PCBoxWork+0x438`, msg_0025), display only. */
     private val QUESTIONS = mapOf(0 to "Take this item?", 1 to "Release this Pokémon?", 2 to "Put away the item?", 3 to "Exit the Box?", 4 to "Continue Box operations?")
@@ -280,7 +280,8 @@ internal object HgssPcBox {
         val ctx = PcContext(mem, data, grid, layout)
         return when (layout) {
             HgssPcLayout.DEPOSIT_BOX_PICKER, HgssPcLayout.BOX_TITLE_MENU -> boxPicker(ctx)
-            HgssPcLayout.MOVE_BOX_AND_PARTY, HgssPcLayout.SMALL_PARTY, HgssPcLayout.WALLPAPER ->
+            HgssPcLayout.MOVE_BOX_AND_PARTY -> moveWithParty(ctx, holding = proc == K.PC_STATE_MOVE_HOLDING)
+            HgssPcLayout.SMALL_PARTY, HgssPcLayout.WALLPAPER ->
                 Screen.Unknown("pc_box ${layout.name.lowercase()}", Awaiting.INPUT)
             else -> {
                 val menu = layout.menu
@@ -391,6 +392,54 @@ internal object HgssPcBox {
             else -> Entry("option:return", "RETURN")
         }
     }
+
+    /**
+     * MOVE POKéMON with the party panel and the box tabs, the layout used once a Pokémon is picked up (proc state
+     * 0x73, holding) and after it is put down (0x29, free: A on a Pokémon picks it up at once, without a menu).
+     * Grid indices (hitbox table read live): 0-29 box slots, 30-35 party slots (two columns), 36 EXIT of the party
+     * panel, 37-42 the six visible box tabs (A on a tab while holding puts the Pokémon in that box), 43 / 44 the tab
+     * arrows (touch), 45 SUMMARY.
+     *
+     * The tabs scroll over the 18 boxes: while the cursor is on a tab, the highlighted box is `PCBoxData+0x25` and the
+     * visible tabs are named `box:N`; elsewhere their box isn't known and they are `tab:K`. LEFT / RIGHT on the tabs
+     * move the highlighted box by one (scrolling at the ends), verified live.
+     */
+    private fun moveWithParty(ctx: PcContext, holding: Boolean): Screen.PcBox {
+        val onTab = ctx.cursor in MP_TABS
+        val firstTabBox = if (onTab) ctx.mem.u8(ctx.data + K.PCB_PICKER_BOX) - (ctx.cursor - MP_TABS.first) else null
+        val entries = (0 until ctx.size).map { i ->
+            when (i) {
+                in 0 until K.BOX_SLOTS -> ctx.boxMon(ctx.shownBox, i)?.let { Entry(it.id.toString(), it.label) } ?: Entry("slot:$i", "-")
+                in MP_PARTY -> (i - MP_PARTY.first).let { p -> ctx.partyMon(p)?.let { Entry(it.id.toString(), it.label) } ?: Entry("slot:party$p", "-") }
+                MP_EXIT -> Entry("option:close_party", "EXIT")
+                in MP_TABS -> {
+                    val box = firstTabBox?.let { (it + i - MP_TABS.first).mod(K.BOX_COUNT) }
+                    if (box != null) Entry("box:$box", "${ctx.boxName(box)} (${ctx.boxCount(box)}/${K.BOX_SLOTS})") else Entry("tab:${i - MP_TABS.first}", "box tab")
+                }
+                MP_PREV -> Entry("option:prev_box", "◀", touch = ctx.touch(i))
+                MP_NEXT -> Entry("option:next_box", "▶", touch = ctx.touch(i))
+                else -> Entry("option:summary", "SUMMARY")
+            }
+        }
+        val selected = ctx.mem.u8(ctx.data + K.PCB_SELECTED_SLOT)
+        val held = if (!holding) null else if (selected < K.PC_PARTY_SLOT_BASE) ctx.boxMon(ctx.shownBox, selected) else ctx.partyMon(selected - K.PC_PARTY_SLOT_BASE)
+        return Screen.PcBox(
+            box = ctx.shownBox,
+            boxName = ctx.boxName(ctx.shownBox),
+            entries = entries,
+            cursor = if (ctx.cursor in entries.indices) Cursor.At(ctx.cursor) else Cursor.Hidden,
+            topology = precomputedTopology(entries.size) { from, button -> ctx.move(from, button) },
+            cancel = CancelBehavior.CLOSES,
+            mode = PcMode.MOVE,
+            holding = held?.id,
+        )
+    }
+
+    private val MP_PARTY = 30..35
+    private const val MP_EXIT = 36
+    private val MP_TABS = 37..42
+    private const val MP_PREV = 43
+    private const val MP_NEXT = 44
 
     /** The context menu opened on a slot (same GridInputHandler, cursor in the menu's index range). */
     private fun contextMenu(ctx: PcContext, menu: IntRange): Screen.ContextMenu {

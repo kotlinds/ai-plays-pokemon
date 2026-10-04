@@ -1,5 +1,6 @@
 package me.nathanfallet.aiplayspokemon
 
+import kotlin.io.path.readBytes
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.unit.DpSize
@@ -8,10 +9,10 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import me.nathanfallet.aiplayspokemon.config.AppConfig
-import me.nathanfallet.aiplayspokemon.emulator.libretro.LibretroCoreSpec
+import dev.kotlinds.pokemonclient.libretro.LibretroCoreSpec
 import kotlinx.coroutines.runBlocking
 import me.nathanfallet.aiplayspokemon.emulator.ConsoleHost
-import me.nathanfallet.aiplayspokemon.game.PokemonGames
+import dev.kotlinds.pokemonclient.PokemonGames
 import me.nathanfallet.aiplayspokemon.ui.App
 import me.nathanfallet.aiplayspokemon.ui.AppController
 import java.awt.FileDialog
@@ -32,7 +33,7 @@ fun main(args: Array<String>) {
     val rom = config.romPath ?: chooseRom()?.also(config::saveRomPath) ?: return
 
     val emulator = ConsoleHost(LibretroCoreSpec.forRom(rom, config.emulatorCore), rom, config.dataDirectory)
-    val game = PokemonGames.detect(rom)
+    val game = PokemonGames.detect(rom.readBytes())
     if (config.startMuted) emulator.setMuted(true)
     config.startState?.let { slot -> runBlocking { check(emulator.loadState(slot)) { "No save state in slot $slot" } } }
     emulator.start()

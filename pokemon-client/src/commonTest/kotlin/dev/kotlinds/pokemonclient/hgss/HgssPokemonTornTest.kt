@@ -53,4 +53,12 @@ class HgssPokemonTornTest {
             assertContentEquals(blocks, out, "split $split")
         }
     }
+
+    @Test
+    fun plainBlocksWithEncryptedFlagsAreRecovered() {
+        // GetMonData decrypts without touching the flags (src/pokemon.c:410): a frame can show the blocks all plain.
+        val (ok, out) = decoded(mon(blocks))
+        assertTrue(ok)
+        assertContentEquals(blocks, out)
+    }
 }

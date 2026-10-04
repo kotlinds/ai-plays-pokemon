@@ -111,7 +111,7 @@ class AppController(
         val wanted = _backend.value == DecisionBackend.MCP && game != null
         val running = _mcp.value
         if (wanted && running == null) {
-            val session = GameSession(emulator, game!!, recorder!!, mode = { _settings.value.mode.actionMode }, knowledge = { _settings.value.knowledge })
+            val session = GameSession(emulator, game!!, recorder!!, mode = { _settings.value.mode.actionMode }, knowledge = { _settings.value.knowledge }, confirmDelivery = true)
             val server = GameMcpServer(session, emulator, config.mcpPort, mode = { _settings.value.mode.actionMode }, pauseWhileThinking = { _settings.value.pauseWhileThinking }, knowledge = { _settings.value.knowledge })
             server.start()
             _mcp.value = server

@@ -5,11 +5,14 @@ import dev.kotlinds.NarcArchive
 import dev.kotlinds.NdsRom
 import dev.kotlinds.pokemonclient.Direction
 import dev.kotlinds.pokemonclient.world.Area
+import dev.kotlinds.pokemonclient.world.FieldMoveKind
 import dev.kotlinds.pokemonclient.world.PersonTemplate
 import dev.kotlinds.pokemonclient.world.ScriptWarp
 import dev.kotlinds.pokemonclient.world.Sign
+import dev.kotlinds.pokemonclient.world.SignKind
 import dev.kotlinds.pokemonclient.world.TileInfo
 import dev.kotlinds.pokemonclient.world.Trigger
+import dev.kotlinds.pokemonclient.world.TriggerWarp
 import dev.kotlinds.pokemonclient.world.Warp
 import dev.kotlinds.pokemonclient.world.WorldSource
 
@@ -61,6 +64,11 @@ class HgssWorldSource(private val rom: NdsRom, private val version: HgssVersion)
     }
 
     fun header(zoneId: Int): HgssMapHeader? = headers.getOrNull(zoneId)
+
+    override val zoneCount: Int get() = headers.size
+
+    /** The script file (bytecode, [HgssScripts]) of zone [zoneId], or null. */
+    fun scriptFile(zoneId: Int): ByteArray? = header(zoneId)?.scriptsBank?.let { scriptFiles.getOrNull(it) }
 
     fun matrix(matrixId: Int): HgssMapMatrix? =
         matrices[matrixId] ?: matrixFiles.getOrNull(matrixId)?.let { HgssMapMatrix.parse(matrixId, it) }?.also { matrices[matrixId] = it }
@@ -116,6 +124,7 @@ class HgssWorldSource(private val rom: NdsRom, private val version: HgssVersion)
         val people = mutableListOf<PersonTemplate>()
         val triggers = mutableListOf<Trigger>()
         val scriptWarps = mutableListOf<ScriptWarp>()
+        val triggerWarps = mutableListOf<TriggerWarp>()
         fun behaviorAt(x: Int, z: Int): Int? =
             if (x in 0 until width && z in 0 until height) {
                 matrix.landAt(x / b, z / b).takeIf { it != HgssMapMatrix.NO_LAND }
@@ -127,7 +136,7 @@ class HgssWorldSource(private val rom: NdsRom, private val version: HgssVersion)
                 val direction = behaviorAt(w.x, w.z)?.let { HgssTileBehaviors.warpDirection(it) }
                 warps += Warp(zone, i, w.x, w.z, w.header, w.anchor, direction)
             }
-            ev.bgs.forEachIndexed { i, bg -> signs += Sign(zone, i, bg.x, bg.z, bg.script) }
+            ev.bgs.forEachIndexed { i, bg -> signs += sign(zone, i, bg) }
             ev.objects.forEach { o ->
                 people += PersonTemplate(
                     zone = zone,
@@ -139,15 +148,41 @@ class HgssWorldSource(private val rom: NdsRom, private val version: HgssVersion)
                     sightRange = if (o.isTrainer) o.params[0] else 0,
                     script = o.script,
                     hiddenByFlag = o.eventFlag,
+                    obstacle = when (HgssData.spriteName(o.sprite)) {
+                        "TREE" -> FieldMoveKind.CUT
+                        "BREAKROCK" -> FieldMoveKind.ROCK_SMASH
+                        "ROCK" -> FieldMoveKind.STRENGTH
+                        else -> null
+                    },
                 )
             }
             ev.coords.forEachIndexed { i, c ->
                 triggers += Trigger(zone, i, c.x, c.z, c.width, c.height, c.script, c.variable, c.value)
             }
             scriptWarps += scriptWarps(zone, ev)
+            triggerWarps += triggerWarps(zone, ev)
         }
         val name = if (matrix.zones != null && matrix.id == OVERWORLD_MATRIX) "Johto and Kanto" else HgssData.mapName(zoneId)
-        return Area(matrix.id, name, 0, 0, width, height, tiles, warps, signs, people, triggers, zones, scriptWarps)
+        return Area(matrix.id, name, 0, 0, width, height, tiles, warps, signs, people, triggers, zones, scriptWarps, triggerWarps)
+    }
+
+    /**
+     * A background event: a hidden item when its script is one of the `std_hiddenitem_*` common scripts (the
+     * zone_event files give them type 2), whose flag is `script - 8000 + HIDDEN_ITEMS_FLAG_BASE`
+     * (HiddenItemScriptNoToFlagId, src/fieldmap.c); a sign otherwise.
+     */
+    private fun sign(zone: Int, index: Int, bg: HgssZoneEvents.BgEvent): Sign =
+        if (bg.script in HIDDEN_ITEM_SCRIPTS) {
+            Sign(zone, index, bg.x, bg.z, bg.script, SignKind.HIDDEN_ITEM, bg.script - HIDDEN_ITEM_SCRIPTS.first + HIDDEN_ITEMS_FLAG_BASE)
+        } else Sign(zone, index, bg.x, bg.z, bg.script)
+
+    /** Coordinate triggers of [zone] whose script warps the player to another zone: holes ([HgssScripts.zoneWarp]). */
+    private fun triggerWarps(zone: Int, events: HgssZoneEvents): List<TriggerWarp> {
+        if (events.coords.isEmpty()) return emptyList()
+        val file = header(zone)?.scriptsBank?.let { scriptFiles.getOrNull(it) } ?: return emptyList()
+        return events.coords.mapIndexedNotNull { i, c ->
+            HgssScripts.zoneWarp(file, c.script, zone, headers.size)?.let { w -> TriggerWarp(zone, i, c.x, c.z, w.zone, w.x, w.z) }
+        }
     }
 
     /** Coordinate triggers of [zone] whose script warps the player within [zone] itself ([HgssScripts]). */
@@ -168,6 +203,12 @@ class HgssWorldSource(private val rom: NdsRom, private val version: HgssVersion)
 
         /** The Johto/Kanto overworld matrix (`map_matrix_0000_EVERYWHERE`). */
         const val OVERWORLD_MATRIX = 0
+
+        /** `_std_hidden_item` .. `_std_safari - 1` (include/constants/std_script.h): the hidden item scripts. */
+        val HIDDEN_ITEM_SCRIPTS = 8000 until 8800
+
+        /** `HIDDEN_ITEMS_FLAG_BASE` (include/constants/flags.h). */
+        const val HIDDEN_ITEMS_FLAG_BASE = 800
 
         private const val TILES_PER_BLOCK = HgssMapMatrix.BLOCK_TILES * HgssMapMatrix.BLOCK_TILES
 

@@ -16,6 +16,8 @@ data class BattleState(
     val partyOrder: List<MonId>,
     /** The battle message on screen, if any. */
     val message: String?,
+    /** Turns played so far (0 on the first turn), when known: Quick Ball / Timer Ball depend on it. */
+    val turn: Int? = null,
 )
 
 /** Kinds of battles. */
@@ -45,6 +47,20 @@ data class BattlerState(
     val statStages: Map<BattleStat, Int>,
     val types: List<String>,
     val moves: List<KnownMove>,
+    /**
+     * The Pokémon's actual ability, as the game knows it. For an opponent it is hidden knowledge: views only show
+     * it once revealed ([abilityRevealed], or a battle message naming it, see `BattleKnowledge`).
+     */
+    val ability: Named<AbilityId>? = null,
+    /** The item it holds right now (hidden knowledge for an opponent, like [ability]). */
+    val heldItem: Named<ItemId>? = null,
+    /**
+     * True once the game announced the ability on screen (Pressure, Intimidate, Mold Breaker, Frisk... on switch-in,
+     * Flash Fire once activated).
+     */
+    val abilityRevealed: Boolean = false,
+    /** Capture rate of the species (0..255, higher is easier), for a wild foe. */
+    val catchRate: Int? = null,
 )
 
 /** Stats that can be raised or lowered during a battle. */

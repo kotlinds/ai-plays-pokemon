@@ -11,9 +11,12 @@ internal object HgssScreens {
         HgssPostBattleScreens,
         HgssBattleScreens,
         HgssKeyboardPcShopScreens,
+        HgssOptionsScreen,
         HgssFlyMapScreens,
         HgssPartyBagScreens,
+        HgssFieldNoticeScreens,
         HgssTextScreens,
+        HgssIntroScreens,
     )
 }
 

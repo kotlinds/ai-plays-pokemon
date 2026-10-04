@@ -11,10 +11,12 @@ import dev.kotlinds.pokemonclient.state.Entry
 import dev.kotlinds.pokemonclient.state.MonId
 import dev.kotlinds.pokemonclient.state.MoveContext
 import dev.kotlinds.pokemonclient.state.MoveId
+import dev.kotlinds.pokemonclient.state.MoveOffer
 import dev.kotlinds.pokemonclient.state.Named
 import dev.kotlinds.pokemonclient.state.PartyPurpose
 import dev.kotlinds.pokemonclient.state.Screen
 import dev.kotlinds.pokemonclient.state.SpeciesId
+import dev.kotlinds.pokemonclient.state.TextSource
 import dev.kotlinds.pokemonclient.state.Topology
 import dev.kotlinds.pokemonclient.hgss.HgssAddresses as A
 import dev.kotlinds.pokemonclient.hgss.HgssPostBattleAddresses as P
@@ -46,12 +48,24 @@ internal object HgssPostBattleAddresses {
 
     const val GW_STATE = 0x28L
     const val GW_SHAKES = 0x38L              // tempData[2]: 0..3 breaks free after n shakes, 4 = caught
-    const val GW_PARTY_SLOT = 0x48L          // tempData[6]: party slot of the Pokémon gaining the level
+    const val GW_MOVE_TO_LEARN = 0x40L       // tempData[4] (DATA_GET_EXP_MOVE_TO_LEARN): move the Pokémon wants to learn
+    const val GW_PARTY_SLOT = 0x48L          // tempData[6]: first party slot still to look at (not the one gaining the level)
+    /** `ctx->battlerIdFainted` (int): the side of the fainted battler tells whose participants gain experience. */
+    const val BC_BATTLER_ID_FAINTED = 0x74L
+
+    /** `ctx->unk_A4` (u32[2], per side): bit n set when party slot n fought the fainted Pokémon. */
+    const val BC_EXP_PARTICIPANTS = 0xA4L
+
+    /** `ITEM_EXP_SHARE`: the only item with HOLD_EFFECT_EXP_SHARE. */
+    const val ITEM_EXP_SHARE = 216
     const val GW_POINTER_0 = 0x50L           // tempPointers[0]: Pokédex page work / naming screen OverlayManager
 
     /** `STATE_GET_EXP_LEVEL_UP_SUMMARY_PRINT_DIFF_WAIT` / `..._PRINT_TRUE_WAIT`: the stats panel waits (A/B/X/Y/touch). */
     const val EXP_STATE_PANEL_DIFF = 11
     const val EXP_STATE_PANEL_TOTALS = 13
+
+    /** From `STATE_GET_EXP_LEVEL_UP_SUMMARY_PRINT_DIFF` (10) to `..._LEVEL_UP_CLEAR` (14): the panel is drawn / shown. */
+    val EXP_STATES_PANEL = 10..14
 
     /** Catch task states: 12 dex page loading, 13 dex page shown (waits for A or touch only, B does nothing). */
     const val CATCH_STATE_DEX_LOADING = 12
@@ -66,6 +80,7 @@ internal object HgssPostBattleAddresses {
     /** `sub_02075D08`: the evolution SysTask (after a battle, Rare Candy, stone, trade). */
     const val FN_EVOLUTION = 0x02075D08L
     const val EVO_SUMMARY_APP = 0x38L        // OverlayManager * of the nested summary (forget a move), state 23
+    const val EVO_MON = 0x28L                // Pokemon * evolving (sub_02075A7C: str r7, [r4, #0x28])
     const val EVO_FROM = 0x60L
     const val EVO_TO = 0x62L
     const val EVO_STATE = 0x64L
@@ -75,6 +90,11 @@ internal object HgssPostBattleAddresses {
     const val EVO_STATE_FORGET_PROMPT = 21   // "Forget a move!" / "Keep old moves!" (set up in 20)
     const val EVO_STATE_GIVE_UP_PROMPT = 35  // "Give up on X!" / "Don't give up on X!" (set up in 34)
     const val EVO_STATE_SUMMARY = 23
+    const val EVO_STRING = 0x10L             // String * of the message box (sub_020772F8)
+    const val EVO_PRINTER = 0x65L            // u8 text printer id of that message
+    const val EVO_FLAGS = 0x7CL              // u32 flags: bit 0 = B may cancel the morphing
+    const val EVO_FLAG_CANCELABLE = 1L
+    const val EVO_STATE_MORPH = 8            // the morphing: B cancels it (state 41) when allowed (sub_02075E14)
 
     // --- Pokémon summary in learn/forget mode (PokemonSummaryArgs = OM args, work = OM data) ---
     const val SUM_ARGS_PARTY = 0x00L         // Party * (or a Pokemon * during an evolution)
@@ -192,6 +212,34 @@ internal object HgssPostBattleScreens : HgssScreenDecoder {
         }
     }
 
+    /**
+     * True while Task_GetExp draws or shows the level-up stats panel (states PRINT_DIFF to CLEAR): the panel's cells
+     * are printed through the battle message buffer, which then holds no message.
+     */
+    fun levelUpPanelUp(mem: HgssMemory): Boolean {
+        val root = HgssBattleRoot.find(mem) ?: return false
+        val gw = mem.ptr(root.ctx + P.BC_GETTER_WORK) ?: return false
+        return mem.mainTasks().any { it.second == gw && it.first == P.FN_GET_EXP } && mem.s32(gw + P.GW_STATE) in P.EXP_STATES_PANEL
+    }
+
+    /**
+     * Who wants to learn what while Task_GetExp runs its learn-move flow ("wants to learn X", "Make it forget another
+     * move?", "Give up on X?"): the move from `tempData[DATA_GET_EXP_MOVE_TO_LEARN]`, the Pokémon from the battle's
+     * party copy at `tempData[DATA_GET_EXP_PARTY_SLOT]` (src/battle/battle_command.c). Null when no move is pending.
+     */
+    fun moveToLearn(mem: HgssMemory): MoveOffer? {
+        val root = HgssBattleRoot.find(mem) ?: return null
+        val gw = mem.ptr(root.ctx + P.BC_GETTER_WORK) ?: return null
+        if (mem.mainTasks().none { it.second == gw && it.first == P.FN_GET_EXP }) return null
+        val move = mem.u16(gw + P.GW_MOVE_TO_LEARN).takeIf { it in 1 until MAX_MOVE } ?: return null
+        val slot = mem.s32(gw + P.GW_PARTY_SLOT)
+        val party = mem.ptr(root.bs + A.BS_TRAINER_PARTY)
+        val mon = party?.takeIf { slot in 0..5 }?.let { HgssScreenMemory.mon(mem, it + A.PARTY_MONS + slot * A.POKEMON_SIZE) }
+        return MoveOffer(mon?.monId(), mon?.displayName(), Named(MoveId(move), HgssData.moveName(move)))
+    }
+
+    private const val MAX_MOVE = 1024
+
     /** True while the catch task runs the naming screen (a nested app the keyboard decoder handles). */
     fun catchNamingRunning(mem: HgssMemory, root: HgssBattleRoot): Boolean {
         val gw = mem.ptr(root.ctx + P.BC_GETTER_WORK) ?: return false
@@ -220,13 +268,13 @@ internal object HgssPostBattleScreens : HgssScreenDecoder {
      * new ones from the battle's party copy.
      */
     private fun levelUpPanel(mem: HgssMemory, root: HgssBattleRoot, gw: Long): Screen {
-        val slot = mem.s32(gw + P.GW_PARTY_SLOT)
         val party = mem.ptr(root.bs + A.BS_TRAINER_PARTY)
-        val mon = party?.takeIf { slot in 0..5 }?.let { HgssScreenMemory.mon(mem, it + A.PARTY_MONS + slot * A.POKEMON_SIZE) }
+        val mon = party?.let { p -> levelUpSlot(mem, root, gw, p)?.let { HgssScreenMemory.mon(mem, p + A.PARTY_MONS + it * A.POKEMON_SIZE) } }
         val old = mem.ptr(root.ctx + P.BC_PREV_LEVEL_STATS)?.let { p -> (0 until 6).map { mem.s32(p + 4L * it) } }
         val text = mon?.let { m ->
             val now = listOf(m.maxHp, m.atk, m.def, m.spAtk, m.spDef, m.speed)
-            val before = old
+            // A stat never goes down on a level up: a negative gain means the old stats aren't this Pokémon's.
+            val before = old?.takeIf { b -> b.indices.all { now[it] >= b[it] } }
             "${m.displayName()} Lv${m.level}: " + PANEL.indices.joinToString(", ") { i ->
                 val gain = before?.let { b -> " (+${now[i] - b[i]})" } ?: ""
                 "${PANEL[i]} ${now[i]}$gain"
@@ -235,12 +283,28 @@ internal object HgssPostBattleScreens : HgssScreenDecoder {
         return Screen.PressToContinue(ContinueReason.LEVEL_UP_STATS, text)
     }
 
+    /**
+     * The party slot Task_GetExp works on (src/battle/battle_command.c:6010): `tempData[6]` is only where its search
+     * starts; the slot is the first one from there holding an Exp. Share or that fought the fainted Pokémon.
+     */
+    private fun levelUpSlot(mem: HgssMemory, root: HgssBattleRoot, gw: Long, party: Long): Int? {
+        val start = mem.s32(gw + P.GW_PARTY_SLOT)
+        val count = mem.s32(party + A.PARTY_CUR_COUNT)
+        if (start !in 0..5 || count !in 1..6) return null
+        val side = (mem.s32(root.ctx + P.BC_BATTLER_ID_FAINTED) shr 1) and 1
+        val participants = mem.u32(root.ctx + P.BC_EXP_PARTICIPANTS + 4L * side)
+        return (start until count).firstOrNull { slot ->
+            participants shr slot and 1L == 1L ||
+                HgssScreenMemory.mon(mem, party + A.PARTY_MONS + slot * A.POKEMON_SIZE)?.heldItem == P.ITEM_EXP_SHARE
+        }
+    }
+
     // endregion
 
     // region Evolution
 
     /**
-     * The evolution scene (sub_02075D08 jump table at 0x02075F40). Nothing waits for A except the two prompts:
+     * The evolution scene (sub_02075D08 jump table at 0x02075F40). Its messages wait for A (see below), and the two prompts:
      * state 21 "Forget a move!" / "Keep old moves!" and 35 "Give up on X!" / "Don't give up on X!" (cursor E+0x8B,
      * 1 = top, starts on top, no hidden-cursor step; B picks the bottom one at once). In state 23 the nested summary
      * screen asks which move to forget. B cancels the evolution only during the morphing (state 8) when allowed.
@@ -264,12 +328,24 @@ internal object HgssPostBattleScreens : HgssScreenDecoder {
                 2 -> Cursor.At(1)
                 else -> Cursor.Hidden
             }
-            return Screen.YesNo(null, entries, cursor, Topology.vertical(2), CancelBehavior.CONFIRMS_LAST)
+            val evolving = HgssScreenMemory.mon(mem, mem.ptr(e + P.EVO_MON))
+            val offer = mem.u16(e + P.EVO_MOVE).takeIf { it != 0 }?.let {
+                MoveOffer(evolving?.monId(), evolving?.displayName(), Named(MoveId(it), HgssData.moveName(it)))
+            }
+            return Screen.YesNo(null, entries, cursor, Topology.vertical(2), CancelBehavior.CONFIRMS_LAST, offer)
+        }
+        // The scene's messages (sub_020772F8): "What? X is evolving!" waits for A before the morphing starts, then
+        // "Congratulations!...", the learn-move texts... A page being printed or waiting for A is a dialogue.
+        val message = mem.ptr(e + P.EVO_STRING)?.let { HgssTextPrinter.read(mem, it, mem.u8(e + P.EVO_PRINTER)) }
+        if (message != null && message.printerAlive) {
+            return Screen.Dialogue(TextSource.FIELD, speaker = null, text = message.visible, awaiting = message.awaiting)
         }
         return Screen.Evolution(
             Named(SpeciesId(from), HgssData.speciesName(from)),
             to.takeIf { it != 0 }?.let { Named(SpeciesId(it), HgssData.speciesName(it)) },
             Awaiting.ANIMATION,
+            text = message?.visible?.takeIf { it.isNotBlank() },
+            canCancel = evoState == P.EVO_STATE_MORPH && mem.u32(e + P.EVO_FLAGS) and P.EVO_FLAG_CANCELABLE != 0L,
         )
     }
 

@@ -46,7 +46,16 @@ object StateView {
                     }
                 }
                 when (screen) {
-                    is Screen.YesNo -> screen.question?.let { put("question", it) }
+                    is Screen.YesNo -> {
+                        screen.question?.let { put("question", it) }
+                        screen.learning?.let { offer ->
+                            put("learning", buildJsonObject {
+                                offer.mon?.let { put("pokemon", it.toString()) }
+                                offer.monName?.let { put("name", it) }
+                                put("new_move", "move:${offer.move.id.value} ${offer.move.name}")
+                            })
+                        }
+                    }
                     is Screen.MoveSelect -> screen.newMove?.let { put("new_move", "move:${it.id.value} ${it.name}") }
                     is Screen.Keyboard -> {
                         put("typed", screen.buffer)
@@ -79,6 +88,8 @@ object StateView {
             is Screen.Evolution -> {
                 put("from", screen.from.name)
                 screen.to?.let { put("to", it.name) }
+                screen.text?.let { put("text", it) }
+                if (screen.canCancel) put("can_cancel", "B now stops the evolution")
             }
             is Screen.Overworld -> screen.banner?.let { put("sign", it) }
             is Screen.Unknown -> screen.hint?.let { put("hint", it) }
@@ -121,6 +132,7 @@ object StateView {
         if (b.volatile.isNotEmpty()) put("volatile", JsonArray(b.volatile.map { JsonPrimitive(volatile(it)) }))
         if (b.statStages.isNotEmpty()) putJsonObject("stat_stages") { b.statStages.forEach { (stat, v) -> put(stat.name.lowercase(), v) } }
         put("types", b.types.joinToString("/"))
+        b.catchRate?.let { put("catch_rate", it) }
         if (b.ref.isPlayerSide) put("moves", JsonArray(b.moves.map { JsonPrimitive("move:${it.move.id.value} ${it.move.name} (${it.type ?: "?"}) ${it.pp}/${it.maxPp}") }))
     }
 
@@ -134,7 +146,7 @@ object StateView {
                 put("x", f.x)
                 put("y", f.y)
                 f.facing?.let { put("facing", it.name.lowercase()) }
-                if (f.movement.name != "WALK") put("movement", f.movement.name.lowercase())
+                put("movement", f.movement.name.lowercase())
             }
             f.puzzle?.let { put("puzzle", puzzle(it)) }
         }
@@ -142,8 +154,34 @@ object StateView {
         state.player?.let { p ->
             put("money", p.money)
             put("badges", JsonArray(p.badges.map(::JsonPrimitive)))
+            p.playTime?.let { put("play_time", it.toString()) }
         }
         if (state.warnings.isNotEmpty()) put("warnings", JsonArray(state.warnings.map { JsonPrimitive(it.detail) }))
+    }
+
+    /**
+     * The PC boxes, compact: one line per non-empty box ("BOX 1 (7/30): mon:… HOOTHOOT Lv4, …"), the box the PC
+     * opens on, and how many boxes are empty.
+     */
+    fun storage(storage: dev.kotlinds.pokemonclient.state.PcStorage): JsonObject = buildJsonObject {
+        put("current_box", storage.currentBox + 1)
+        putJsonArray("boxes") {
+            storage.boxes.filter { it.mons.isNotEmpty() }.forEach { box ->
+                add(JsonPrimitive("${box.name} (${box.mons.size}/${box.capacity}): " + box.mons.joinToString { m ->
+                    "${m.id} ${m.displayName}" + (if (m.nickname != null) " (${m.species.name})" else "") + (m.level?.let { " Lv$it" } ?: "") +
+                        (m.heldItem?.let { " @${it.name}" } ?: "")
+                }))
+            }
+        }
+        val empty = storage.boxes.count { it.mons.isEmpty() }
+        if (empty > 0) put("empty_boxes", empty)
+    }
+
+    /** The game's OPTIONS. */
+    fun options(options: dev.kotlinds.pokemonclient.state.GameOptions): JsonObject = buildJsonObject {
+        put("text_speed", options.textSpeed.name.lowercase())
+        put("battle_scene", if (options.battleScene) "on" else "off")
+        put("battle_style", options.battleStyle.name.lowercase())
     }
 
     /** The map puzzle: its rule, switches (what they toggle), shutters (open or not, tiles) and teleports. */
