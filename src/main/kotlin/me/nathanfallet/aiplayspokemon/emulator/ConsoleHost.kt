@@ -18,6 +18,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import me.nathanfallet.aiplayspokemon.emulator.audio.AudioPlayer
+import me.nathanfallet.aiplayspokemon.emulator.audio.ShadowAudio
+import dev.kotlinds.pokemonclient.console.ConsolePort
 import dev.kotlinds.pokemonclient.libretro.LibretroConsole
 import dev.kotlinds.pokemonclient.libretro.LibretroCoreSpec
 import java.nio.file.Files
@@ -42,12 +44,15 @@ import kotlin.concurrent.thread
  * Frames are paced for display (real time, unless fast-forward) after every frame, agent ones included, so
  * the picture and the sound stay smooth. Pacing never changes what the game computes.
  *
+ * While nobody drives ([Driver.Idle]), the game's music goes on ([ShadowAudio], "Music during pauses"): a shadow
+ * console plays it, and the game resumes in sync with it. The game itself never moves during a pause.
+ *
  * It also implements the older [Emulator] interface used by the UI.
  */
 class ConsoleHost(
-    spec: LibretroCoreSpec,
+    private val spec: LibretroCoreSpec,
     private val romPath: Path,
-    dataDirectory: Path,
+    private val dataDirectory: Path,
 ) : Emulator {
 
     /** Who drives the console right now. */
@@ -95,6 +100,10 @@ class ConsoleHost(
     private val saveStateDirectory = dataDirectory.resolve("states")
     private lateinit var audio: AudioPlayer
     private lateinit var pacer: FramePacer
+    private lateinit var shadowAudio: ShadowAudio
+
+    /** The "Music during pauses" setting, until [shadowAudio] exists (it is created on the console thread). */
+    @Volatile private var musicDuringPauses = true
 
     private val ready = CountDownLatch(1)
     private var startupError: Throwable? = null
@@ -105,6 +114,11 @@ class ConsoleHost(
                 audio = AudioPlayer(it.sampleRate)
                 info = EmulatorInfo(name = it.coreName, fps = it.fps)
                 pacer = FramePacer(it.fps)
+                shadowAudio = ShadowAudio(spec, romPath, dataDirectory, audio, it.fps).apply {
+                    enabled = musicDuringPauses
+                    soundOn = !status.value.muted && !status.value.fastForward
+                    unsupportedReason?.let { why -> println("[music during pauses] unavailable: $why") }
+                }
             }
         } catch (error: Throwable) {
             startupError = error
@@ -115,6 +129,7 @@ class ConsoleHost(
         try {
             loop(console)
         } finally {
+            shadowAudio.close()
             console.close() // also makes the core write the in-game save (.sav) to disk
             audio.close()
         }
@@ -131,11 +146,13 @@ class ConsoleHost(
             while (true) tasks.poll()?.invoke(console) ?: break
             if (!status.value.running) {
                 _driver.value = Driver.Idle
+                shadowAudio.onIdle(console)
                 Thread.sleep(5)
                 pacer.reset()
                 continue
             }
             _driver.value = Driver.Human
+            shadowAudio.beforeMainFrame(console)
             console.step(1, InputFrame(humanButtons.value, humanTouch))
             afterFrame(console)
         }
@@ -162,7 +179,7 @@ class ConsoleHost(
             _driver.value = Driver.Agent(label)
             try {
                 val scope = ActionScope(
-                    port = console,
+                    port = resumingPort(console),
                     inputProbe = inputProbe,
                     interruption = {
                         when {
@@ -177,6 +194,14 @@ class ConsoleHost(
             } finally {
                 leaseActive = false
             }
+        }
+    }
+
+    /** [console], resyncing the music of a pause ([ShadowAudio]) before the first frame an action emulates. */
+    private fun resumingPort(console: LibretroConsole): ConsolePort = object : ConsolePort by console {
+        override fun step(frames: Int, input: InputFrame) {
+            shadowAudio.beforeMainFrame(console)
+            console.step(frames, input)
         }
     }
 
@@ -228,10 +253,23 @@ class ConsoleHost(
         updateAudio()
     }
 
-    /** Audio is silent when muted, and while fast-forwarding (it would be sped-up noise). */
+    /** Audio is silent when muted, and while fast-forwarding (it would be sped-up noise): no music during pauses then. */
     private fun updateAudio() {
         audio.muted = status.value.muted || status.value.fastForward
+        shadowAudio.soundOn = !audio.muted
     }
+
+    /**
+     * "Music during pauses" (on by default): while the game is paused, its music goes on, and the game resumes with the
+     * music where it got to. Only when the sound is on.
+     */
+    fun setMusicDuringPauses(enabled: Boolean) {
+        musicDuringPauses = enabled
+        shadowAudio.enabled = enabled
+    }
+
+    /** Why music during pauses can't work here (ROM, core, platform), or null when it can. */
+    val musicDuringPausesUnavailable: String? get() = shadowAudio.unsupportedReason
 
     override fun setButtons(source: InputSource, buttons: Set<Button>) {
         // Agents don't hold buttons anymore: they act through a lease. Only the human's keys are tracked here.
@@ -276,11 +314,15 @@ class ConsoleHost(
     }
 
     override suspend fun loadState(slot: Int): Boolean = onConsoleThread { console ->
+        shadowAudio.discard() // the paused game is replaced: its shadow's music isn't the new one's
         val file = stateFile(slot)
         Files.exists(file) && console.loadState(Files.readAllBytes(file))
     }
 
-    override suspend fun reset() = onConsoleThread { console -> console.reset() }
+    override suspend fun reset() = onConsoleThread { console ->
+        shadowAudio.discard()
+        console.reset()
+    }
 
     override fun close() {
         closed = true
@@ -301,7 +343,7 @@ class ConsoleHost(
  * Real-time pacing for display: sleeps after each frame so the game runs at its native speed, and measures
  * the actual speed. Only affects timing, never what the game computes.
  */
-private class FramePacer(fps: Double) {
+internal class FramePacer(fps: Double) {
     private val frameNanos = (1_000_000_000 / fps).toLong()
     private var nextFrameAt = System.nanoTime()
     private var windowStart = System.nanoTime()

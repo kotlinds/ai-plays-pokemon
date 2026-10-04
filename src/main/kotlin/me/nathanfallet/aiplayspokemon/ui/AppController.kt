@@ -91,6 +91,7 @@ class AppController(
     val recorder: Recorder? = game?.let { Recorder(it) }
 
     init {
+        emulator.setMusicDuringPauses(_settings.value.musicDuringPauses)
         recorder?.let { r ->
             emulator.frameListener = r::onFrame
             emulator.humanInputListener = { r.humanInput(emulator.status.value.frameCount) }
@@ -104,6 +105,7 @@ class AppController(
         val updated = transform(_settings.value)
         _settings.value = updated
         config.playerSettings = updated
+        emulator.setMusicDuringPauses(updated.musicDuringPauses)
     }
 
     /** Runs the MCP server only while the MCP tab is selected (one player at a time). */

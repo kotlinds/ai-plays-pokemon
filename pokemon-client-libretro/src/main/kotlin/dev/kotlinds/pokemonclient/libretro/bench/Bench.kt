@@ -74,6 +74,9 @@ import kotlin.io.path.writeBytes
  *   message and ball shakes; `truth:on` records the battle message of every frame, `truth:check` compares it with
  *   the recorder's battle messages (what was shown but not recorded), `truth:dump:<name>` writes it to `<name>.trace`
  *   (run-length encoded in tests); `autobattle:<n>[,move:<id>]` plays n decisions of a battle like an agent and checks.
+ * - `pausemusic:<name>[:<play>,<pause>,<resume>]` / `pausemusicstats:<pauses>[:<frames>]` / `pausemusicload:<file>` /
+ *   `pausemusicfixtures:<prefix>[:<frames>]`: music during pauses, end to
+ *   end with a shadow core (WAVs, guards, continuity, main RAM checks; see [PauseMusicCheck]).
  */
 fun main(args: Array<String>) {
     require(args.size >= 3) { "usage: <data dir>|<out dir>|<command>|..." }
@@ -83,23 +86,30 @@ fun main(args: Array<String>) {
     val game = PokemonGames.detect(rom.readBytes()) ?: error("Unsupported ROM $rom")
     // BENCH_WINDOW=1 opens a live, muted window to watch the commands run at the console's speed.
     val viewer = if (System.getenv("BENCH_WINDOW") == "1") BenchViewer("Bench — ${rom.fileName}") else null
-    val console = LibretroConsole(
-        LibretroCoreSpec.forRom(rom, System.getenv("EMULATOR_CORE")), rom, data,
-        onVideo = { viewer?.show(it) }, onAudio = { _, _ -> },
-    )
-    val bench = Bench(console, game, out, rom)
+    val spec = LibretroCoreSpec.forRom(rom, System.getenv("EMULATOR_CORE"))
+    val audioTap = AudioTap() // audio is only collected by the `pausemusic` checks
+    val console = LibretroConsole(spec, rom, data, onVideo = { viewer?.show(it) }, onAudio = audioTap::onAudio)
+    val pauseMusic = PauseMusicCheck(console, audioTap, spec, rom, data, out)
+    val bench = Bench(console, game, out, rom, pauseMusic)
     try {
         args.drop(2).forEach { command ->
             println("> $command")
             bench.run(command)
         }
     } finally {
+        pauseMusic.close()
         console.close()
         viewer?.close()
     }
 }
 
-private class Bench(private val console: LibretroConsole, private val game: PokemonGame, private val out: Path, private val romPath: Path) {
+private class Bench(
+    private val console: LibretroConsole,
+    private val game: PokemonGame,
+    private val out: Path,
+    private val romPath: Path,
+    private val pauseMusic: PauseMusicCheck,
+) {
 
     /** Records every event (text shown, screen changes...) like the app does, printed by the `log` command. */
     private val recorder = dev.kotlinds.pokemonclient.runtime.Recorder(game)
@@ -256,6 +266,10 @@ private class Bench(private val console: LibretroConsole, private val game: Poke
             "solve" -> settings = settings.copy(solvePuzzles = arg != "off")
             "reveal" -> settings = settings.copy(revealHidden = arg != "off")
             "actions" -> registry.available(game.state(scope.memory()), ActionMode.ASSISTED).forEach { println("  $it") }
+            "pausemusic" -> pauseMusic.check(arg)
+            "pausemusicstats" -> pauseMusic.stats(arg)
+            "pausemusicload" -> pauseMusic.load(arg)
+            "pausemusicfixtures" -> pauseMusic.fixtures(arg)
             else -> error("unknown command $command")
         }
     }

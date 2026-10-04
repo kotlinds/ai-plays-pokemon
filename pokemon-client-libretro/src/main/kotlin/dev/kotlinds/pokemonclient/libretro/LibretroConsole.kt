@@ -29,6 +29,8 @@ import java.nio.file.Path
  *
  * @param onVideo called with each new frame (converted to ARGB).
  * @param onAudio called with each batch of interleaved stereo samples.
+ * @param role [ConsoleRole.MAIN] for the game, [ConsoleRole.SHADOW] for a throwaway second instance (music during
+ *   pauses) that never touches the game's files.
  */
 class LibretroConsole(
     private val spec: LibretroCoreSpec,
@@ -36,6 +38,7 @@ class LibretroConsole(
     dataDirectory: Path,
     private val onVideo: (Frame) -> Unit,
     private val onAudio: (samples: ShortArray, frames: Int) -> Unit,
+    val role: ConsoleRole = ConsoleRole.MAIN,
 ) : ConsolePort, AutoCloseable {
 
     override val platform = Platform.NINTENDO_DS
@@ -47,11 +50,22 @@ class LibretroConsole(
         private set
 
     private var input = InputFrame.NONE
+
+    /** True during a shadow's first frame, whose sound isn't the game's (see [ConsoleRole.SHADOW]). */
+    private var warmingUp = false
     private var lastFrame: Frame? = null
 
+    private val romBase = rom.fileName.toString().substringBeforeLast('.')
+
+    /** Where the core finds `system/` and `saves/`: the data directory, or a throwaway copy for a shadow. */
+    private val workDirectory: Path = when (role) {
+        ConsoleRole.MAIN -> dataDirectory
+        ConsoleRole.SHADOW -> ConsoleRole.throwawayDirectory(dataDirectory, romBase)
+    }
+
     private val frontend = object : LibretroFrontend {
-        override val systemDirectory = Files.createDirectories(dataDirectory.resolve("system")).toString()
-        override val saveDirectory = Files.createDirectories(dataDirectory.resolve("saves")).toString()
+        override val systemDirectory = Files.createDirectories(workDirectory.resolve("system")).toString()
+        override val saveDirectory = Files.createDirectories(workDirectory.resolve("saves")).toString()
 
         override fun variable(key: String): String? = spec.options[key]
 
@@ -62,7 +76,9 @@ class LibretroConsole(
             }
         }
 
-        override fun onAudio(samples: ShortArray, frames: Int) = this@LibretroConsole.onAudio(samples, frames)
+        override fun onAudio(samples: ShortArray, frames: Int) {
+            if (!warmingUp) this@LibretroConsole.onAudio(samples, frames)
+        }
 
         override fun inputState(port: Int, device: Int, index: Int, id: Int): Short = when {
             port != 0 -> 0
@@ -77,13 +93,32 @@ class LibretroConsole(
     }
 
     private val saveDirectory: Path = Path.of(frontend.saveDirectory)
-    private val romBase = rom.fileName.toString().substringBeforeLast('.')
 
-    private val core = LibretroCore(spec.resolve(dataDirectory.resolve("cores")).toString(), frontend).also {
+    private val core = LibretroCore(
+        when (role) {
+            ConsoleRole.MAIN -> {
+                // Before the core is opened for the first time: lets a shadow instance run apart later on.
+                if (spec.isolatedInstances) spec.preloadIsolated(dataDirectory.resolve("cores"))
+                spec.resolve(dataDirectory.resolve("cores"))
+            }
+            // A copy of the core file: the same path would give the same library, so the same emulator globals.
+            ConsoleRole.SHADOW -> spec.resolveShadow(dataDirectory.resolve("cores")).also {
+                check(spec.isolatedInstances && spec.isPreloaded(it)) { "a shadow core can't run apart from the main one here" }
+            }
+        }.toString(),
+        frontend,
+    ).also {
         // The canonical in-game save is <rom>.sav; convert it to this core's own format first if needed.
         spec.saveFormat.prepare(saveDirectory, romBase)
         it.loadGame(rom.toAbsolutePath().toString())
         it.setControllerPortDevice(0, Device.JOYPAD)
+        // A fresh core must run once before it accepts a state (melonDS 0.9.3 crashes otherwise): a shadow only ever
+        // loads states, so it runs its first frame now, silently.
+        if (role == ConsoleRole.SHADOW) {
+            warmingUp = true
+            it.run()
+            warmingUp = false
+        }
     }
 
     /** Name and version of the core, e.g. "melonDS 0.9.3". */
@@ -119,10 +154,16 @@ class LibretroConsole(
 
     fun reset() = core.reset()
 
-    /** Unloads the game (the core then writes the in-game save to disk) and the core, then syncs `<rom>.sav`. */
+    /**
+     * Unloads the game (the core then writes the in-game save to disk) and the core, then syncs `<rom>.sav`. A shadow
+     * deletes its throwaway directory instead: nothing it did reaches the game's files.
+     */
     override fun close() {
         core.close()
-        spec.saveFormat.sync(saveDirectory, romBase)
+        when (role) {
+            ConsoleRole.MAIN -> spec.saveFormat.sync(saveDirectory, romBase)
+            ConsoleRole.SHADOW -> workDirectory.toFile().deleteRecursively()
+        }
     }
 
     /**

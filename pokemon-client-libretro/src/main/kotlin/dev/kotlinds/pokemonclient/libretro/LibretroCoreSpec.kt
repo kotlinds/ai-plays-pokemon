@@ -10,6 +10,9 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.zip.ZipInputStream
+import com.sun.jna.Library
+import com.sun.jna.NativeLibrary
+import dev.kotlinds.pokemonclient.libretro.sound.SavestateSoundSplicer
 
 /**
  * A libretro core we know how to run: where to download it and which options to give it.
@@ -72,6 +75,12 @@ enum class LibretroCoreSpec(
     ;
 
     companion object {
+        /** macOS `<dlfcn.h>`: RTLD_NOW (0x2) | RTLD_LOCAL (0x4). */
+        private const val MAC_RTLD_NOW_LOCAL = 0x2 or 0x4
+
+        /** Core files opened by [preloadIsolated], kept open for the life of the process. */
+        private val preloaded = HashMap<Path, NativeLibrary>()
+
         /**
          * Picks the core for a ROM, from its file extension; [preferred] (a config option) chooses among the cores
          * able to run it.
@@ -81,6 +90,62 @@ enum class LibretroCoreSpec(
             else -> throw IllegalArgumentException("No emulator core configured for $rom")
         }
     }
+
+    /** How this core's save states are read and spliced by music during pauses. */
+    val soundSplicer: SavestateSoundSplicer
+        get() = when (this) {
+            MELONDS -> SavestateSoundSplicer.MELONDS
+            DESMUME -> SavestateSoundSplicer.DESMUME
+        }
+
+    /**
+     * A second copy of the core file in [directory] (`<name>_shadow.<ext>`), for a second, independent instance in
+     * the same process ([ConsoleRole.SHADOW]): loading the same path twice gives the same library, so the same
+     * emulator globals. Refreshed whenever it differs from the main file.
+     */
+    fun resolveShadow(directory: Path): Path {
+        val main = resolve(directory)
+        val platform = Platform.current()
+        val copy = directory.resolve("${buildbotName}_shadow.${platform.extension}")
+        if (!Files.exists(copy) || !sha256(copy).contentEquals(sha256(main))) {
+            val temporary = directory.resolve("${copy.fileName}.part")
+            Files.copy(main, temporary, StandardCopyOption.REPLACE_EXISTING)
+            Files.move(temporary, copy, StandardCopyOption.REPLACE_EXISTING)
+        }
+        return copy.also { verify(it, platform) }
+    }
+
+    /**
+     * Whether two instances of a core (the file and its shadow copy) run independently in one process here.
+     *
+     * libretro-kmp opens cores with JNA's default flags, `RTLD_LAZY | RTLD_GLOBAL`. On macOS, the weak definitions of a
+     * global image are shared by every image loaded after it (C++ templates such as DeSmuME's `armcpu_exec<0>`), so
+     * the shadow would run the main core's code on the main core's globals: [preloadIsolated] works around it. Windows
+     * keeps modules apart. Linux (ELF interposition) isn't verified: no shadow there. The proper fix is in libretro-kmp:
+     * `Native.load(path, LibretroLib::class.java, mapOf(Library.OPTION_OPEN_FLAGS to RTLD_NOW or RTLD_LOCAL))`.
+     */
+    val isolatedInstances: Boolean get() = Platform.current() != Platform.LINUX_X64
+
+    /**
+     * On macOS, opens this core's file and its shadow copy with `RTLD_NOW | RTLD_LOCAL` before libretro-kmp opens them
+     * (`RTLD_GLOBAL`), and keeps them open: each image binds to its own symbols at that point, and libretro-kmp's
+     * later opens return the same, already bound images. Must run before the first instance of the core is created
+     * (measured with two copies: both preloaded keeps them apart; preloading the copy after the main file was opened
+     * global doesn't). No-op elsewhere.
+     */
+    fun preloadIsolated(directory: Path) {
+        if (Platform.current() != Platform.MAC_ARM64 && Platform.current() != Platform.MAC_X64) return
+        for (file in listOf(resolve(directory), resolveShadow(directory))) synchronized(preloaded) {
+            preloaded.getOrPut(file.toAbsolutePath()) {
+                NativeLibrary.getInstance(file.toAbsolutePath().toString(), mapOf(Library.OPTION_OPEN_FLAGS to MAC_RTLD_NOW_LOCAL))
+            }
+        }
+    }
+
+    /** Whether [file] was opened by [preloadIsolated] (or no preload is needed on this platform). */
+    internal fun isPreloaded(file: Path): Boolean =
+        (Platform.current() != Platform.MAC_ARM64 && Platform.current() != Platform.MAC_X64) ||
+            synchronized(preloaded) { file.toAbsolutePath() in preloaded }
 
     /** Downloads the core from the libretro buildbot into [directory] if it isn't there yet. */
     fun resolve(directory: Path): Path {
@@ -109,7 +174,7 @@ enum class LibretroCoreSpec(
     /** Checks the core file against the pinned hash of its platform (see [sha256]). */
     private fun verify(file: Path, platform: Platform) {
         val expected = sha256[platform.buildbotPath] ?: return
-        val actual = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file)).joinToString("") { "%02x".format(it) }
+        val actual = sha256(file).joinToString("") { "%02x".format(it) }
         if (actual != expected) {
             throw IOException(
                 "Unexpected $buildbotName build at $file (sha256 $actual, expected $expected). " +
@@ -117,6 +182,8 @@ enum class LibretroCoreSpec(
             )
         }
     }
+
+    private fun sha256(file: Path): ByteArray = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file))
 
     /** Platform naming used by the libretro buildbot. */
     private enum class Platform(val buildbotPath: String, val extension: String) {

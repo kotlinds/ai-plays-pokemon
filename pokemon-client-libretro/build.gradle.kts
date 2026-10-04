@@ -17,6 +17,7 @@ kotlin {
 dependencies {
     api(project(":pokemon-client"))
     api(libs.libretro.kmp)
+    implementation(libs.jna) // music during pauses: opens core files with RTLD_LOCAL (see LibretroCoreSpec.preloadIsolated)
     testImplementation(libs.kotlin.test)
 }
 

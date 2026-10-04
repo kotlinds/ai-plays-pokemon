@@ -45,6 +45,12 @@ data class PlayerSettings(
      * platforms and the Violet lift); off, it only walks and the AI operates them itself (to compare both).
      */
     val solvePuzzles: Boolean = true,
+    /**
+     * Music during pauses: while the game is paused (by you, or while the AI thinks), its music goes on, and the game
+     * resumes with the music where it got to instead of jumping back. Only when the sound is on; changes nothing in
+     * the game but its sound playback.
+     */
+    val musicDuringPauses: Boolean = true,
 )
 
 enum class ControlMode(val label: String, val description: String) {

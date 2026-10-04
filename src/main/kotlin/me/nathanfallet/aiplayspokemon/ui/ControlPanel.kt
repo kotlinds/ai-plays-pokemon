@@ -59,6 +59,7 @@ import me.nathanfallet.aiplayspokemon.decision.llm.LlmProvider
 import dev.kotlinds.pokemonclient.Observation
 
 /** The right-hand panel: AI controls, what the AI sees, and what it decided. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ControlPanel(controller: AppController, modifier: Modifier = Modifier) {
     val player by controller.player.collectAsState()
@@ -74,8 +75,8 @@ fun ControlPanel(controller: AppController, modifier: Modifier = Modifier) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        // Emulator controls
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Emulator controls (wrapping: they don't all fit on one line in a narrow panel)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = controller::togglePause) { Text(if (status.running) "Pause game" else "Resume game") }
             FilterChip(
                 selected = status.fastForward,
@@ -87,6 +88,7 @@ fun ControlPanel(controller: AppController, modifier: Modifier = Modifier) {
                 onClick = { controller.emulator.setMuted(!status.muted) },
                 label = { Text("Sound") },
             )
+            MusicDuringPausesChip(controller)
         }
 
         // Which AI plays: Jev, or an LLM (provider + model)
@@ -116,6 +118,22 @@ fun ControlPanel(controller: AppController, modifier: Modifier = Modifier) {
         HorizontalDivider()
         KeyboardHelp()
     }
+}
+
+/**
+ * "Music during pauses": the music goes on while the game is paused, and the game resumes in sync with it. Disabled
+ * (with the reason as its label) when the ROM / core / platform doesn't support it.
+ */
+@Composable
+private fun MusicDuringPausesChip(controller: AppController) {
+    val settings by controller.settings.collectAsState()
+    val unavailable = controller.emulator.musicDuringPausesUnavailable
+    FilterChip(
+        selected = settings.musicDuringPauses && unavailable == null,
+        enabled = unavailable == null,
+        onClick = { controller.updateSettings { it.copy(musicDuringPauses = !it.musicDuringPauses) } },
+        label = { Text(if (unavailable == null) "Music during pauses" else "Music during pauses (unavailable)") },
+    )
 }
 
 /** Provider chips and model id for the LLM backend. */
