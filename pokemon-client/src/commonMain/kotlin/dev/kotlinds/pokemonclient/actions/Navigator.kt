@@ -67,6 +67,11 @@ class Navigator(
                 return Step.Failed(ActionError.VerificationFailed(description, expected = screen.entries[goal].label, actual = screen.currentLabel(), attempts = corrections))
             }
             val from = (cursor as? Cursor.At)?.index
+            // A touch-only screen (no cursor, the D-pad moves nothing: Platinum's intro YES / NO, its Poké Ball): a key
+            // press would not reveal a cursor (the game may even answer "use the touch screen"), so touch the entry.
+            if (from == null && screen.entries[goal].touch != null && screen.touchOnly()) {
+                return Step.Failed(ActionError.Unreachable(description, screen.entries[goal].label))
+            }
             val button = if (from == null) REVEAL_BUTTON else firstStep(screen, from, goal)
                 ?: return Step.Failed(ActionError.Unreachable(description, screen.entries[goal].label))
             lastIndex = from?.let { screen.topology.next(it, button) }
@@ -173,6 +178,10 @@ class Navigator(
         }
         return null
     }
+
+    /** True when no D-pad button moves the cursor anywhere on this screen: it is driven by touch only. */
+    private fun Screen.Selectable.touchOnly(): Boolean =
+        entries.indices.all { i -> DIRECTIONS.all { topology.next(i, it) == null } }
 
     private fun Screen.Selectable.currentLabel() =
         (cursor as? Cursor.At)?.let { entries.getOrNull(it.index)?.label } ?: "hidden cursor"

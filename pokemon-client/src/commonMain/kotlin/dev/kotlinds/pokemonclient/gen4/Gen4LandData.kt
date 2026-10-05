@@ -1,8 +1,8 @@
-package dev.kotlinds.pokemonclient.hgss
+package dev.kotlinds.pokemonclient.gen4
 
-import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.s32
-import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.u16
-import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.u32
+import dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.s32
+import dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.u16
+import dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.u32
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.max
@@ -10,7 +10,7 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * One land data member (NARC [HgssWorldAddresses.LAND_DATA_NARC], not extracted by the decomp): the 32x32 tile
+ * One land data member (NARC `fielddata/land_data/land_data.narc`, not extracted by the decomp): the 32x32 tile
  * permissions of a matrix block and its BDHC height surfaces. (Building placements and the NSBMD model are skipped.)
  *
  * Layout (found by the agent, NOTES-partie-claude.md 17s / 17ad, checked on every member of the HG US ROM):
@@ -19,19 +19,19 @@ import kotlin.math.roundToInt
  *   exterior, 0x58 for some outdoor blocks): the permissions start at `0x14 + extra`;
  * - permissions (32x32 u16, row-major), buildings, model, BDHC, back to back.
  */
-class HgssLandData(
+class Gen4LandData(
     /** Raw attribute of each tile (`z * 32 + x`): bit 15 collision, bits 0-7 behavior (asm/unk_02054648.s). */
     val attributes: IntArray,
     /** Height surfaces, or null when the member has none. */
-    val bdhc: HgssBdhc?,
+    val bdhc: Gen4Bdhc?,
 ) {
     fun attribute(x: Int, z: Int): Int = attributes[z * BLOCK + x]
 
     companion object {
-        private const val BLOCK = HgssMapMatrix.BLOCK_TILES
+        private const val BLOCK = Gen4MapMatrix.BLOCK_TILES
         private const val MARKER = 0x1234
 
-        fun parse(b: ByteArray): HgssLandData {
+        fun parse(b: ByteArray): Gen4LandData {
             val permissionsSize = u32(b, 0x00).toInt()
             val buildingsSize = u32(b, 0x04).toInt()
             val modelSize = u32(b, 0x08).toInt()
@@ -40,8 +40,8 @@ class HgssLandData(
             require(permissionsSize >= BLOCK * BLOCK * 2) { "land data without a permission grid" }
             val attributes = IntArray(BLOCK * BLOCK) { u16(b, start + 2 * it) }
             val bdhcStart = start + permissionsSize + buildingsSize + modelSize
-            val bdhc = if (bdhcSize > 0 && bdhcStart + bdhcSize <= b.size) HgssBdhc.parse(b, bdhcStart) else null
-            return HgssLandData(attributes, bdhc)
+            val bdhc = if (bdhcSize > 0 && bdhcStart + bdhcSize <= b.size) Gen4Bdhc.parse(b, bdhcStart) else null
+            return Gen4LandData(attributes, bdhc)
         }
     }
 }
@@ -57,7 +57,7 @@ class HgssLandData(
  *
  * Coordinates are block-local, centered on the block: x, z in `[-256, 256]` units (16 units per tile).
  */
-class HgssBdhc(private val plates: List<Plate>) {
+class Gen4Bdhc(private val plates: List<Plate>) {
 
     /** A rectangle [x1, x2] x [z1, z2] on the plane `nx*x + ny*y + nz*z + d = 0` (units, not fx32). */
     data class Plate(val x1: Double, val z1: Double, val x2: Double, val z2: Double, val nx: Double, val ny: Double, val nz: Double, val d: Double)
@@ -87,10 +87,10 @@ class HgssBdhc(private val plates: List<Plate>) {
     }
 
     companion object {
-        private const val BLOCK = HgssMapMatrix.BLOCK_TILES
+        private const val BLOCK = Gen4MapMatrix.BLOCK_TILES
         private const val FX = 4096.0
 
-        fun parse(b: ByteArray, start: Int): HgssBdhc? {
+        fun parse(b: ByteArray, start: Int): Gen4Bdhc? {
             if (b.decodeToString(start, start + 4) != "BDHC") return null
             val points = u16(b, start + 4)
             val normals = u16(b, start + 6)
@@ -114,7 +114,7 @@ class HgssBdhc(private val plates: List<Plate>) {
                 val k = u16(b, p + 6)
                 Plate(px[a], pz[a], px[c], pz[c], nx[n], ny[n], nz[n], d[k])
             }
-            return HgssBdhc(list)
+            return Gen4Bdhc(list)
         }
     }
 }

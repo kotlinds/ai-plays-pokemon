@@ -125,105 +125,20 @@ internal val DIRECTIONS = listOf(Button.UP, Button.DOWN, Button.LEFT, Button.RIG
 
 // region Naming keyboard
 
-/** `NameScreenType` (include/launch_application.h:50): who is being named. */
-enum class NameScreenType(val purpose: String) {
-    PLAYER("player"), POKEMON("pokemon"), BOX("box"), RIVAL("rival"), NUMBER("number"), GROUP("group");
-
-    companion object {
-        fun of(value: Int) = entries.getOrNull(value)
-    }
-}
-
 /**
- * The naming keyboard (src/naming_screen.c), wherever it was opened from: detected with the vblank callback it
- * installs in `gSystem` (the only test that also covers the in-battle nickname screen and Oak's intro).
- *
- * Entries: one per cell of the 13 × 6 grid of the current page (index = `y * 13 + x`, the game's cursor), read from
- * the live `keyboard` array. Multi-cell buttons (tabs, BACK, OK) appear once per cell with the same id.
+ * The naming keyboard of HeartGold / SoulSilver: the Gen 4 decoder ([dev.kotlinds.pokemonclient.gen4.Gen4NamingKeyboard])
+ * with the HG/SS addresses (vblank callback, `sAppData`) and palette fade.
  */
 internal object HgssNamingKeyboard {
 
-    fun decode(mem: HgssMemory, version: HgssKeyboardPcShopVersion): Screen? {
-        if (mem.fn(mem.version.gSystem + K.SYS_VBLANK_INTR) != version.namingVBlankCallback) return null
-        val data = mem.ptr(version.namingAppData) ?: return null
-        // After a capture with a full party: "X was transferred to BOX 1 in Bill's PC!" printed on the keyboard,
-        // then the screen fades out by itself (naming_screen.c:572-590).
-        val pageSwitch = mem.s32(data + K.NS_PAGE_SWITCH_STATE)
-        if (pageSwitch == K.NS_PAGE_SWITCH_WAIT_BATTLE_MESSAGE || pageSwitch == K.NS_PAGE_SWITCH_DELAY_AND_FADE_OUT) {
-            mem.gameString(mem.ptr(data + K.NS_BATTLE_MSG_STRING))?.takeIf { it.isNotBlank() }?.let { text ->
-                val awaiting = if (pageSwitch == K.NS_PAGE_SWITCH_WAIT_BATTLE_MESSAGE) Awaiting.TEXT_PRINTING else Awaiting.ANIMATION
-                return Screen.Dialogue(TextSource.MENU, null, text, awaiting)
-            }
-        }
-        val ready = pageSwitch == K.NS_PAGE_SWITCH_IDLE &&
-            mem.s32(data + K.NS_IGNORE_INPUT) == 0 && mem.u16(mem.version.paletteFadeActive) == 0
-        if (!ready) return Screen.Animation(AnimationKind.TRANSITION)
-
-        val cells = IntArray(K.KEYBOARD_COLUMNS * K.KEYBOARD_ROWS) { mem.u16(data + K.NS_KEYBOARD + 2L * it) }
-        val x = mem.s32(data + K.NS_CURSOR_X)
-        val y = mem.s32(data + K.NS_CURSOR_Y)
-        val length = mem.u16(data + K.NS_TEXT_CURSOR_POS).coerceIn(0, K.ENTRY_BUF_SIZE)
-        val type = NameScreenType.of(mem.s32(data + K.NS_TYPE))
-        return Screen.Keyboard(
-            purpose = type?.purpose ?: "other",
-            page = pageName(mem.s32(data + K.NS_PAGE)),
-            buffer = HgssText.decode(mem.chars(data + K.NS_ENTRY_BUF, length)),
-            maxLength = mem.s32(data + K.NS_MAX_LEN),
-            entries = cells.map(::entry),
-            cursor = if (x in 0 until K.KEYBOARD_COLUMNS && y in 0 until K.KEYBOARD_ROWS) Cursor.At(y * K.KEYBOARD_COLUMNS + x) else Cursor.Hidden,
-            topology = topology(cells),
-            cancel = CancelBehavior.NONE,
+    fun decode(mem: HgssMemory, version: HgssKeyboardPcShopVersion): Screen? =
+        dev.kotlinds.pokemonclient.gen4.Gen4NamingKeyboard.decode(
+            mem, mem.version.gSystem,
+            dev.kotlinds.pokemonclient.gen4.Gen4NamingAddresses(version.namingVBlankCallback, version.namingAppData),
+            fading = mem.u16(mem.version.paletteFadeActive) != 0,
         )
-    }
 
-    private fun pageName(page: Int) = when (page) {
-        0 -> "upper"
-        1 -> "lower"
-        2 -> "others"
-        4 -> "numpad"
-        else -> "page$page"
-    }
-
-    /** Ids from the key codes only: the labels are for display. */
-    private fun entry(code: Int): Entry = when (code) {
-        K.KEY_PAGE_UPPER -> Entry("page:upper", "UPPER")
-        K.KEY_PAGE_LOWER -> Entry("page:lower", "lower")
-        K.KEY_PAGE_OTHERS -> Entry("page:others", "Others")
-        K.KEY_BACK -> Entry("option:back", "BACK")
-        K.KEY_OK -> Entry("option:ok", "OK")
-        K.KEY_SKIP -> Entry("key:skip", "", selectable = false)
-        else -> {
-            val char = HgssData.charmap[code]?.takeIf { code < K.KEY_BUTTON_START }
-            if (char != null) Entry("key:$char", char) else Entry("key:0x${code.toString(16)}", "?", selectable = false)
-        }
-    }
-
-    /**
-     * `NamingScreen_MoveKeyboardCursor` (naming_screen.c:1396): add the delta with wrap-around on both axes (row 0
-     * included), then keep stepping the same way while the cell is SKIP or the same button we started on (so a
-     * multi-cell button is crossed in one press). The `prevY == 0` branch is unreachable: vertical moves out of row 0
-     * never land on SKIP cells.
-     */
-    fun topology(cells: IntArray): Topology = precomputedTopology(cells.size) { from, button ->
-        val (dx, dy) = when (button) {
-            Button.UP -> 0 to -1
-            Button.DOWN -> 0 to 1
-            Button.LEFT -> -1 to 0
-            Button.RIGHT -> 1 to 0
-            else -> return@precomputedTopology null
-        }
-        val cols = K.KEYBOARD_COLUMNS
-        val rows = K.KEYBOARD_ROWS
-        val start = cells[from]
-        var x = (from % cols + dx).mod(cols)
-        var y = (from / cols + dy).mod(rows)
-        var guard = 0
-        while ((cells[y * cols + x] == K.KEY_SKIP || (cells[y * cols + x] == start && start > K.KEY_BUTTON_START)) && guard++ < cols * rows) {
-            x = (x + dx).mod(cols)
-            y = (y + dy).mod(rows)
-        }
-        y * cols + x
-    }
+    fun topology(cells: IntArray): Topology = dev.kotlinds.pokemonclient.gen4.Gen4NamingKeyboard.topology(cells)
 }
 
 // endregion

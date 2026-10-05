@@ -88,8 +88,9 @@ class PauseMusicCheck(
     override fun close() {
         if (shadowDelegate.isInitialized()) shadow.close()
     }
-    private val layout = SoundDriverLayout.forRom(rom) ?: error("music during pauses doesn't support this ROM")
-    private val resync = SoundResync(layout, spec.soundSplicer)
+    // Lazy: the bench also drives ROMs whose sound driver isn't known (Platinum); only the pausemusic commands need it.
+    private val layout by lazy { SoundDriverLayout.forRom(rom) ?: error("music during pauses doesn't support this ROM") }
+    private val resync by lazy { SoundResync(layout, spec.soundSplicer) }
     private val rate get() = main.sampleRate.roundToInt()
 
     private fun seconds(s: Double) = (s * main.fps).roundToInt()

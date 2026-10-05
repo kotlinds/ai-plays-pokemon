@@ -1,16 +1,16 @@
-package dev.kotlinds.pokemonclient.hgss
+package dev.kotlinds.pokemonclient.gen4
 
 /**
- * The Generation 4 character encoding (HeartGold / SoulSilver): u16 code → text.
+ * The Generation 4 character encoding (Diamond / Pearl / Platinum / HeartGold / SoulSilver): u16 code → text.
  *
  * Generated from the decomp's `charmap.txt` (pret/pokeheartgold, version 2021.08.17), the printable characters only:
- * the `{COMMAND}` entries are control codes handled by [HgssText]. The table is the same for every language of the
+ * the `{COMMAND}` entries are control codes handled by [Gen4Text]. The table is the same for every language of the
  * game (the European letters, accents and symbols all have their own codes), so it decodes a French ROM as well.
  *
  * Stored as runs of consecutive codes (one string per run, one character per code) to stay small; a few codes get
  * a special rendering (see [table]).
  */
-internal object HgssCharmap {
+internal object Gen4Charmap {
 
     /** [chars] holds the characters of codes `start`, `start + 1`, ... (one UTF-16 char each). */
     private class Run(val start: Int, val chars: String)

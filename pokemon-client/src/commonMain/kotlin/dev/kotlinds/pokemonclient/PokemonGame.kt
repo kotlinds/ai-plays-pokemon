@@ -18,13 +18,15 @@ interface PokemonGame {
     /** Human-readable name, e.g. "Pokémon HeartGold (USA)". */
     val name: String
 
-    /** Reads the current situation from a snapshot of the console's main RAM (older agent-facing view). */
-    fun observe(memory: Memory): Observation
+    /**
+     * Reads the current situation from a snapshot of the console's main RAM (older agent-facing view). By default it
+     * is derived from [state] ([Observation.of]): a game only overrides it to give more (its legacy text map...).
+     */
+    fun observe(memory: Memory): Observation = Observation.of(state(memory))
 
     /** Reads the current situation into the common typed model. */
     fun state(memory: Memory): GameState
 
-    /** Reads which buttons the game has registered, so presses can check themselves (see [ActionScope.tap]). */
     /** The static maps of the game (tiles, warps, people...) read from the ROM, or null when not available. */
     val world: dev.kotlinds.pokemonclient.world.WorldSource? get() = null
 
@@ -40,6 +42,7 @@ interface PokemonGame {
      */
     fun scriptVariable(memory: Memory, id: Int): Int? = null
 
+    /** Reads which buttons the game has registered, so presses can check themselves (see [ActionScope.tap]). */
     val inputProbe: InputProbe
 
     /**

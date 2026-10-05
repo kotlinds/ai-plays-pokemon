@@ -1,17 +1,17 @@
-package dev.kotlinds.pokemonclient.hgss
+package dev.kotlinds.pokemonclient.gen4
 
-import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.u16
-import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.u8
+import dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.u16
+import dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.u8
 
 /**
- * A map matrix (`fielddata/mapmatrix`, NARC [HgssWorldAddresses.MAP_MATRIX_NARC]): a grid of blocks of 32x32 tiles
+ * A map matrix (`fielddata/mapmatrix`, NARC `fielddata/mapmatrix/map_matrix.narc`): a grid of blocks of 32x32 tiles
  * that share one coordinate space. The player's global tile position (MapObject x/z) is `block * 32 + local`, so
  * tile (x, z) of the matrix is tile (x % 32, z % 32) of the land data of block (x / 32, z / 32).
  *
  * The Johto/Kanto overworld is matrix 0 (47x17 blocks) and carries a zone id per block; buildings and caves are
  * small matrices without one (every block belongs to the zone being loaded).
  */
-class HgssMapMatrix(
+class Gen4MapMatrix(
     val id: Int,
     /** Internal name (e.g. `map`, `m_gym0401_`). */
     val name: String,
@@ -41,7 +41,7 @@ class HgssMapMatrix(
          * u8 hasHeaders, u8 hasAltitudes, u8 nameLength, name, [u16 headers[w*h]], [u8 altitudes[w*h]],
          * u16 landData[w*h].
          */
-        fun parse(id: Int, b: ByteArray): HgssMapMatrix {
+        fun parse(id: Int, b: ByteArray): Gen4MapMatrix {
             val width = u8(b, 0)
             val height = u8(b, 1)
             val hasHeaders = u8(b, 2) != 0
@@ -53,7 +53,7 @@ class HgssMapMatrix(
             val zones = if (hasHeaders) IntArray(n) { u16(b, o + 2 * it) }.also { o += 2 * n } else null
             val altitudes = if (hasAltitudes) IntArray(n) { u8(b, o + it) }.also { o += n } else null
             val land = IntArray(n) { u16(b, o + 2 * it) }
-            return HgssMapMatrix(id, name, width, height, zones, altitudes, land)
+            return Gen4MapMatrix(id, name, width, height, zones, altitudes, land)
         }
     }
 }

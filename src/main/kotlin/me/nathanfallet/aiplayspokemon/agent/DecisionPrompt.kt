@@ -18,6 +18,11 @@ object DecisionPrompt {
         "Play Pokémon HeartGold like a good player: follow the story, talk to people to learn where to go, " +
             "explore new places, win battles, catch Pokémon and keep the team healthy."
 
+    /** The default objective for the game named [gameName] (the detected ROM's name, e.g. "Pokémon Platinum (USA)"). */
+    fun defaultObjective(gameName: String): String =
+        "Play ${gameName.substringBefore(" (")} like a good player: follow the story, talk to people to learn where to go, " +
+            "explore new places, win battles, catch Pokémon and keep the team healthy."
+
     /** What any player of the series knows about the controls; not specific to the situation. */
     private const val CONVENTIONS =
         "How the game works: a D-pad press turns you to face that direction if you weren't already, " +
@@ -27,8 +32,8 @@ object DecisionPrompt {
             "of a room, stand on them and press towards the edge. People walk around and block the way. " +
             "PCs, TVs and bookshelves are optional; the story moves forward by talking to people and going to new places."
 
-    private fun instructions(settings: PlayerSettings, planner: Boolean): String = buildString {
-        append("You are playing Pokémon HeartGold on a Nintendo DS. ")
+    private fun instructions(settings: PlayerSettings, planner: Boolean, gameName: String): String = buildString {
+        append("You are playing ${gameName.substringBefore(" (")} on a Nintendo DS. ")
         append(
             when (settings.mode) {
                 ControlMode.PURE -> "You hold the controller: each option is a button to press (or waiting). "
@@ -55,6 +60,8 @@ object DecisionPrompt {
         generative: Boolean,
         plannerGoal: String? = null,
         planner: Boolean = false,
+        /** The game being played (the detected ROM's name): the prompt names it instead of assuming HeartGold. */
+        gameName: String = "Pokémon HeartGold",
     ) = ChoiceRequest(
         state = buildJsonObject {
             put("objective", objective)
@@ -63,7 +70,7 @@ object DecisionPrompt {
             put("game", turn.state)
             put("memory", memory.describe(settings.exploredMap, turn.observation))
         },
-        instructions = instructions(settings, planner),
+        instructions = instructions(settings, planner, gameName),
         options = turn.options.associate { it.key to it.description },
         allowSequence = generative && settings.allowSequences,
         reasoning = settings.reasoning,

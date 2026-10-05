@@ -38,7 +38,7 @@ class AgentSession(
 
     /** What the player is trying to achieve; editable at any time. */
     @Volatile
-    var objective: String = DecisionPrompt.DEFAULT_OBJECTIVE
+    var objective: String = DecisionPrompt.defaultObjective(game.name)
 
     /** Goal written by the planner in hybrid mode, shown to the fast decider. */
     @Volatile
@@ -71,6 +71,7 @@ class AgentSession(
         generative = generative,
         plannerGoal = plannerGoal.takeIf { settings().mode == ControlMode.HYBRID && !planner },
         planner = planner,
+        gameName = game.name,
     )
 
     /** What happened when carrying out a choice (and its sequence). */

@@ -180,7 +180,7 @@ class HgssWorldSource(private val rom: NdsRom, private val version: HgssVersion)
      * zone_event files give them type 2), whose flag is `script - 8000 + HIDDEN_ITEMS_FLAG_BASE`
      * (HiddenItemScriptNoToFlagId, src/fieldmap.c); a sign otherwise.
      */
-    private fun sign(zone: Int, index: Int, bg: HgssZoneEvents.BgEvent): Sign =
+    private fun sign(zone: Int, index: Int, bg: dev.kotlinds.pokemonclient.gen4.Gen4ZoneEvents.BgEvent): Sign =
         if (bg.script in HIDDEN_ITEM_SCRIPTS) {
             Sign(zone, index, bg.x, bg.z, bg.script, SignKind.HIDDEN_ITEM, bg.script - HIDDEN_ITEM_SCRIPTS.first + HIDDEN_ITEMS_FLAG_BASE)
         } else Sign(zone, index, bg.x, bg.z, bg.script)

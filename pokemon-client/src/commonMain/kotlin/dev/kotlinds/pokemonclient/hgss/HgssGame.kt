@@ -31,7 +31,7 @@ import dev.kotlinds.pokemonclient.GameMode as AgentMode
  * - `party.hp`: "Cyndaquil 20/20, Pidgey 3/15"; `party.count`
  * - `money`, `badges`, `bag` ("<kinds> kinds, <total> items")
  */
-class HgssGame(private val version: HgssVersion, rom: NdsRom? = null) : PokemonGame {
+class HgssGame(private val version: HgssVersion, rom: NdsRom? = null) : dev.kotlinds.pokemonclient.gen4.Gen4Game(version.gSystem) {
 
     /** Built from the ROM when one is given (maps are decoded lazily, area by area). */
     override val world: HgssWorldSource? = rom?.let { HgssWorldSource(it, version) }?.also { HgssData.useWorld(it) }

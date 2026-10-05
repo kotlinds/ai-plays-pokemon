@@ -3,6 +3,8 @@ package dev.kotlinds.pokemonclient
 import dev.kotlinds.NdsRom
 import dev.kotlinds.pokemonclient.hgss.HgssGame
 import dev.kotlinds.pokemonclient.hgss.HgssVersion
+import dev.kotlinds.pokemonclient.platinum.PlatinumGame
+import dev.kotlinds.pokemonclient.platinum.PlatinumVersion
 
 /**
  * Registry of supported ROMs, keyed by the NDS game code.
@@ -16,6 +18,8 @@ object PokemonGames {
     private val games: Map<String, (NdsRom) -> PokemonGame> = buildMap {
         // HeartGold / SoulSilver: one reader, one address table per ROM (see HgssVersion.ALL).
         HgssVersion.ALL.forEach { version -> put(version.gameCode) { rom -> HgssGame(version, rom) } }
+        // Platinum: early support (intro, position, current map), see PlatinumGame.
+        PlatinumVersion.ALL.forEach { version -> put(version.gameCode) { rom -> PlatinumGame(version, rom) } }
     }
 
     /** The game of [rom] (its maps and data read from it), or null when it isn't supported. */

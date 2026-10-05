@@ -26,6 +26,8 @@ kotlin {
                 // ROM tests run only when POKEMON_ROM is set: make it an input so results with and without a ROM
                 // aren't taken for each other from the build cache.
                 inputs.property("pokemonRom", System.getenv("POKEMON_ROM").orEmpty())
+                // Same for the Platinum ROM tests (PLATINUM_ROM, skipped when unset).
+                inputs.property("platinumRom", System.getenv("PLATINUM_ROM").orEmpty())
             }
         }
     }

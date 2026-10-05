@@ -1,12 +1,12 @@
-package dev.kotlinds.pokemonclient.hgss
+package dev.kotlinds.pokemonclient.gen4
 
-import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.s16
-import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.s32
-import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.u16
-import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.u32
+import dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.s16
+import dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.s32
+import dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.u16
+import dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.u32
 
 /**
- * The events of a zone as stored in the ROM (NARC [HgssWorldAddresses.ZONE_EVENT_NARC], member
+ * The events of a zone as stored in the ROM (NARC `fielddata/eventdata/zone_event.narc`, member
  * `MapHeader.eventsBank`), with the raw fields of include/map_events_internal.h. The readable source of these files
  * is the decomp's `files/fielddata/eventdata/zone_event/<bank>_<name>.json`.
  *
@@ -14,7 +14,7 @@ import dev.kotlinds.pokemonclient.hgss.HgssRomBytes.u32
  * WARP_EVENT[count] (0x0C), u32 count + COORD_EVENT[count] (0x10). Coordinates are global matrix tiles (the game
  * compares them directly with the player's position, src/map_events.c).
  */
-data class HgssZoneEvents(
+data class Gen4ZoneEvents(
     val bgs: List<BgEvent>,
     val objects: List<ObjectEvent>,
     val warps: List<WarpEvent>,
@@ -44,8 +44,8 @@ data class HgssZoneEvents(
         /** Object types handled as trainers (src/overlay_26_022599D0.c: case 1, 2, 4-8). */
         val TRAINER_TYPES = setOf(1, 2, 4, 5, 6, 7, 8)
 
-        fun parse(b: ByteArray): HgssZoneEvents {
-            if (b.size < 16) return HgssZoneEvents(emptyList(), emptyList(), emptyList(), emptyList())
+        fun parse(b: ByteArray): Gen4ZoneEvents {
+            if (b.size < 16) return Gen4ZoneEvents(emptyList(), emptyList(), emptyList(), emptyList())
             var o = 0
             fun <T> section(size: Int, read: (Int) -> T): List<T> {
                 val count = u32(b, o).toInt()
@@ -67,7 +67,7 @@ data class HgssZoneEvents(
             val coords = section(0x10) { p ->
                 CoordEvent(u16(b, p), s16(b, p + 2), s16(b, p + 4), u16(b, p + 6), u16(b, p + 8), u16(b, p + 10), u16(b, p + 12), u16(b, p + 14))
             }
-            return HgssZoneEvents(bgs, objects, warps, coords)
+            return Gen4ZoneEvents(bgs, objects, warps, coords)
         }
     }
 }

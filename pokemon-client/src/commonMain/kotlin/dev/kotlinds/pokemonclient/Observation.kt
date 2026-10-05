@@ -42,7 +42,50 @@ data class Observation(
     val progress: List<String> = emptyList(),
     /** What the story expects next, derived from game flags (optional assist), e.g. "Go to Prof. Elm's lab". */
     val storyGoal: String? = null,
-)
+) {
+    companion object {
+        /**
+         * The older agent-facing view derived from the common model alone (any game): the broad mode from the screen,
+         * the position, the message on screen. Games without a richer legacy view use it ([PokemonGame.observe]).
+         */
+        fun of(state: dev.kotlinds.pokemonclient.state.GameState): Observation {
+            val screen = state.screen
+            val mode = when (screen) {
+                is dev.kotlinds.pokemonclient.state.Screen.Overworld -> GameMode.OVERWORLD
+                is dev.kotlinds.pokemonclient.state.Screen.Intro -> GameMode.INTRO
+                is dev.kotlinds.pokemonclient.state.Screen.Dialogue ->
+                    if (screen.source == dev.kotlinds.pokemonclient.state.TextSource.INTRO) GameMode.INTRO else GameMode.DIALOGUE
+                is dev.kotlinds.pokemonclient.state.Screen.Battle, is dev.kotlinds.pokemonclient.state.Screen.BattleCommand -> GameMode.BATTLE
+                is dev.kotlinds.pokemonclient.state.Screen.Selectable -> if (state.field == null) GameMode.INTRO else GameMode.MENU
+                is dev.kotlinds.pokemonclient.state.Screen.Unknown -> GameMode.UNKNOWN
+                else -> if (state.field == null) GameMode.INTRO else GameMode.DIALOGUE
+            }
+            val field = state.field
+            val kind = screen::class.simpleName ?: "screen"
+            val dialogue = (screen as? dev.kotlinds.pokemonclient.state.Screen.Dialogue)?.text
+            return Observation(
+                mode = mode,
+                location = field?.let { Location(it.mapId, it.mapName, it.x, it.y, it.facing) },
+                summary = buildString {
+                    append(kind)
+                    field?.let { append(" · ${it.mapName} (${it.x}, ${it.y})") }
+                    dialogue?.let { append(" · \"${it.take(60)}\"") }
+                },
+                state = kotlinx.serialization.json.buildJsonObject {
+                    put("screen", kotlinx.serialization.json.JsonPrimitive(kind))
+                    dialogue?.let { put("dialogue", kotlinx.serialization.json.JsonPrimitive(it)) }
+                },
+                facts = buildMap {
+                    put("screen", kind)
+                    field?.let { put("position", "${it.x},${it.y}"); it.facing?.let { f -> put("facing", f.name.lowercase()) } }
+                    dialogue?.let { put("dialogue", it) }
+                },
+                awaitingInput = screen.awaiting == dev.kotlinds.pokemonclient.state.Awaiting.INPUT,
+                dialogue = dialogue,
+            )
+        }
+    }
+}
 
 /** The broad situation the player is in. */
 enum class GameMode {

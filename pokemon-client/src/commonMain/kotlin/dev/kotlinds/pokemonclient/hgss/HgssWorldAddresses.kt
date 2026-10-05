@@ -41,11 +41,11 @@ object HgssWorldAddresses {
     fun mapHeadersAddress(gameCode: String): Long? = mapHeaders[gameCode]
 }
 
-/** Little-endian reads of ROM data (the DS is little-endian). Out-of-range reads throw: ROM data is trusted. */
+/** Little-endian reads of ROM data (the DS is little-endian), the Gen 4 ones ([dev.kotlinds.pokemonclient.gen4.Gen4RomBytes]). */
 internal object HgssRomBytes {
-    fun u8(b: ByteArray, o: Int): Int = b[o].toInt() and 0xFF
-    fun u16(b: ByteArray, o: Int): Int = u8(b, o) or (u8(b, o + 1) shl 8)
-    fun s16(b: ByteArray, o: Int): Int = u16(b, o).toShort().toInt()
-    fun s32(b: ByteArray, o: Int): Int = u16(b, o) or (u16(b, o + 2) shl 16)
-    fun u32(b: ByteArray, o: Int): Long = s32(b, o).toLong() and 0xFFFFFFFFL
+    fun u8(b: ByteArray, o: Int): Int = dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.u8(b, o)
+    fun u16(b: ByteArray, o: Int): Int = dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.u16(b, o)
+    fun s16(b: ByteArray, o: Int): Int = dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.s16(b, o)
+    fun s32(b: ByteArray, o: Int): Int = dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.s32(b, o)
+    fun u32(b: ByteArray, o: Int): Long = dev.kotlinds.pokemonclient.gen4.Gen4RomBytes.u32(b, o)
 }

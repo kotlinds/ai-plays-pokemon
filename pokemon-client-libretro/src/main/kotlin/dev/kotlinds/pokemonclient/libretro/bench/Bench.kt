@@ -157,6 +157,8 @@ private class Bench(
     fun run(command: String) {
         val name = command.substringBefore(':')
         val arg = command.substringAfter(':', "")
+        // Commands reading HeartGold / SoulSilver structures directly (raw reader, party bytes, fishing, loaded map).
+        if (name in HGSS_ONLY && game !is HgssGame) error("`$name` reads HeartGold / SoulSilver RAM directly: not available for ${game.name}")
         when (name) {
             "boot" -> boot(arg.toIntOrNull() ?: 6000)
             "load" -> check(console.loadState(out.resolve(arg).readBytes())) { "state rejected: $arg" }
@@ -499,7 +501,8 @@ private class Bench(
 
     /** Walks [steps] tiles towards [button]: holds it until the player's tile changes, then waits until it stands still. */
     private fun steps(button: Button, steps: Int) {
-        fun position() = HgssReader(scope.memory(), HgssVersion.HEARTGOLD_US).read()?.location?.let { Triple(it.x, it.z, it.moving) }
+        // Any game: the common model's position.
+        fun position() = game.state(scope.memory()).field?.let { Triple(it.x, it.y, it.moving) }
         repeat(steps) {
             val start = position()
             scope.stepUntil(40, InputFrame.of(button)) { position()?.let { (x, z, _) -> x != start?.first || z != start.second } == true }
@@ -569,6 +572,11 @@ private class Bench(
             scope.step(20)
         }
         error("never reached the overworld")
+    }
+
+    private companion object {
+        /** Bench commands that read HeartGold / SoulSilver structures directly ([HgssReader]...). */
+        val HGSS_ONLY = setOf("raw", "rawmon", "box", "where", "watch", "fish", "world")
     }
 
     private fun ram(): ByteArray =

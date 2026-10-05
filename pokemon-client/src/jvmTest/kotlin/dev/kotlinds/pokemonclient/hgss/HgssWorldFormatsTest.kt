@@ -113,14 +113,14 @@ class HgssWorldFormatsTest {
         b.s32(1).u16(16).u16(53).u16(78).u16(7).s32(0)
         b.s32(1).u16(3).u16(11).u16(12).u16(2).u16(7).u16(0).u16(0).u16(0x4109)
         val ev = HgssZoneEvents.parse(b.bytes())
-        assertEquals(HgssZoneEvents.BgEvent(6, 0, 13, 51, 0, 0), ev.bgs.single())
+        assertEquals(dev.kotlinds.pokemonclient.gen4.Gen4ZoneEvents.BgEvent(6, 0, 13, 51, 0, 0), ev.bgs.single())
         val (edith, oldMan) = ev.objects
         assertTrue(edith.isTrainer)
         assertEquals(listOf(9, 29, 3, 5, 3492), listOf(edith.x, edith.z, edith.facing, edith.params[0], edith.script))
         assertTrue(!oldMan.isTrainer)
         assertEquals(583, oldMan.eventFlag)
-        assertEquals(HgssZoneEvents.WarpEvent(16, 53, 78, 7, 0), ev.warps.single())
-        assertEquals(HgssZoneEvents.CoordEvent(3, 11, 12, 2, 7, 0, 0, 0x4109), ev.coords.single())
+        assertEquals(dev.kotlinds.pokemonclient.gen4.Gen4ZoneEvents.WarpEvent(16, 53, 78, 7, 0), ev.warps.single())
+        assertEquals(dev.kotlinds.pokemonclient.gen4.Gen4ZoneEvents.CoordEvent(3, 11, 12, 2, 7, 0, 0, 0x4109), ev.coords.single())
         assertEquals(HgssZoneEvents(emptyList(), emptyList(), emptyList(), emptyList()), HgssZoneEvents.parse(ByteArray(0)))
         assertFailsWith<IllegalArgumentException> { HgssZoneEvents.parse(Bytes().s32(50).s32(0).s32(0).s32(0).bytes()) }
     }
@@ -189,7 +189,7 @@ class HgssWorldFormatsTest {
         assertNull(gym.attribute(40, 0))
         val events = assertNotNull(gym.events())
         assertEquals(15, events.coords.size)
-        assertEquals(HgssZoneEvents.WarpEvent(16, 53, 78, 7, 0), events.warps.single())
+        assertEquals(dev.kotlinds.pokemonclient.gen4.Gen4ZoneEvents.WarpEvent(16, 53, 78, 7, 0), events.warps.single())
 
         val city = HgssLoadedMap(HgssFixtures.load("world_ecruteak"), HgssVersion.HEARTGOLD_US)
         assertEquals(78, city.zoneId)
