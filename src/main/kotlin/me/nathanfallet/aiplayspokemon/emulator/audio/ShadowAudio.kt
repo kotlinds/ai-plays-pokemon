@@ -45,7 +45,6 @@ class ShadowAudio(
     /** Why music during pauses can't run with this ROM / core / platform, or null when it can. */
     val unsupportedReason: String? = when {
         layout == null -> "the ROM's sound driver isn't a known one (ARM7 binary ${SoundDriverLayout.arm7Sha1(rom)})"
-        !spec.isolatedInstances -> "two instances of ${spec.buildbotName} can't run apart on this platform"
         else -> null
     }
 

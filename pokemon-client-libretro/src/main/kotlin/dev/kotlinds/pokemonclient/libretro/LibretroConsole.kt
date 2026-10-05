@@ -96,15 +96,9 @@ class LibretroConsole(
 
     private val core = LibretroCore(
         when (role) {
-            ConsoleRole.MAIN -> {
-                // Before the core is opened for the first time: lets a shadow instance run apart later on.
-                if (spec.isolatedInstances) spec.preloadIsolated(dataDirectory.resolve("cores"))
-                spec.resolve(dataDirectory.resolve("cores"))
-            }
+            ConsoleRole.MAIN -> spec.resolve(dataDirectory.resolve("cores"))
             // A copy of the core file: the same path would give the same library, so the same emulator globals.
-            ConsoleRole.SHADOW -> spec.resolveShadow(dataDirectory.resolve("cores")).also {
-                check(spec.isolatedInstances && spec.isPreloaded(it)) { "a shadow core can't run apart from the main one here" }
-            }
+            ConsoleRole.SHADOW -> spec.resolveShadow(dataDirectory.resolve("cores"))
         }.toString(),
         frontend,
     ).also {
