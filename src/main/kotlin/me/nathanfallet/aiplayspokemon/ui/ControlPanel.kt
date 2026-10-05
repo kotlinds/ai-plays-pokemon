@@ -56,7 +56,7 @@ import me.nathanfallet.aiplayspokemon.agent.RunStats
 import me.nathanfallet.aiplayspokemon.agent.PokemonPlayer
 import me.nathanfallet.aiplayspokemon.decision.DecisionBackend
 import me.nathanfallet.aiplayspokemon.decision.llm.LlmProvider
-import dev.kotlinds.pokemonclient.Observation
+import dev.kotlinds.pokemonclient.view.StateView
 
 /** The right-hand panel: AI controls, what the AI sees, and what it decided. */
 @OptIn(ExperimentalLayoutApi::class)
@@ -65,7 +65,7 @@ fun ControlPanel(controller: AppController, modifier: Modifier = Modifier) {
     val player by controller.player.collectAsState()
     val backend by controller.backend.collectAsState()
     val status by controller.emulator.status.collectAsState()
-    val observation by controller.observation.collectAsState()
+    val panel by controller.panel.collectAsState()
 
     Column(modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("AI plays Pokémon", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
@@ -115,7 +115,7 @@ fun ControlPanel(controller: AppController, modifier: Modifier = Modifier) {
 
         HorizontalDivider()
         val playerState = player?.state?.collectAsState()?.value
-        ObservationSection(observation, playerState?.lastRequestState)
+        AgentViewSection(panel, playerState?.lastRequestState)
         HorizontalDivider()
         KeyboardHelp()
     }
@@ -239,6 +239,8 @@ private fun ExperimentSettings(controller: AppController, backend: DecisionBacke
         Triple("Explored map", settings.exploredMap) { s: PlayerSettings, v: Boolean -> s.copy(exploredMap = v) },
         Triple("Solve movement puzzles", settings.solvePuzzles) { s: PlayerSettings, v: Boolean -> s.copy(solvePuzzles = v) }
             .takeIf { settings.mode != ControlMode.PURE },
+        // Every mode: the map view of the state lists exits too (without destinations when on).
+        Triple("Hide where exits lead", settings.hideDestinations) { s: PlayerSettings, v: Boolean -> s.copy(hideDestinations = v) },
         Triple("Sample probabilities", settings.sampleProbabilities) { s: PlayerSettings, v: Boolean -> s.copy(sampleProbabilities = v) }
             .takeIf { backend == DecisionBackend.JEV },
     )
@@ -434,7 +436,7 @@ private fun DecisionHistory(history: List<Decision>, modifier: Modifier = Modifi
     LazyColumn(modifier) {
         items(history, key = { it.number }) { decision ->
             Text(
-                "#${decision.number}  ${decision.actions.joinToString(",").padEnd(10)} ${(decision.confidence?.let(::percent) ?: "").padStart(4)}  ${decision.observation.summary}",
+                "#${decision.number}  ${decision.actions.joinToString(",").padEnd(10)} ${(decision.confidence?.let(::percent) ?: "").padStart(4)}  ${StateView.summary(decision.state)}",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 maxLines = 1,
@@ -444,18 +446,18 @@ private fun DecisionHistory(history: List<Decision>, modifier: Modifier = Modifi
 }
 
 /**
- * What the AI receives: the full state of the last request (screen + memory) while it plays,
- * otherwise what the RAM reader currently understands of the screen.
+ * What the AI receives: the full state of the last request (screen + memory) while our own loop plays, otherwise
+ * exactly what an agent would get now ([AppController.panel]: `GameSession.describe()` with the current options).
  */
 @Composable
-private fun ObservationSection(observation: Observation?, lastRequestState: JsonObject?) {
+private fun AgentViewSection(panel: AgentView?, lastRequestState: JsonObject?) {
     var showJson by remember { mutableStateOf(false) }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text("What the AI sees", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
         TextButton(onClick = { showJson = !showJson }) { Text(if (showJson) "Hide JSON" else "Show JSON") }
     }
-    Text(observation?.summary ?: "Nothing yet", style = MaterialTheme.typography.bodySmall)
-    val json = lastRequestState ?: observation?.state
+    Text(panel?.summary ?: "Nothing yet", style = MaterialTheme.typography.bodySmall)
+    val json = lastRequestState ?: panel?.view
     if (showJson && json != null) {
         SelectionContainer {
             Text(

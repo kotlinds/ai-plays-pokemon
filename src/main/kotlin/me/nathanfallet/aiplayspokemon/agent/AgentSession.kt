@@ -1,10 +1,10 @@
 package me.nathanfallet.aiplayspokemon.agent
 
-import dev.kotlinds.pokemonclient.Observation
 import dev.kotlinds.pokemonclient.PokemonGame
-import dev.kotlinds.pokemonclient.RamMemory
 import dev.kotlinds.pokemonclient.actions.GameAction
 import dev.kotlinds.pokemonclient.runtime.Recorder
+import dev.kotlinds.pokemonclient.state.GameState
+import dev.kotlinds.pokemonclient.world.Area
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -29,6 +29,7 @@ class AgentSession(
         // The knowledge level chosen in the app, like the MCP agents get (walkthrough: hidden items, puzzle plans...).
         knowledge = { settings().knowledge },
         solvePuzzles = { settings().solvePuzzles },
+        hideDestinations = { settings().hideDestinations },
     )
     val memory = AgentMemory()
 
@@ -47,20 +48,21 @@ class AgentSession(
     /** One possible action, as offered to models: a stable key and a description. */
     data class Option(val key: String, val description: String, val action: GameAction)
 
-    /** What the AI sees and can do at one moment. */
-    class Turn(val observation: Observation, val state: JsonObject, val options: List<Option>) {
+    /**
+     * What the AI sees and can do at one moment: [state] is what the model reads ([GameSession.describe]), made from the
+     * typed [gameState] (what the memory and the run's statistics work on).
+     */
+    class Turn(val gameState: GameState, val state: JsonObject, val options: List<Option>) {
         /** Turns a key chosen by a model back into the typed action, or null if it isn't offered now. */
         fun resolve(key: String): Option? = options.firstOrNull { it.key == key }
     }
 
-    /** Observes the game (the agent's view + the legacy observation used by the memory) and lists the options. */
+    /** Observes the game (the agent's view and the typed state it comes from) and lists the options. */
     suspend fun prepare(): Turn {
-        val observation = observe()
-        memory.observeMap(observation)
-        val state = gameSession.describe()
-        val gameState = gameSession.state()
+        val (gameState, state) = gameSession.describeWithState()
+        memory.observeMap(gameState.field, area(gameState))
         val options = gameSession.registry.enumerate(gameState, settings().mode.actionMode).values.map { Option(it.key, describe(it, state), it) }
-        return Turn(observation, state, options)
+        return Turn(gameState, state, options)
     }
 
     fun request(turn: Turn, generative: Boolean, planner: Boolean = false): ChoiceRequest = DecisionPrompt.build(
@@ -75,7 +77,7 @@ class AgentSession(
     )
 
     /** What happened when carrying out a choice (and its sequence). */
-    data class Report(val after: Observation, val performed: List<String>, val problem: String?, val skipped: Int)
+    data class Report(val after: GameState, val performed: List<String>, val problem: String?, val skipped: Int)
 
     /**
      * Carries out [choice], then the options of [then] one by one (each resolved against the situation at that
@@ -90,14 +92,15 @@ class AgentSession(
         while (true) {
             val result = gameSession.act(option.action)
             actionsDone++
-            val after = observe()
+            val after = gameSession.state()
             val problem = result["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull
-            memory.record(option.key, current.observation, after, thought.takeIf { performed.isEmpty() }, problem)
+            memory.record(option.key, current.gameState, after, area(after), thought.takeIf { performed.isEmpty() }, problem)
             performed += option.key
-            val changed = after.mode != current.observation.mode || after.location?.mapId != current.observation.location?.mapId
+            val before = current.gameState
+            val changed = after.screen::class != before.screen::class || after.field?.mapId != before.field?.mapId
             if (remaining.isEmpty() || problem != null || changed) return Report(after, performed, problem, remaining.size)
             current = prepare()
-            option = current.resolve(remaining.first()) ?: return Report(current.observation, performed, null, remaining.size)
+            option = current.resolve(remaining.first()) ?: return Report(current.gameState, performed, null, remaining.size)
             remaining = remaining.drop(1)
         }
     }
@@ -116,7 +119,8 @@ class AgentSession(
         }
     }
 
-    private suspend fun observe(): Observation = game.observe(RamMemory(host.readMainRam()))
+    /** The ROM's map of where the player is in [state], when the game has one (for the explored map). */
+    private fun area(state: GameState): Area? = state.field?.let { game.world?.areaOf(it.mapId) }
 
     /** A one-line description of an action for models that read option lists. */
     private fun describe(action: GameAction, state: JsonObject): String = when (action) {

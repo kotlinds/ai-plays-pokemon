@@ -46,6 +46,13 @@ data class PlayerSettings(
      */
     val solvePuzzles: Boolean = true,
     /**
+     * Hide where the ways out lead (ActionSettings.hideDestinations): exits, warps and holes are listed without their
+     * destination, `go_to` only reaches places of the current map (taking one of its exits is how the AI explores), and
+     * nothing is remembered for the AI: it explores and keeps its own notes. Off (the default): the library reads every
+     * warp of the ROM and `go_to` crosses the world by a map's name. For the MCP agents and our own loop alike.
+     */
+    val hideDestinations: Boolean = false,
+    /**
      * Music during pauses: while the game is paused (by you, or while the AI thinks), its music goes on, and the game
      * resumes with the music where it got to instead of jumping back. Only when the sound is on; changes nothing in
      * the game but its sound playback.

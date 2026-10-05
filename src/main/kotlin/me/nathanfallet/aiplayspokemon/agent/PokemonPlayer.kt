@@ -16,8 +16,8 @@ import me.nathanfallet.aiplayspokemon.decision.ChoiceResult
 import me.nathanfallet.aiplayspokemon.decision.DecisionException
 import me.nathanfallet.aiplayspokemon.decision.DecisionModel
 import me.nathanfallet.aiplayspokemon.emulator.ConsoleHost
-import dev.kotlinds.pokemonclient.Observation
 import dev.kotlinds.pokemonclient.PokemonGame
+import dev.kotlinds.pokemonclient.state.GameState
 import java.nio.file.Path
 import kotlin.random.Random
 
@@ -103,7 +103,7 @@ class PokemonPlayer(
             return
         }
         val turn = session.prepare()
-        if (state.value.decisions == 0) stats.start(turn.observation)
+        if (state.value.decisions == 0) stats.start(turn.gameState)
         val startedAt = System.nanoTime()
         val (result, byPlanner) = session.thinking {
             _state.update { it.copy(thinking = true) }
@@ -123,7 +123,7 @@ class PokemonPlayer(
 
         val decision = Decision(
             number = state.value.decisions + 1,
-            observation = turn.observation,
+            state = turn.gameState,
             actions = report.performed.ifEmpty { listOf(choice.key) },
             confidence = result.confidence,
             probabilities = result.probabilities.entries.sortedByDescending { it.value }.map { it.key to it.value },
@@ -220,7 +220,8 @@ data class PlayerState(
 /** One decision, with the model's probability for every option. */
 data class Decision(
     val number: Int,
-    val observation: Observation,
+    /** The state the decision was made on (what the history line summarizes). */
+    val state: GameState,
     /** Actions carried out (the choice, then the sequence if any). */
     val actions: List<String>,
     /** How certain the model was (0..1), or null when it can't tell. */

@@ -1,12 +1,17 @@
 package me.nathanfallet.aiplayspokemon.agent
 
+import dev.kotlinds.pokemonclient.runtime.kind
+import dev.kotlinds.pokemonclient.state.Cursor
+import dev.kotlinds.pokemonclient.state.FieldState
+import dev.kotlinds.pokemonclient.state.GameState
+import dev.kotlinds.pokemonclient.state.Screen
+import dev.kotlinds.pokemonclient.view.MapView
+import dev.kotlinds.pokemonclient.world.Area
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import dev.kotlinds.pokemonclient.Observation
-import dev.kotlinds.pokemonclient.Tile
 
 /**
  * What the player remembers between two decisions.
@@ -15,10 +20,12 @@ import dev.kotlinds.pokemonclient.Tile
  * where they have been and what people told them. This memory only keeps facts and the model's own
  * words, never advice: interpreting them is the model's job.
  *
- * - recent actions and exactly what changed after each one (from [Observation.facts]), repeats grouped;
+ * Everything is read from the common typed [GameState] (the same for every game):
+ * - recent actions and exactly what changed after each one ([facts] compared before / after), repeats grouped;
  * - how many times the same action was done in the same situation, and how long since any progress;
  * - places visited, dialogues read, the model's own note and last thoughts;
- * - the explored map: every tile seen so far on each map, with the tiles walked on.
+ * - the explored map: every tile seen so far on each map (the terrain of the common map view, [MapView.terrain]), with
+ *   the tiles walked on.
  */
 class AgentMemory(
     private val maxActions: Int = 30,
@@ -31,11 +38,11 @@ class AgentMemory(
     private val dialogues = ArrayDeque<String>()
     private val thoughts = ArrayDeque<String>()
 
-    /** Times each action was taken in each situation (map, tile, mode, screen). */
+    /** Times each action was taken in each situation (map, tile, screen, highlighted entry). */
     private val repeats = HashMap<String, Int>()
 
-    /** Per map id: every tile seen, and the tiles walked on. */
-    private val explored = HashMap<Int, MutableMap<Pair<Int, Int>, Tile>>()
+    /** Per map id: the symbol of every tile seen ([MapView.terrain]), and the tiles walked on. */
+    private val explored = HashMap<Int, MutableMap<Pair<Int, Int>, Char>>()
     private val walked = HashMap<Int, MutableSet<Pair<Int, Int>>>()
     private val mapNames = HashMap<Int, String>()
 
@@ -47,7 +54,11 @@ class AgentMemory(
     var decisionsWithoutProgress: Int = 0
         private set
 
-    fun record(action: String, before: Observation, after: Observation, thought: String? = null, problem: String? = null) {
+    /**
+     * Records [action], taken in [before], and what it led to ([after]; [area] is the ROM's map of where the player is
+     * then, when the game has one, for the explored map).
+     */
+    fun record(action: String, before: GameState, after: GameState, area: Area? = null, thought: String? = null, problem: String? = null) {
         val situation = situationKey(before)
         val count = repeats.merge("$situation|$action", 1, Int::plus)!!
         val changes = buildList {
@@ -58,37 +69,34 @@ class AgentMemory(
         if (last != null && last.action == action && last.changes == changes) last.times++
         else actions.addBounded(Step(action, changes, count), maxActions)
 
-        var progress = observeMap(after)
-        recordPlace(after)
-        after.dialogue?.trim()?.takeIf { it.isNotEmpty() && it !in dialogues }?.let {
+        var progress = observeMap(after.field, area)
+        recordPlace(after.field)
+        dialogue(after.screen)?.trim()?.takeIf { it.isNotEmpty() && it !in dialogues }?.let {
             dialogues.addBounded(it, maxDialogues)
             progress = true
         }
-        if (before.facts["screen"] != after.facts["screen"]) progress = true
+        if (before.screen.kind != after.screen.kind) progress = true
         thought?.takeIf { it.isNotBlank() }?.let { thoughts.addBounded(it, maxThoughts) }
         decisionsWithoutProgress = if (progress) 0 else decisionsWithoutProgress + 1
     }
 
-    /** Records the tiles seen without acting (e.g. the first observation). Returns true if new tiles were walked. */
-    fun observeMap(observation: Observation): Boolean {
-        val location = observation.location ?: return false
-        mapNames[location.mapId] = location.mapName
-        observation.map?.let { map ->
-            val tiles = explored.getOrPut(location.mapId) { HashMap() }
-            for (row in 0 until map.height) for (column in 0 until map.width) {
-                val tile = map.tiles[row][column]
-                if (tile != Tile.UNKNOWN) tiles[(map.originX + column) to (map.originY + row)] = if (tile == Tile.OCCUPIED) Tile.WALKABLE else tile
-            }
-        }
-        return walked.getOrPut(location.mapId) { HashSet() }.add(location.x to location.y)
+    /**
+     * Records the tiles seen from [field] without acting (e.g. the first observation): the terrain of the common map
+     * view on [area]. Returns true if the player stands on a tile not walked before.
+     */
+    fun observeMap(field: FieldState?, area: Area?): Boolean {
+        field ?: return false
+        mapNames[field.mapId] = field.mapName
+        area?.let { explored.getOrPut(field.mapId) { HashMap() }.putAll(MapView.terrain(it, field)) }
+        return walked.getOrPut(field.mapId) { HashSet() }.add(field.x to field.y)
     }
 
     fun updateNote(value: String?) {
         if (!value.isNullOrBlank()) note = value
     }
 
-    /** The memory part of the state sent to the model. */
-    fun describe(includeExploredMap: Boolean, current: Observation?): JsonObject = buildJsonObject {
+    /** The memory part of the state sent to the model ([current]: where the player stands, for the explored map). */
+    fun describe(includeExploredMap: Boolean, current: FieldState?): JsonObject = buildJsonObject {
         put("recent_actions", JsonArray(actions.map { step ->
             buildJsonObject {
                 put("action", step.action)
@@ -107,7 +115,7 @@ class AgentMemory(
         if (dialogues.isNotEmpty()) put("dialogues_read", JsonArray(dialogues.map(::JsonPrimitive)))
         note?.let { put("your_note", it) }
         if (thoughts.isNotEmpty()) put("your_last_thoughts", JsonArray(thoughts.map(::JsonPrimitive)))
-        if (includeExploredMap) current?.location?.let { location -> exploredMap(location.mapId, location.x, location.y)?.let { put("explored_map", it) } }
+        if (includeExploredMap) current?.let { field -> exploredMap(field)?.let { put("explored_map", it) } }
     }
 
     fun clear() {
@@ -116,46 +124,43 @@ class AgentMemory(
     }
 
     /** Everything seen on a map, centered on the player and bounded, with walked tiles marked. */
-    private fun exploredMap(mapId: Int, playerX: Int, playerY: Int): JsonObject? {
+    private fun exploredMap(field: FieldState): JsonObject? {
+        val mapId = field.mapId
+        val playerX = field.x
+        val playerY = field.y
+        val player = MapView.player(field.facing)
         val tiles = explored[mapId]?.takeIf { it.isNotEmpty() } ?: return null
         val walkedTiles = walked[mapId].orEmpty()
         val minX = maxOf(tiles.keys.minOf { it.first }, playerX - MAX_EXPLORED_HALF_WIDTH)
         val maxX = minOf(tiles.keys.maxOf { it.first }, playerX + MAX_EXPLORED_HALF_WIDTH)
         val minY = maxOf(tiles.keys.minOf { it.second }, playerY - MAX_EXPLORED_HALF_HEIGHT)
         val maxY = minOf(tiles.keys.maxOf { it.second }, playerY + MAX_EXPLORED_HALF_HEIGHT)
+        val used = sortedSetOf<Char>()
         val rows = (minY..maxY).map { y ->
             "y${y.toString().padStart(3)} " + (minX..maxX).joinToString("") { x ->
                 when {
-                    x == playerX && y == playerY -> "@"
-                    (x to y) in walkedTiles -> "o"
-                    else -> symbol(tiles[x to y])
-                }
+                    x == playerX && y == playerY -> player
+                    (x to y) in walkedTiles -> WALKED
+                    else -> tiles[x to y]?.also { used += it } ?: UNSEEN
+                }.toString()
             }
         }
+        val legend = used.mapNotNull { c -> MapView.legend(c)?.let { "$c $it" } }
         return buildJsonObject {
             put("map", mapNames[mapId] ?: "map $mapId")
-            put("how_to_read", "Everything you have seen on this map so far, north up, one character per tile, from x $minX (left) to x $maxX (right). @ you, o tiles you walked on, . walkable, \" tall grass, W exit, # blocked, ~ water, ? never seen.")
+            put(
+                "how_to_read",
+                "Everything you have seen on this map so far, north up, one character per tile, from x $minX (left) to x $maxX (right). " +
+                    "$player you, $WALKED tiles you walked on, blank never seen" + legend.joinToString("") { ", $it" } + ".",
+            )
             put("rows", JsonArray(rows.map(::JsonPrimitive)))
         }
     }
 
-    private fun symbol(tile: Tile?): String = when (tile) {
-        null, Tile.UNKNOWN -> "?"
-        Tile.WALKABLE -> "."
-        Tile.TALL_GRASS -> "\""
-        Tile.WARP -> "W"
-        Tile.WATER -> "~"
-        Tile.LEDGE_SOUTH -> "v"
-        Tile.LEDGE_NORTH -> "^"
-        Tile.LEDGE_WEST -> "<"
-        Tile.LEDGE_EAST -> ">"
-        Tile.BLOCKED, Tile.OCCUPIED -> "#"
-    }
-
-    /** Human-readable differences between two observations. */
-    private fun changes(before: Observation, after: Observation): List<String> = buildList {
-        val from = before.location
-        val to = after.location
+    /** Human-readable differences between two states. */
+    private fun changes(before: GameState, after: GameState): List<String> = buildList {
+        val from = before.field
+        val to = after.field
         when {
             from == null || to == null -> Unit
             from.mapId != to.mapId -> add("you arrived in ${to.mapName} at (${to.x}, ${to.y})")
@@ -163,25 +168,55 @@ class AgentMemory(
             from.facing != to.facing -> add("you turned to face ${to.facing?.name?.lowercase()} without moving")
             else -> add("you did not move")
         }
-        if (before.mode != after.mode) add("screen changed from ${before.mode.name.lowercase()} to ${after.mode.name.lowercase()}")
-        val ignored = setOf("position", "facing", "mode", "map")
-        (before.facts.keys + after.facts.keys).filter { it !in ignored }.sorted().forEach { key ->
-            val old = before.facts[key]
-            val new = after.facts[key]
-            if (old != new) add("$key: ${old?.short() ?: "none"} -> ${new?.short() ?: "none"}")
+        if (before.screen.kind != after.screen.kind) add("screen changed from ${before.screen.kind} to ${after.screen.kind}")
+        val old = facts(before)
+        val new = facts(after)
+        (old.keys + new.keys).sorted().forEach { key ->
+            if (old[key] != new[key]) add("$key: ${old[key]?.short() ?: "none"} -> ${new[key]?.short() ?: "none"}")
         }
     }
 
-    private fun String.short() = if (length > 80) take(77) + "..." else this
-
-    private fun situationKey(observation: Observation): String {
-        val location = observation.location
-        return listOf(location?.mapId, location?.x, location?.y, observation.mode, observation.facts["screen"], observation.facts["menu.cursor"])
-            .joinToString(",")
+    /**
+     * Small facts of a state compared before / after each action to tell the model what its action did: the message
+     * on screen, the highlighted entry, the HP in battle and of the team, money, badges, bag. Values are short strings
+     * (display only: never matched against anything).
+     */
+    private fun facts(state: GameState): Map<String, String> = buildMap {
+        dialogue(state.screen)?.let { put("dialogue", it.replace("\n", " / ")) }
+        highlighted(state.screen)?.let { put("highlighted", it) }
+        state.battle?.let { battle ->
+            val ours = battle.battlers.firstOrNull { it.ref.isPlayerSide }
+            val theirs = battle.battlers.firstOrNull { !it.ref.isPlayerSide }
+            if (ours != null && theirs != null) {
+                put("battle.hp", "${ours.nickname ?: ours.species.name} ${ours.hp}/${ours.maxHp} vs ${theirs.nickname ?: theirs.species.name} ${theirs.hp}/${theirs.maxHp}")
+            }
+        }
+        if (state.party.isNotEmpty()) put("party.hp", state.party.joinToString(", ") { "${it.nickname ?: it.species.name} ${it.hp}/${it.maxHp}" })
+        state.player?.let {
+            put("money", it.money.toString())
+            put("badges", it.badges.size.toString())
+        }
+        state.bag?.let { pockets ->
+            val items = pockets.flatMap { it.items }
+            put("bag", "${items.size} kinds, ${items.sumOf { it.quantity }} items")
+        }
     }
 
-    private fun recordPlace(after: Observation) {
-        val name = after.location?.mapName ?: return
+    private fun dialogue(screen: Screen): String? = (screen as? Screen.Dialogue)?.text
+
+    /** The id of the highlighted entry of a menu (language-independent), when one is. */
+    private fun highlighted(screen: Screen): String? =
+        ((screen as? Screen.Selectable)?.cursor as? Cursor.At)?.let { screen.entries.getOrNull(it.index)?.id }
+
+    private fun String.short() = if (length > 80) take(77) + "..." else this
+
+    private fun situationKey(state: GameState): String {
+        val field = state.field
+        return listOf(field?.mapId, field?.x, field?.y, state.screen.kind, highlighted(state.screen)).joinToString(",")
+    }
+
+    private fun recordPlace(field: FieldState?) {
+        val name = field?.mapName ?: return
         val last = places.lastOrNull()
         if (last != null && last.name == name) last.decisions++
         else places.addBounded(Place(name), maxPlaces)
@@ -198,5 +233,7 @@ class AgentMemory(
     private companion object {
         const val MAX_EXPLORED_HALF_WIDTH = 20
         const val MAX_EXPLORED_HALF_HEIGHT = 15
+        const val WALKED = 'o'
+        const val UNSEEN = ' '
     }
 }

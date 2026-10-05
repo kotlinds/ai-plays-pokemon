@@ -67,7 +67,7 @@ object DecisionPrompt {
             put("objective", objective)
             plannerGoal?.let { put("goal_from_planner", it) }
             put("game", turn.state)
-            put("memory", memory.describe(settings.exploredMap, turn.observation))
+            put("memory", memory.describe(settings.exploredMap, turn.gameState.field))
         },
         instructions = instructions(settings, planner, gameName),
         options = turn.options.associate { it.key to it.description },

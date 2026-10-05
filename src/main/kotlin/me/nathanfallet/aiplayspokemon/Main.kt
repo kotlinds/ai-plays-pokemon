@@ -23,7 +23,7 @@ import java.nio.file.Path
 /**
  * Entry point. Wires the layers together:
  *
- *   emulator (libretro core)  →  game (reads RAM into an Observation)
+ *   emulator (libretro core)  →  game (reads RAM into the typed GameState)
  *        ↑ buttons                     ↓
  *   agent (PokemonPlayer)  ←  decision model (the AI: Jev, or an LLM through Koog)
  *

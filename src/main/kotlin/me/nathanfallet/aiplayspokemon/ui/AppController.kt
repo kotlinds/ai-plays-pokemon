@@ -7,6 +7,10 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,10 +24,9 @@ import me.nathanfallet.aiplayspokemon.config.AppConfig
 import dev.kotlinds.pokemonclient.console.Button
 import me.nathanfallet.aiplayspokemon.emulator.ConsoleHost
 import me.nathanfallet.aiplayspokemon.emulator.InputSource
-import dev.kotlinds.pokemonclient.Observation
 import dev.kotlinds.pokemonclient.PokemonGame
 import dev.kotlinds.pokemonclient.runtime.Recorder
-import dev.kotlinds.pokemonclient.RamMemory
+import dev.kotlinds.pokemonclient.view.StateView
 import java.nio.file.Files
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -43,7 +46,7 @@ import me.nathanfallet.aiplayspokemon.decision.llm.LlmProvider
 
 /**
  * Glue between the UI and the rest of the app: owns the [PokemonPlayer], turns keyboard events into
- * emulator input, and keeps a live [observation] of the game for display (even while a human plays).
+ * emulator input, and keeps a live [panel] of what the agents see, for display (even while a human plays).
  */
 class AppController(
     val emulator: ConsoleHost,
@@ -81,14 +84,31 @@ class AppController(
     /** The MCP server when enabled: an external agent plays through it instead of our own loop. */
     val mcp: StateFlow<GameMcpServer?> = _mcp.asStateFlow()
 
-    private val _observation = MutableStateFlow<Observation?>(null)
-    val observation: StateFlow<Observation?> = _observation.asStateFlow()
-
     /**
      * Watches every frame and logs what happens (texts, battle messages, captures...), so agents get everything
      * shown since their last call. Null for unsupported games.
      */
     val recorder: Recorder? = game?.let { Recorder(it) }
+
+    /**
+     * The session the "What the AI sees" panel reads, with the same options as the agents' sessions (MCP, our loop) and
+     * its own event cursor: what the panel shows is exactly what an agent would get, and it never takes the events
+     * meant for the playing agent. Null for unsupported games.
+     */
+    private val panelSession: GameSession? = game?.let { session(it, confirmDelivery = false) }
+
+    /** One reading of [panelSession] at a time (the panel's refresh and the F12 snapshot), off the UI thread. */
+    private val panelLock = Mutex()
+
+    private suspend fun <T> withPanelSession(block: suspend (GameSession) -> T): T? {
+        val session = panelSession ?: return null
+        return withContext(Dispatchers.Default) { panelLock.withLock { block(session) } }
+    }
+
+    private val _panel = MutableStateFlow<AgentView?>(null)
+
+    /** What an agent would get from the game right now ([GameSession.describe]), refreshed a few times per second. */
+    val panel: StateFlow<AgentView?> = _panel.asStateFlow()
 
     init {
         emulator.setMusicDuringPauses(_settings.value.musicDuringPauses)
@@ -99,7 +119,7 @@ class AppController(
         }
         createPlayer()
         updateMcpServer()
-        scope.launch { refreshObservation() }
+        scope.launch { refreshPanel() }
     }
 
     fun updateSettings(transform: (PlayerSettings) -> PlayerSettings) {
@@ -115,7 +135,7 @@ class AppController(
         val wanted = _backend.value == DecisionBackend.MCP && game != null
         val running = _mcp.value
         if (wanted && running == null) {
-            val session = GameSession(emulator, game!!, recorder!!, mode = { _settings.value.mode.actionMode }, knowledge = { _settings.value.knowledge }, confirmDelivery = true, solvePuzzles = { _settings.value.solvePuzzles })
+            val session = session(game, confirmDelivery = true)
             val server = GameMcpServer(session, emulator, config.mcpPort, mode = { _settings.value.mode.actionMode }, pauseWhileThinking = { _settings.value.pauseWhileThinking }, knowledge = { _settings.value.knowledge })
             server.start()
             _mcp.value = server
@@ -124,6 +144,16 @@ class AppController(
             _mcp.value = null
         }
     }
+
+    /** A session of [game] with the app's current options (read at each call, so changes apply at once). */
+    private fun session(game: PokemonGame, confirmDelivery: Boolean) = GameSession(
+        emulator, game, recorder!!,
+        mode = { _settings.value.mode.actionMode },
+        knowledge = { _settings.value.knowledge },
+        confirmDelivery = confirmDelivery,
+        solvePuzzles = { _settings.value.solvePuzzles },
+        hideDestinations = { _settings.value.hideDestinations },
+    )
 
     /** Switches the decision model: the current player is stopped and replaced. */
     fun selectBackend(backend: DecisionBackend) {
@@ -225,26 +255,27 @@ class AppController(
         DecisionBackend.MCP -> null // the external agent decides
     }
 
-    /** Polls the RAM a few times per second so the panel shows what the AI would see right now. */
-    private suspend fun refreshObservation() {
-        val game = game ?: return
+    /** Reads the game a few times per second so the panel shows what an agent would get right now. */
+    private suspend fun refreshPanel() {
+        if (panelSession == null) return
         while (scope.isActive) {
-            _observation.value = runCatching { game.observe(RamMemory(emulator.readMainRam())) }.getOrNull()
+            _panel.value = runCatching { withPanelSession { it.describeWithState() } }.getOrNull()?.let { (state, view) -> AgentView(StateView.summary(state), view) }
             delay(250)
         }
     }
 
     /**
-     * Saves the current RAM and what the AI sees into `<data>/snapshots/`, to debug or extend the
-     * game reader on a precise situation (the RAM can be loaded back with `RamMemory`).
+     * Saves the current RAM and what the agents see ([GameSession.describe], as the panel shows it) into
+     * `<data>/snapshots/`, to debug or extend the game reader on a precise situation (the RAM can be loaded back with
+     * `RamMemory`).
      */
     private suspend fun saveSnapshot() {
         val ram = emulator.readMainRam()
         val directory = Files.createDirectories(config.dataDirectory.resolve("snapshots"))
         val name = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
         Files.write(directory.resolve("$name.ram"), ram)
-        game?.observe(RamMemory(ram))?.let { observation ->
-            Files.writeString(directory.resolve("$name.json"), prettyJson.encodeToString(JsonObject.serializer(), observation.state))
+        withPanelSession { it.describe() }?.let { view ->
+            Files.writeString(directory.resolve("$name.json"), prettyJson.encodeToString(JsonObject.serializer(), view))
         }
         println("Snapshot saved: ${directory.resolve(name)}")
     }
@@ -275,6 +306,9 @@ class AppController(
 
     fun togglePause() = emulator.setUserPaused(emulator.status.value.running)
 }
+
+/** What an agent gets from the game at one moment ([GameSession.describe]), and a one-line [summary] of it. */
+data class AgentView(val summary: String, val view: JsonObject)
 
 /** Which LLM to use: a provider, one of its model ids, and whether it thinks before answering. */
 data class LlmSettings(val provider: LlmProvider, val model: String, val thinking: Boolean)

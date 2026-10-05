@@ -1,27 +1,34 @@
 package me.nathanfallet.aiplayspokemon.agent
 
-import kotlinx.serialization.json.JsonObject
+import dev.kotlinds.pokemonclient.Direction
+import dev.kotlinds.pokemonclient.state.Awaiting
+import dev.kotlinds.pokemonclient.state.FieldState
+import dev.kotlinds.pokemonclient.state.GameState
+import dev.kotlinds.pokemonclient.state.MovementMode
+import dev.kotlinds.pokemonclient.state.Screen
+import dev.kotlinds.pokemonclient.state.TextSource
+import dev.kotlinds.pokemonclient.world.Area
+import dev.kotlinds.pokemonclient.world.TileInfo
+import dev.kotlinds.pokemonclient.world.TileKind
+import dev.kotlinds.pokemonclient.world.Warp
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import dev.kotlinds.pokemonclient.console.Button
-import dev.kotlinds.pokemonclient.Direction
-import dev.kotlinds.pokemonclient.GameMode
-import dev.kotlinds.pokemonclient.LocalMap
-import dev.kotlinds.pokemonclient.Location
-import dev.kotlinds.pokemonclient.Observation
-import dev.kotlinds.pokemonclient.Tile
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class AgentMemoryTest {
 
-    private fun at(
-        x: Int, y: Int, facing: Direction = Direction.SOUTH, mode: GameMode = GameMode.OVERWORLD, map: Int = 1,
-        dialogue: String? = null, facts: Map<String, String> = emptyMap(), localMap: LocalMap? = null,
-    ) = Observation(mode, Location(map, "Town $map", x, y, facing), "", JsonObject(emptyMap()), facts = facts, dialogue = dialogue, map = localMap)
+    private val overworld = Screen.Overworld(awaiting = Awaiting.INPUT)
+
+    private fun at(x: Int, y: Int, facing: Direction = Direction.SOUTH, screen: Screen = overworld, map: Int = 1) = GameState(
+        frame = 0, screen = screen, player = null, party = emptyList(), bag = null, battle = null,
+        field = FieldState(map, "Town $map", x, y, height = 0, facing = facing, movement = MovementMode.WALK, moving = false),
+    )
+
+    private fun talking(text: String) = Screen.Dialogue(TextSource.FIELD, null, text, Awaiting.INPUT)
 
     private fun AgentMemory.actions() = describe(false, null)["recent_actions"]!!.jsonArray.map { it.jsonObject }
 
@@ -32,19 +39,25 @@ class AgentMemoryTest {
         memory.record("press(left)", at(5, 4), at(5, 4, facing = Direction.WEST))
         memory.record("press(left)", at(5, 4, facing = Direction.WEST), at(5, 4, facing = Direction.WEST))
         memory.record("press(up)", at(5, 4), at(3, 9, map = 2))
-        memory.record("press(a)", at(3, 9, map = 2), at(3, 9, mode = GameMode.DIALOGUE, map = 2, facts = mapOf("dialogue" to "Hello!")))
+        memory.record("press(a)", at(3, 9, map = 2), at(3, 9, screen = talking("Hello!"), map = 2))
 
+        val changes = memory.actions().map { it["what_changed"]!!.jsonPrimitive.content }
         assertEquals(
             listOf(
                 "you moved from (5, 5) to (5, 4)",
                 "you turned to face west without moving",
                 "you did not move",
                 "you arrived in Town 2 at (3, 9)",
-                "you did not move; screen changed from overworld to dialogue; dialogue: none -> Hello!",
             ),
-            memory.actions().map { it["what_changed"]!!.jsonPrimitive.content },
+            changes.dropLast(1),
         )
+        assertTrue(changes.last().startsWith("you did not move; screen changed from overworld to "), changes.last())
+        assertTrue(changes.last().endsWith("; dialogue: none -> Hello!"), changes.last())
+        assertEquals(listOf("Hello!"), describeDialogues(memory))
     }
+
+    private fun describeDialogues(memory: AgentMemory) =
+        memory.describe(false, null)["dialogues_read"]!!.jsonArray.map { it.jsonPrimitive.content }
 
     @Test
     fun `counts repeats in a row and in the same situation`() {
@@ -65,15 +78,22 @@ class AgentMemoryTest {
     }
 
     @Test
-    fun `keeps the model note and renders the explored map`() {
+    fun `keeps the model note and renders the explored map from the common map view`() {
         val memory = AgentMemory()
-        val room = LocalMap(0, 0, listOf(listOf(Tile.BLOCKED, Tile.WARP), listOf(Tile.WALKABLE, Tile.WALKABLE)))
-        memory.observeMap(at(0, 1, localMap = room))
+        // A 2x2 room of map 1: a wall and stairs (a warp) on the top row, floor below.
+        val wall = TileInfo(blocked = true, kind = TileKind.Wall)
+        val floor = TileInfo(blocked = false, kind = TileKind.Floor)
+        val room = Area(1, "room", 0, 0, 2, 2, arrayOf(wall, floor, floor, floor), warps = listOf(Warp(zone = 1, id = 0, x = 1, y = 0, targetZone = 2, targetWarp = 0)))
+        memory.observeMap(at(0, 1).field, room)
         memory.updateNote("Take the stairs")
-        val description = memory.describe(true, at(1, 1, localMap = room))
+        val description = memory.describe(true, at(1, 1, facing = Direction.NORTH).field)
         assertEquals("Take the stairs", description["your_note"]!!.jsonPrimitive.content)
-        val rows = description["explored_map"]!!.jsonObject["rows"]!!.jsonArray.map { it.jsonPrimitive.content }
-        assertEquals(listOf("y  0 #W", "y  1 o@"), rows)
+        val explored = description["explored_map"]!!.jsonObject
+        val rows = explored["rows"]!!.jsonArray.map { it.jsonPrimitive.content }
+        // The player (facing north) and the tile walked on; the wall and the exit as the map view draws them.
+        assertEquals(listOf("y  0 #E", "y  1 oA"), rows)
+        val howToRead = explored["how_to_read"]!!.jsonPrimitive.content
+        assertTrue("A you" in howToRead && "E exit" in howToRead, howToRead)
         assertTrue(memory.describe(false, null)["explored_map"] == null)
     }
 }

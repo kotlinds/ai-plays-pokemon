@@ -56,11 +56,17 @@ class GameSession(
      * [ActionSettings.solvePuzzles]); when false the agent operates them itself.
      */
     private val solvePuzzles: () -> Boolean = { true },
+    /**
+     * Whether where the ways out lead is hidden ([ActionSettings.hideDestinations]): the views list exits without
+     * destination, go_to stays on the current map, and no hint names another map (fly suggestions, blockers' reasons).
+     */
+    private val hideDestinations: () -> Boolean = { false },
 ) {
     /** What the application lets the actions do by themselves: the settings of this session, read at each action. */
     private fun actionSettings() = ActionSettings(
         solvePuzzles = solvePuzzles(),
         revealHidden = knowledge().allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH),
+        hideDestinations = hideDestinations(),
     )
 
     /** What the player has seen (teleport tiles once on screen), for agents without a walkthrough. */
@@ -131,10 +137,16 @@ class GameSession(
     suspend fun state(): GameState = host.observe { memory -> game.state(memory) }
 
     /** What the agent reads: events since its last call, the screen and state, the actions possible now. */
-    suspend fun describe(full: Boolean = false): JsonObject {
+    suspend fun describe(full: Boolean = false): JsonObject = describeWithState(full).second
+
+    /**
+     * [describe], with the typed state it was made from (one reading of the game): for our own loop, whose memory works
+     * on the typed state, and the app's panel.
+     */
+    suspend fun describeWithState(full: Boolean = false): Pair<GameState, JsonObject> {
         // Observing runs no frame: it works while the game is paused.
-        val (state, legacy) = host.observe { memory -> game.state(memory) to game.observe(memory).state }
-        return describe(state, legacy, full)
+        val state = state()
+        return state to describe(state, full)
     }
 
     /** Keeps a note of the agent (goal, plan), returned with every full state. */
@@ -180,8 +192,7 @@ class GameSession(
                 onStep(index, total, action)
             },
         ).run(requested)
-        val (afterState, legacy) = host.observe { memory -> game.state(memory) to game.observe(memory).state }
-        val after = describe(afterState, legacy, full = false, compact = compact)
+        val after = describe(state(), full = false, compact = compact)
         val outcome = outcome(chain)
         // Kept until this answer is known to have arrived (our own loop can't lose one).
         if (confirmDelivery) unanswered.answered(requested.map { it.key }, outcome)
@@ -277,7 +288,7 @@ class GameSession(
      * when unchanged, the map when the player hasn't moved, money / badges, and the actions' valid values (names only;
      * `get_state` gives them).
      */
-    private fun describe(state: GameState, legacy: JsonObject, full: Boolean, compact: Boolean = false): JsonObject = buildJsonObject {
+    private fun describe(state: GameState, full: Boolean, compact: Boolean = false): JsonObject = buildJsonObject {
         stateVersion.observe(state.field)
         val batch = feed.take()
         val events = batch.events
@@ -294,8 +305,9 @@ class GameSession(
         val other = events.mapNotNull(::describeEvent).distinct()
         if (other.isNotEmpty()) put("events_since_last_call", JsonArray(other.map(::JsonPrimitive)))
         val walkthrough = knowledge().allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH)
+        val hidden = hideDestinations()
         sightings.observe(state.field)
-        val view = StateView.state(state, showHidden = walkthrough, sightings = sightings)
+        val view = StateView.state(state, showHidden = walkthrough, sightings = sightings, hideDestinations = hidden)
         val (viewEntries, moved) = compactView.take(view, compact)
         viewEntries.forEach { (k, v) -> put(k, v) }
         // get_state lists the bag (one line per pocket); act answers leave it out.
@@ -327,13 +339,12 @@ class GameSession(
                 })
             }
         }
-        // The text map of the surroundings: the common MapView on the ROM's maps (the older HGSS map without a ROM).
+        // The text map of the surroundings: the common MapView on the ROM's maps (none when the game has no ROM maps).
         if (state.screen is Screen.Overworld) {
             val field = state.field
             val area = field?.let { game.world?.areaOf(it.mapId) }
             if (compact && !moved) put("map", "unchanged (you haven't moved)")
-            else if (field != null && area != null) MapView.render(area, field, game::zoneName, world = game.world, showHidden = walkthrough).forEach { (k, v) -> put(k, v) }
-            else MAP_KEYS.forEach { key -> legacy[key]?.let { put(key, it) } }
+            else if (field != null && area != null) MapView.render(area, field, game::zoneName, world = game.world, showHidden = walkthrough, hideDestinations = hidden).forEach { (k, v) -> put(k, v) }
         }
         // Movement puzzles left to the agent: say so where it matters (a puzzle here, or the full state).
         val here = state.field
@@ -342,11 +353,16 @@ class GameSession(
         if (story != null && knowledge().allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH)) {
             // Always a list: one goal, or every open goal when the game leaves the choice (the Kanto gyms...). A goal
             // in one place says which visited fly destination lands nearest when flying beats walking there.
+            // Destinations hidden: no fly suggestion (it says which town lands nearest the goal: where it is).
             put("story_goals", JsonArray(story.openGoals.map { goal ->
-                val fly = goal.place?.let { flyAdvisor.suggest(state, it) }
+                val fly = goal.place?.takeIf { !hidden }?.let { flyAdvisor.suggest(state, it) }
                 JsonPrimitive(goal.description + (fly?.let { " (${it.text})" } ?: ""))
             }))
-            if (story.blockers.isNotEmpty()) put("blocked_by", JsonArray(story.blockers.map { JsonPrimitive("${it.target}: ${it.reason}") }))
+            // The walkthrough's reasons often say where to go to lift a blocker ("clear the Slowpoke Well, north of
+            // town"): only that it blocks while destinations are hidden.
+            if (story.blockers.isNotEmpty()) put("blocked_by", JsonArray(story.blockers.map {
+                JsonPrimitive("${it.target}: " + if (hidden) BLOCKER_WHERE_HIDDEN else it.reason)
+            }))
         }
         val mode = mode()
         if (compact) {
@@ -399,7 +415,9 @@ class GameSession(
             "never step on a platform trigger or a lift unless it is the destination you gave); a way that needs one fails with " +
             "PUZZLE_LEFT_TO_AGENT naming it. Operate them yourself: step into a boulder after using Strength on it (interact), " +
             "slide into an ice block, go_to / step onto a trigger or a lift; push moves a boulder into its hole"
-        val MAP_KEYS = listOf("map", "legend", "adjacent", "exits", "people", "objects", "nearby_areas")
+        /** A story blocker while destinations are hidden: its walkthrough reason names places, so only what it does. */
+        const val BLOCKER_WHERE_HIDDEN = "blocks a way until the story moves on (destinations are hidden: the reason, which " +
+            "names places, is left out); talk to them to learn what they wait for"
         const val SETTLE_FRAMES = 1800
 
         /** About 30 s of game (real time): what one step may take, action and settling together. */
