@@ -10,7 +10,7 @@ mcp = "0.15.0"
 ktor = "3.5.1"
 kover = "0.9.11"
 # dev.kotlinds:pokemon-client (github.com/kotlinds/pokemon-client): a -SNAPSHOT is consumed from mavenLocal while developing
-pokemon-client = "0.1.1" #-SNAPSHOT"
+pokemon-client = "0.1.2-SNAPSHOT"
 
 [libraries]
 compose-runtime = { module = "org.jetbrains.compose.runtime:runtime", version.ref = "composeMultiplatform" }
