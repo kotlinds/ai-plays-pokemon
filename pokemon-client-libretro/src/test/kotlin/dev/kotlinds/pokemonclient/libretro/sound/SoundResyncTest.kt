@@ -24,6 +24,11 @@ import kotlin.test.assertTrue
  * where the ARM7 runs the sound thread, `_dma` (melonDS) a frame with a DMA mid-burst. `ds_cherry`: DeSmuME 0.9.12
  * in Cherrygrove City; `ds_battle_will` (Elite Four Will) and `ds_battle_wild` (a wild Hoothoot): DeSmuME battles at
  * the command menu, where HeartGold keeps the field music paused on another player while the battle music plays;
+ * `ds_intro_cry` (DeSmuME, a wild battle's intro on Route 30: the battle music, a sound effect and the wild
+ * Pokémon's cry playing at the pause; the shadow's end 600 frames later, music alone) and `ds_intro_new` (the same
+ * intro earlier: the music alone at the pause, a sound effect started by the shadow playing at its end);
+ * `ds_menu_wild` / `ds_menu_will` (DeSmuME, the wild battle and Will's battle paused the frame the command menu
+ * appears, its sound effect playing; the shadow's end 10 s later, the battle music alone, past its loop point);
  * `mel`: melonDS 0.9.3.
  */
 class SoundResyncTest {
@@ -177,15 +182,86 @@ class SoundResyncTest {
         assertTrue(resync(SavestateSoundSplicer.DESMUME).isSafeFrame(fixture("ds_cherry_s")))
     }
 
-    /** A second active player at the pause (a sound effect, a cry...). */
+    /** A second active player at the pause (a sound effect, a cry...) that ended during it: the music is resynced. */
     @Test
-    fun refusesWhenNotOnlyTheMusicPlays() {
+    fun acceptsASoundThatEndedDuringThePause() {
         val paused = fixture("ds_cherry_p").also {
             val player0 = layout.work + 0x540
             val offset = SavestateSoundSplicer.DESMUME.locate(it).arm7Wram.offset + player0 - ARM7_WRAM
             it[offset] = (it[offset].toInt() or 1).toByte()
         }
-        assertEquals(ResyncRefusal.NotOnlyMusic(2, 1), refusal(SavestateSoundSplicer.DESMUME, paused, fixture("ds_cherry_s")))
+        val decision = assertIs<ResyncDecision.Spliced>(resync(SavestateSoundSplicer.DESMUME).splice(paused, fixture("ds_cherry_s")))
+        assertEquals(2, decision.atPause.playing.size)
+        val result = resync(SavestateSoundSplicer.DESMUME).apply(FakeConsole(SavestateSoundSplicer.DESMUME, paused.copyOf()), paused, decision)
+        assertEquals(1, assertIs<ResyncResult.Resynced>(result).endedDuringPause)
+    }
+
+    /** A second active player at the shadow's end: started during the pause, the resumed game would start it again. */
+    @Test
+    fun refusesWhenASoundStillPlaysAtTheEnd() {
+        val shadow = fixture("ds_cherry_s").also {
+            val player0 = layout.work + 0x540
+            val offset = SavestateSoundSplicer.DESMUME.locate(it).arm7Wram.offset + player0 - ARM7_WRAM
+            it[offset] = (it[offset].toInt() or 1).toByte()
+        }
+        assertEquals(ResyncRefusal.NotOnlyMusic(1, 2), refusal(SavestateSoundSplicer.DESMUME, fixture("ds_cherry_p"), shadow))
+    }
+
+    /**
+     * A wild battle's intro, paused while a sound effect and the wild Pokémon's cry play next to the battle music: they
+     * end during the pause, the music alone plays at the shadow's end, and the game resumes with it (main RAM
+     * unchanged), seeing the two sounds finished.
+     */
+    @Test
+    fun resyncsABattleIntroWhoseCryAndSoundEffectEndedDuringThePause() {
+        val splicer = SavestateSoundSplicer.DESMUME
+        val paused = fixture("ds_intro_cry_p")
+        val atPause = SoundDriverState.read(splicer.locate(paused), layout)
+        assertEquals(listOf(1, 2, 11), atPause.playing.map { it.index }) // sound effect, battle music, cry
+        assertEquals(listOf(1, 11, 2), atPause.playing.sortedBy { it.tracks.size }.map { it.index })
+        assertEquals(setOf(0), atPause.pausedPlayerState.keys) // the field music
+        val decision = assertIs<ResyncDecision.Spliced>(resync(splicer).splice(paused, fixture("ds_intro_cry_s")))
+        assertEquals(listOf(2), decision.atEnd.playing.map { it.index })
+        val main = FakeConsole(splicer, paused.copyOf())
+        val result = assertIs<ResyncResult.Resynced>(resync(splicer).apply(main, paused, decision))
+        assertEquals(2, result.music.index)
+        assertEquals(2, result.endedDuringPause)
+        val ram = splicer.locate(paused).mainRam
+        assertContentEquals(paused.copyOfRange(ram.offset, ram.end), main.state.copyOfRange(ram.offset, ram.end))
+    }
+
+    /**
+     * The user's case: paused the frame the battle command menu appears (FIGHT / BAG / POKéMON / RUN), resumed 10 s
+     * later. The menu's sound effect (a one-track sequence on its own player) plays at the pause and ends during it,
+     * and the battle music crosses its loop point: refused before ("players: 2 at the pause, 1 at the end"), resynced
+     * now, at once (no settle frames needed), the main RAM unchanged.
+     */
+    @Test
+    fun resyncsAPauseStartedWhenTheBattleCommandMenuAppears() {
+        val splicer = SavestateSoundSplicer.DESMUME
+        for ((name, music, sound) in listOf(Triple("ds_menu_wild", 2, 12), Triple("ds_menu_will", 8, 14))) {
+            val paused = fixture("${name}_p")
+            val shadow = fixture("${name}_s")
+            val atPause = SoundDriverState.read(splicer.locate(paused), layout)
+            assertEquals(listOf(music, sound), atPause.playing.map { it.index }, name)
+            assertEquals(1, atPause.playing.single { it.index == sound }.tracks.size, name)
+            assertNull(resync(splicer).pauseRefusal(paused), name)
+            assertTrue(!resync(splicer).soundsStartedPlayAtEnd(paused, shadow), name)
+            val decision = assertIs<ResyncDecision.Spliced>(resync(splicer).splice(paused, shadow), name)
+            assertEquals(listOf(music), decision.atEnd.playing.map { it.index }, name)
+            val main = FakeConsole(splicer, paused.copyOf())
+            val result = assertIs<ResyncResult.Resynced>(resync(splicer).apply(main, paused, decision), name)
+            assertEquals(music, result.music.index, name)
+            assertEquals(1, result.endedDuringPause, name)
+            val ram = splicer.locate(paused).mainRam
+            assertContentEquals(paused.copyOfRange(ram.offset, ram.end), main.state.copyOfRange(ram.offset, ram.end), name)
+        }
+    }
+
+    /** The same intro, a sound effect started by the shadow's game still playing at its end: refused. */
+    @Test
+    fun refusesABattleIntroWhoseShadowStartedASound() {
+        assertEquals(ResyncRefusal.NotOnlyMusic(1, 2), refusal(SavestateSoundSplicer.DESMUME, fixture("ds_intro_new_p"), fixture("ds_intro_new_s")))
     }
 
     /** Battles: the paused field music doesn't count as a second sound, and its state stays the paused game's. */
@@ -253,6 +329,32 @@ class SoundResyncTest {
         val paused = withCommandInFlight(0x21) // READ_DRIVER_INFO
         assertEquals(listOf(0x21), SoundDriverState.read(SavestateSoundSplicer.DESMUME.locate(paused), layout).commandsInFlight)
         assertIs<ResyncDecision.Spliced>(resync(SavestateSoundSplicer.DESMUME).splice(paused, fixture("ds_cherry_s")))
+    }
+
+    /** A state taken while `SND_FlushCommand` runs: the ARM7 already finished the list the ARM9 hasn't counted yet. */
+    @Test
+    fun aListFinishedBeforeItsFlushIsCountedIsNotInFlight() {
+        val splicer = SavestateSoundSplicer.DESMUME
+        val state = fixture("ds_cherry_p").also {
+            val located = splicer.locate(it)
+            val shared = located.arm7(layout.sharedWorkPointer)
+            setMain(it, splicer, shared, located.main(shared + layout.arm9Commands.currentTag)) // finished = current tag
+        }
+        assertEquals(emptyList(), SoundDriverState.read(splicer.locate(state), layout).commandsInFlight)
+        assertNull(resync(splicer).pauseRefusal(state))
+    }
+
+    /** Inconsistent bookkeeping (more lists in flight than the queue holds): refused, the values told for the logs. */
+    @Test
+    fun tellsWhyTheCommandsInFlightCantBeRead() {
+        val splicer = SavestateSoundSplicer.DESMUME
+        val state = fixture("ds_cherry_p").also {
+            val located = splicer.locate(it)
+            val shared = located.arm7(layout.sharedWorkPointer)
+            setMain(it, splicer, shared + layout.arm9Commands.currentTag, located.main(shared) + 20)
+        }
+        val refusal = assertIs<ResyncRefusal.UnreadableCommands>(resync(splicer).pauseRefusal(state))
+        assertTrue("finished tag" in refusal.message, refusal.message)
     }
 
     @Test
@@ -384,6 +486,39 @@ class SoundResyncTest {
         run.begin(fixture("ds_cherry_p"))
         run.step()
         assertEquals(ShadowEnd.NotSafe(1 + ShadowRun.MAX_EXTRA_FRAMES), run.end())
+    }
+
+    /**
+     * A sound effect the shadow's game started still plays at its first safe frame: with settle frames, the shadow plays
+     * on until it ended (then the resync passes), or gives the last safe frame after that many frames.
+     */
+    @Test
+    fun shadowPlaysOnUntilASoundItStartedEnded() {
+        val splicer = SavestateSoundSplicer.DESMUME
+        val paused = fixture("ds_intro_new_p")
+        val withSound = fixture("ds_intro_new_s")
+        val soundPlayer = SoundDriverState.read(splicer.locate(withSound), layout).playing.single { it.tracks.size == 1 }
+        val ended = withSound.copyOf().also {
+            val offset = splicer.locate(it).arm7Wram.offset + layout.work + 0x540 + soundPlayer.index * 0x24 - ARM7_WRAM
+            it[offset] = (it[offset].toInt() and 1.inv()).toByte()
+        }
+        val ds = resync(splicer)
+        assertTrue(ds.soundsStartedPlayAtEnd(paused, withSound))
+        assertTrue(!ds.soundsStartedPlayAtEnd(paused, ended))
+        fun endWith(settle: Int): ShadowEnd.Safe {
+            val run = ShadowRun(FakeShadow(listOf(withSound, withSound, withSound, ended)), ds)
+            run.begin(paused)
+            run.step()
+            return assertIs<ShadowEnd.Safe>(run.end(settleFrames = settle))
+        }
+        assertContentEquals(withSound, endWith(0).state) // at once, as before
+        val settled = endWith(ShadowRun.SETTLE_FRAMES)
+        assertEquals(3, settled.frames)
+        assertContentEquals(ended, settled.state)
+        assertIs<ResyncDecision.Spliced>(ds.splice(paused, settled.state))
+        val gaveUp = endWith(1)
+        assertEquals(2, gaveUp.frames)
+        assertContentEquals(withSound, gaveUp.state)
     }
 
     @Test

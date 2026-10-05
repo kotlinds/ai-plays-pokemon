@@ -116,7 +116,7 @@ class PauseMusicCheck(
         repeat(seconds(pause)) { run.step() }
         val msPerFrame = ms(t) / seconds(pause)
         t = System.nanoTime()
-        val end = run.end()
+        val end = run.end(settleFrames = ShadowRun.SETTLE_FRAMES) // as the app does
         val tEnd = ms(t)
         shadowTap.target = null
         println("  P: ${describe(paused)}")
@@ -234,7 +234,7 @@ class PauseMusicCheck(
             delays[delay]++
             run.begin(paused)
             repeat(pauseFrames) { run.step() }
-            val end = run.end()
+            val end = run.end(settleFrames = ShadowRun.SETTLE_FRAMES) // as the app does
             val ideal = ShortList().also { shadowTap.target = it }
             shadow.step(30)
             shadowTap.target = null
@@ -263,6 +263,229 @@ class PauseMusicCheck(
             println("  spectral similarity with ideal (first 0.5 s): mean ${"%.3f".format(spectralSimilarity.filter { !it.isNaN() }.average())}")
         }
     }
+
+    /**
+     * `pausemusicintro:<button>,<button>...[:<before>,<after>,<every>,<pause frames>[,<save every>[,<keep input>[,<settle frames>[,<measure menu>]]]]]` (default 60,900,3,60,0,0,0,0): battle
+     * starts. Presses the buttons given in turn, 16 frames each (`NONE`: nothing; e.g. LEFT,RIGHT walks back and forth in
+     * tall grass, UP,A walks to a trainer and talks) until a sequence player
+     * gets paused (HeartGold pauses the field music when the battle music starts: the encounter, frame E), then
+     * replays the same inputs from the start and, from E - before to E + after, every `every` frames, pauses like the
+     * app (up to 3 frames later when the frame is refused by [SoundResync.pauseRefusal]), plays the shadow for
+     * `pause frames`, resumes with the real resync and prints the outcome, why, the screen, and the continuity. Inputs
+     * stop at E (the battle intro runs by itself) unless `keep input` is 1. With `pause frames` 0, only the pause guards
+     * of every frame (no shadow). `here`: no inputs, E is the current frame. `settle frames`: see [ShadowRun.end]. `measure menu` 1: after
+     * each resync where sounds ended during the pause, how many frames sooner the battle command menu comes than resuming
+     * from the paused state. With `save every` > 0, saves `intro_<offset>.state` every that many
+     * frames. The main console goes back to the frame it paused at after each test.
+     */
+    fun intro(arg: String, screen: () -> String) {
+        val parts = arg.split(':')
+        // `here`: no walking, the scan starts at the current frame (E = 0), e.g. from a state just before a battle.
+        val here = parts[0] == "here"
+        val dirs = if (here) emptyList() else parts[0].split(',').map { name ->
+            if (name.trim().uppercase() == "NONE") emptySet() else setOf(dev.kotlinds.pokemonclient.console.Button.valueOf(name.trim().uppercase()))
+        }
+        val params = (parts.getOrNull(1)?.split(',')?.map(String::toInt) ?: emptyList())
+        val before = params.getOrElse(0) { 60 }
+        val after = params.getOrElse(1) { 900 }
+        val every = params.getOrElse(2) { 3 }
+        val pauseFrames = params.getOrElse(3) { 60 }
+        val saveEvery = params.getOrElse(4) { 0 }
+        val keepInput = params.getOrElse(5) { 0 } == 1
+        val settleFrames = params.getOrElse(6) { 0 }
+        val measureMenu = params.getOrElse(7) { 0 } == 1
+        val sooner = mutableListOf<Int>()
+        var waitedFrames = 0
+        val start = main.saveState()
+        fun input(i: Int, encounter: Int) =
+            if (dirs.isEmpty() || (i >= encounter && !keepInput)) dev.kotlinds.pokemonclient.console.InputFrame.NONE
+            else dev.kotlinds.pokemonclient.console.InputFrame(dirs[(i / 16) % dirs.size])
+        fun hasPausedPlayer(state: ByteArray) = runCatching { SoundDriverState.read(spec.soundSplicer.locate(state), layout).players.any { it.isPaused } }.getOrDefault(false)
+
+        var encounter = if (here) 0 else -1
+        if (!here) for (i in 0 until 20_000) {
+            if (hasPausedPlayer(main.saveState())) { encounter = i; break }
+            main.step(1, input(i, Int.MAX_VALUE))
+        }
+        check(encounter >= 0) { "no encounter" }
+        if (here) println("  scanning from the current frame")
+        println("  encounter (a player paused) at frame $encounter: ${screen()}")
+        check(main.loadState(start))
+        val from = maxOf(0, encounter - before)
+        for (i in 0 until from) main.step(1, input(i, encounter))
+
+        val run = ShadowRun(shadow, resync, silence = { shadowTap.muted = it })
+        val outcomes = java.util.TreeMap<String, Int>()
+        val continuity = mutableListOf<Double>()
+        val spectralSimilarity = mutableListOf<Double>()
+        for (f in from..encounter + after) {
+            val offset = f - encounter
+            if ((f - from) % every == 0) {
+                val atFrame = main.saveState()
+                if (saveEvery > 0 && offset % saveEvery == 0) Files.write(out.resolve("intro_$offset.state"), atFrame)
+                val raw = resync.pauseRefusal(atFrame)
+                if (pauseFrames == 0) {
+                    // Pause guards only, no shadow: which frames a pause can't start at.
+                    val key = raw?.let { it::class.simpleName!! } ?: "ok"
+                    outcomes[key] = (outcomes[key] ?: 0) + 1
+                    if (raw != null && raw != dev.kotlinds.pokemonclient.libretro.sound.ResyncRefusal.SoundThreadRunningAtPause) {
+                        println("  %+5d %-40s %s | %s".format(offset, screen().take(40), raw.message, commandQueue(atFrame)))
+                    }
+                    main.step(1, input(f, encounter))
+                    continue
+                }
+                var paused = atFrame
+                var delay = 0
+                while (delay < 3 && resync.pauseRefusal(paused) != null) {
+                    main.step(1, input(f + delay, encounter))
+                    paused = main.saveState()
+                    delay++
+                }
+                val ram = mainRam()
+                val where = screen()
+                check(run.begin(paused))
+                repeat(pauseFrames) { run.step() }
+                val end = run.end(settleFrames = settleFrames)
+                val waited = ((end as? ShadowEnd.Safe)?.frames ?: pauseFrames) - pauseFrames
+                waitedFrames += waited
+                val ideal = ShortList().also { shadowTap.target = it }
+                if (end is ShadowEnd.Safe) shadow.step(30)
+                shadowTap.target = null
+                val result = resync.resume(main, paused, end)
+                val key = when (result) {
+                    is ResyncResult.Resynced -> "resynced"
+                    is ResyncResult.Refused -> result.reason::class.simpleName!!
+                    is ResyncResult.Aborted -> "ABORTED"
+                }
+                outcomes[key] = (outcomes[key] ?: 0) + 1
+                var detail = ""
+                if (result is ResyncResult.Resynced && end is ShadowEnd.Safe) {
+                    check(mainRam().contentEquals(ram)) { "main RAM changed by the resync" }
+                    val resumed = ShortList().also { mainTap.target = it }
+                    main.step(30)
+                    mainTap.target = null
+                    val c = correlation(resumed, ideal, 0, rate / 4, rate / 100)
+                    val sp = spectral(resumed, ideal, 0, rate / 2)
+                    if (!c.isNaN()) continuity += c
+                    if (!sp.isNaN()) spectralSimilarity += sp
+                    detail = "corr %+.3f spectral %.3f".format(c, sp)
+                    if (result.endedDuringPause > 0) detail += " (ended during the pause: ${result.endedDuringPause})"
+                    if (measureMenu && result.endedDuringPause > 0) {
+                        // How much sooner the resumed game reaches the command menu than the same game resumed from P.
+                        fun framesToMenu(): Int { var n = 0; while (n < 1500 && !screen().trimStart().startsWith("BattleCommand")) { main.step(1); n++ }; return n }
+                        val resynced = 30 + framesToMenu()
+                        check(main.loadState(paused))
+                        val today = framesToMenu()
+                        sooner += today - resynced
+                        detail += " menu ${today - resynced} frames sooner"
+                    }
+                } else if (result is ResyncResult.Refused) {
+                    detail = result.reason.message
+                    val endState = (end as? ShadowEnd.Safe)?.state
+                    detail += " | P: " + players(paused) + (endState?.let { " | end: " + players(it) } ?: "")
+                    if (result.reason is dev.kotlinds.pokemonclient.libretro.sound.ResyncRefusal.UnreadableCommands) detail += " | " + commandQueue(paused)
+                }
+                println("  %+5d %-40s raw %-26s delay %d -> %-22s %s".format(offset, where.take(40), raw?.let { it::class.simpleName } ?: "ok", delay, key, (if (waited > 0) "(end +$waited frames) " else "") + detail))
+                check(main.loadState(atFrame))
+            }
+            main.step(1, input(f, encounter))
+        }
+        println("  outcomes: ${outcomes.entries.joinToString { "${it.key} ${it.value}" }}" + if (settleFrames > 0) "; shadow ends past the pause: $waitedFrames frames in all" else "")
+        if (sooner.isNotEmpty()) println("  command menu reached sooner after resyncs with sounds ended during the pause: ${sooner.sorted()} frames")
+        if (continuity.isNotEmpty()) println("  continuity (best lag 10 ms, first 0.25 s): mean %.3f min %.3f; spectral (0.5 s) mean %.3f".format(continuity.average(), continuity.min(), spectralSimilarity.average()))
+    }
+
+    /**
+     * `pausemusicmenu:<button>,<button>...:<pause s>,<pause s>...[:<keep input>[:<awaiting input>]]`: from walking like `pausemusicintro`
+     * (the same buttons, 16 frames each) to the battle, the first frame the battle command menu awaits input
+     * (with `awaiting input` 1: the first frame its cursor shows; saved as `menu_first.state`); then, for each pause length and with the shadow's end settle frames 0 and
+     * [ShadowRun.SETTLE_FRAMES], pauses there like the app (up to 3 frames later if refused), resumes with the real
+     * resync and prints the outcome, the players, and the continuity with the uninterrupted music.
+     */
+    fun menu(arg: String, screen: () -> String) {
+        val parts = arg.split(':')
+        val dirs = parts[0].split(',').map { name ->
+            if (name.trim().uppercase() == "NONE") emptySet() else setOf(dev.kotlinds.pokemonclient.console.Button.valueOf(name.trim().uppercase()))
+        }
+        val pauses = parts[1].split(',').map(String::toDouble)
+        val keepInput = parts.getOrNull(2) == "1"
+        val awaitingInput = parts.getOrNull(3) == "1" // the menu's cursor shown (it takes input), not just drawn
+        fun hasPausedPlayer(state: ByteArray) = runCatching { SoundDriverState.read(spec.soundSplicer.locate(state), layout).players.any { it.isPaused } }.getOrDefault(false)
+        var encounter = -1
+        var i = 0
+        while (i < 30_000) {
+            val inBattle = encounter >= 0
+            if (!inBattle && hasPausedPlayer(main.saveState())) encounter = i
+            if (inBattle && screen().trimStart().startsWith("BattleCommand") && (!awaitingInput || "cursor=Hidden" !in screen())) break
+            val input = if (encounter >= 0 && !keepInput) dev.kotlinds.pokemonclient.console.InputFrame.NONE
+                else dev.kotlinds.pokemonclient.console.InputFrame(dirs[(i / 16) % dirs.size])
+            main.step(1, input)
+            i++
+        }
+        check(encounter >= 0) { "no battle" }
+        val first = main.saveState()
+        Files.write(out.resolve("menu_first.state"), first)
+        println("  encounter at frame $encounter, command menu at frame $i (+${i - encounter}): ${screen()}")
+        println("  P: ${describe(first)} | ${players(first)}")
+        val run = ShadowRun(shadow, resync, silence = { shadowTap.muted = it })
+        for (settle in listOf(0, ShadowRun.SETTLE_FRAMES)) for (seconds in pauses) {
+            check(main.loadState(first))
+            var paused = first
+            var delay = 0
+            while (delay < 3 && resync.pauseRefusal(paused) != null) { main.step(1); paused = main.saveState(); delay++ }
+            val ram = mainRam()
+            check(run.begin(paused))
+            repeat(seconds(seconds)) { run.step() }
+            val end = run.end(settleFrames = settle)
+            val ideal = ShortList().also { shadowTap.target = it }
+            if (end is ShadowEnd.Safe) shadow.step(30)
+            shadowTap.target = null
+            val result = resync.resume(main, paused, end)
+            var detail = ""
+            if (result is ResyncResult.Resynced && end is ShadowEnd.Safe) {
+                check(mainRam().contentEquals(ram)) { "main RAM changed by the resync" }
+                val resumed = ShortList().also { mainTap.target = it }
+                main.step(30)
+                mainTap.target = null
+                detail = "corr %+.3f spectral %.3f, ended during the pause %d".format(correlation(resumed, ideal, 0, rate / 4, rate / 100), spectral(resumed, ideal, 0, rate / 2), result.endedDuringPause)
+            }
+            val waited = ((end as? ShadowEnd.Safe)?.frames ?: 0) - seconds(seconds)
+            println("  settle %2d pause %4.1fs delay %d end +%d -> %s %s | end: %s".format(settle, seconds, delay, waited,
+                when (result) { is ResyncResult.Resynced -> "resynced"; is ResyncResult.Refused -> result.reason.message; is ResyncResult.Aborted -> "ABORTED ${result.why}" },
+                detail, (end as? ShadowEnd.Safe)?.let { players(it.state) } ?: end.toString()))
+        }
+    }
+
+    /** The players of [state], short: index, flags (A active, P paused), tracks, bank. */
+    private fun players(state: ByteArray): String = runCatching {
+        SoundDriverState.read(spec.soundSplicer.locate(state), layout).players.joinToString(" ") { p ->
+            "#${p.index}${if (p.isPaused) "P" else "A"}/${p.tracks.size}t/bank %08X".format(p.bank)
+        }
+    }.getOrElse { "?" }
+
+    /** The ARM9's command bookkeeping of [state], raw (why [SoundDriverState.commandsInFlight] may be unreadable). */
+    private fun commandQueue(state: ByteArray): String = runCatching {
+        val s = spec.soundSplicer.locate(state)
+        val shared = s.arm7(layout.sharedWorkPointer)
+        val a = layout.arm9Commands
+        val finished = s.main(shared)
+        val tag = s.main(shared + a.currentTag)
+        val write = s.main(shared + a.waitingWrite)
+        val queue = (0 until a.waitingSlots).map { s.main(shared + a.waitingQueue + it * 4) }
+        val lists = queue.map { head ->
+            val ids = mutableListOf<String>()
+            var c = head
+            var n = 0
+            while (c != 0 && n++ < 300) {
+                if (!s.inMainRam(c)) { ids += "bad %08X".format(c); break }
+                ids += "%02X".format(s.main(c + 4)); c = s.main(c)
+            }
+            ids.joinToString(",")
+        }
+        // The words around the statics block, to see the other statics (free list, reserved list...).
+        val block = (-0x60 until 0x10 step 4).joinToString(" ") { "%08X".format(s.main(shared + it)) }
+        "shared %08X finished %d tag %d write %d queue %s lists %s block %s".format(shared, finished, tag, write, queue.joinToString(",") { "%08X".format(it) }, lists, block)
+    }.getOrElse { "? ${it.message}" }
 
     private fun describe(state: ByteArray): String = runCatching {
         val s = SoundDriverState.read(spec.soundSplicer.locate(state), layout)

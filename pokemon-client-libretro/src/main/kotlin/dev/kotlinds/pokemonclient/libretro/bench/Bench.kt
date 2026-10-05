@@ -301,6 +301,8 @@ private class Bench(
             "pausemusicload" -> pauseMusic.load(arg)
             "pausemusicfixtures" -> pauseMusic.fixtures(arg)
             "pausemusicdriver" -> pauseMusic.driver()
+            "pausemusicmenu" -> pauseMusic.menu(arg) { describe(game.state(scope.memory()).screen).lineSequence().first() }
+            "pausemusicintro" -> pauseMusic.intro(arg) { describe(game.state(scope.memory()).screen).lineSequence().first() }
             else -> error("unknown command $command")
         }
     }

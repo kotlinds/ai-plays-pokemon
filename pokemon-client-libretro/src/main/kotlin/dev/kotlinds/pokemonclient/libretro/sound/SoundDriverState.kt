@@ -27,6 +27,8 @@ data class SoundDriverState(
      * must come out of the pause byte-identical.
      */
     val pausedPlayerState: Map<Int, List<Byte>> = emptyMap(),
+    /** Why [commandsInFlight] couldn't be read (the inconsistent values), null when it could. */
+    val commandsUnreadable: String? = null,
 ) {
     /** The players playing (active and not paused): the music, plus sound effects or cries if any. */
     val playing: List<Player> get() = players.filter { !it.isPaused }
@@ -79,6 +81,7 @@ data class SoundDriverState(
             val current = state.arm7(layout.currentThreadPointer).let { pointer ->
                 if (pointer - SoundDriverLayout.ARM7_WRAM in 0..0xFFFC) state.arm7(pointer) else 0
             }
+            val commands = commandsInFlight(state, layout)
             val paused = players.filter { it.isPaused }.associate { player ->
                 val base = work + PLAYERS + player.index * PLAYER_SIZE
                 val bytes = (0 until PLAYER_SIZE).map { wram[state.arm7Wram.offset + base + it - SoundDriverLayout.ARM7_WRAM] } +
@@ -93,36 +96,48 @@ data class SoundDriverState(
                 soundThreadRunning = current == layout.soundThread,
                 queuedCommandLists = state.arm7(layout.commandQueue + 0x1C),
                 lockedChannels = layout.lockedChannels.fold(0) { mask, address -> mask or state.arm7(address) },
-                commandsInFlight = commandsInFlight(state, layout),
+                commandsInFlight = commands.ids,
                 pausedPlayerState = paused,
+                commandsUnreadable = commands.unreadable,
             )
         }
+
+        /** The ids of the commands in flight, or why they couldn't be read. */
+        private class CommandsInFlight(val ids: List<Int>?, val unreadable: String? = null)
 
         /**
          * The ids of the commands of every list flushed by the ARM9 (`sCurrentTag - 1` lists so far) that the ARM7
          * hasn't finished (`SNDSharedWork.finishedCommandTag`): the newest entries of the ARM9's waiting queue.
+         *
+         * `SND_FlushCommand` sends the list to the ARM7 before it counts it (queue slot, `sCurrentTag++`), interrupts
+         * off but the ARM7 running meanwhile: a state taken in between may show the ARM7 one list ahead (it already
+         * finished the list being flushed). Nothing is in flight then.
          */
-        private fun commandsInFlight(state: SoundSavestate, layout: SoundDriverLayout): List<Int>? {
+        private fun commandsInFlight(state: SoundSavestate, layout: SoundDriverLayout): CommandsInFlight {
             val shared = state.arm7(layout.sharedWorkPointer)
             val arm9 = layout.arm9Commands
             val addresses = listOf(shared, shared + arm9.currentTag, shared + arm9.waitingWrite, shared + arm9.waitingQueue)
-            if (!addresses.all(state::inMainRam)) return null
+            if (!addresses.all(state::inMainRam)) return CommandsInFlight(null, "shared work pointer %08X outside main RAM".format(shared))
             val finished = state.main(shared)
             val flushed = state.main(shared + arm9.currentTag) - 1
             val pending = flushed - finished
             val write = state.main(shared + arm9.waitingWrite)
-            if (pending !in 0 until arm9.waitingSlots || write !in 0 until arm9.waitingSlots) return null
+            val values = "finished tag $finished, current tag ${flushed + 1}, write $write"
+            if (pending == -1) return CommandsInFlight(emptyList()) // the ARM7 already finished the list being flushed
+            if (pending !in 0 until arm9.waitingSlots || write !in 0 until arm9.waitingSlots) return CommandsInFlight(null, values)
             val ids = mutableListOf<Int>()
             for (k in 1..pending) {
                 var command = state.main(shared + arm9.waitingQueue + ((write - k + arm9.waitingSlots) % arm9.waitingSlots) * 4)
                 var count = 0
                 while (command != 0) {
-                    if (!state.inMainRam(command) || !state.inMainRam(command + 4) || ++count > MAX_COMMANDS) return null
+                    if (!state.inMainRam(command) || !state.inMainRam(command + 4) || ++count > MAX_COMMANDS) {
+                        return CommandsInFlight(null, "$values, list $k: bad command %08X (#$count)".format(command))
+                    }
                     ids += state.main(command + 4)
                     command = state.main(command)
                 }
             }
-            return ids
+            return CommandsInFlight(ids)
         }
     }
 }

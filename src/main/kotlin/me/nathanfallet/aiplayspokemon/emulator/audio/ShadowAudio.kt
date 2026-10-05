@@ -171,7 +171,7 @@ class ShadowAudio(
             }
         }
         val end = try {
-            run.end(afterFrame = { pacer.frameDone(fastForward = false) })
+            run.end(afterFrame = { pacer.frameDone(fastForward = false) }, settleFrames = SETTLE_FRAMES)
         } catch (error: Throwable) {
             session.failure = error.message ?: error.toString()
             ShadowEnd.NotSafe(run.frames)
@@ -348,8 +348,20 @@ class ShadowAudio(
     }
 
     private companion object {
-        /** The shadow reaches a safe frame within 3 frames (~50 ms); past this, resume without it. */
-        const val END_TIMEOUT_MILLIS = 500L
+        /**
+         * The shadow reaches a safe frame within 3 frames (~50 ms), plus up to [SETTLE_FRAMES] when a sound its game
+         * started still plays; past this, resume without it.
+         */
+        const val END_TIMEOUT_MILLIS = 1_000L
+
+        /**
+         * At resume, when a sound effect or a cry the shadow's game started during the pause still plays next to the
+         * music (the resync would be refused: the resumed game starts it itself), the shadow plays on up to this many
+         * frames (~0.5 s, in real time: the music goes on meanwhile) for it to end (see [ShadowRun.end]). Measured on
+         * a wild battle's intro paused 5 s: 76 -> 88 resyncs of 91 pauses, the resume coming ~0.35 s later on average when
+         * it waits (13% of resumes). 0 resumes at once.
+         */
+        const val SETTLE_FRAMES = ShadowRun.SETTLE_FRAMES
 
         /** A frame where a pause can start comes within 1 frame (measured over 200 pauses); 3 at most. */
         const val MAX_PAUSE_DELAY_FRAMES = 3

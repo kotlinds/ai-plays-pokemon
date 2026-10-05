@@ -29,6 +29,16 @@ class SoundResync(
         runCatching { SoundDriverState.read(splicer.locate(state), layout).isSafeFrame }.getOrDefault(false)
 
     /**
+     * Whether the shadow's [end] (a safe frame) would be refused only because sounds other than the music play there
+     * ([ResyncRefusal.NotOnlyMusic]: a sound effect or a cry the shadow's game started during the pause): the shadow may
+     * then play a little longer, until they end (see [ShadowRun.end]).
+     */
+    fun soundsStartedPlayAtEnd(paused: ByteArray, end: ByteArray): Boolean = runCatching {
+        val atEnd = SoundDriverState.read(splicer.locate(end), layout)
+        (guards(SoundDriverState.read(splicer.locate(paused), layout), atEnd) as? ResyncRefusal.NotOnlyMusic)?.let { atEnd.playing.size > 1 } ?: false
+    }.getOrDefault(false)
+
+    /**
      * Runs every guard on the [paused] state and the shadow's state at its end ([shadowEnd], a safe frame), and splices
      * them: the paused state with the shadow's sound playback state.
      */
@@ -66,17 +76,31 @@ class SoundResync(
     /** The guards on the paused state alone, in order; null when they all pass. */
     private fun pauseGuards(atPause: SoundDriverState): ResyncRefusal? = when {
         atPause.soundThreadRunning -> ResyncRefusal.SoundThreadRunningAtPause
-        atPause.commandsInFlight == null -> ResyncRefusal.UnreadableCommands
+        atPause.commandsInFlight == null -> ResyncRefusal.UnreadableCommands(atPause.commandsUnreadable.orEmpty())
         atPause.commandsInFlight.any { it !in IDEMPOTENT_COMMANDS } ->
             ResyncRefusal.CommandsInFlightAtPause(atPause.commandsInFlight.filter { it !in IDEMPOTENT_COMMANDS })
         else -> null
     }
 
-    /** The guards, in order; null when they all pass. */
+    /**
+     * The guards, in order; null when they all pass.
+     *
+     * At the shadow's end, exactly one sequence must play (the music), and every sequence active there must already
+     * have been active, the same, at the pause: the game didn't start anything during the pause, so the main console
+     * won't start it a second time, and no sequence the paused game doesn't know of is left playing.
+     *
+     * Sequences that were playing at the pause and ended during it (a sound effect, a cry, see [ResyncRefusal.NotOnlyMusic])
+     * are accepted: the resumed game sees them finished at once (the ARM7 reports them stopped in `SNDSharedWork`
+     * within a frame, and the NNS player frees their handles), instead of after the rest of their length. HeartGold
+     * only ever waits for such a sound to end (battle text `{WAIT_SE}`, the opponent's send-out waiting for its cry,
+     * script `WaitSE` / `WaitCry` / `WaitFanfare`): it may then go on a little sooner, with the same outcome (measured
+     * on battle intros: the command menu still comes at the same frame). Fanfares stay refused, as they pause the
+     * music: the field or battle music, paused at the end, plays no sound then.
+     */
     internal fun guards(atPause: SoundDriverState, atEnd: SoundDriverState): ResyncRefusal? = pauseGuards(atPause) ?: when {
         !atEnd.isSafeFrame -> ResyncRefusal.ShadowNotAtSafeFrame
-        atPause.playing.size != 1 || atEnd.playing.size != 1 -> ResyncRefusal.NotOnlyMusic(atPause.playing.size, atEnd.playing.size)
-        atPause.players != atEnd.players -> ResyncRefusal.SongChanged
+        atEnd.playing.size != 1 -> ResyncRefusal.NotOnlyMusic(atPause.playing.size, atEnd.playing.size)
+        !atPause.players.containsAll(atEnd.players) -> ResyncRefusal.SongChanged
         atPause.pausedPlayerState != atEnd.pausedPlayerState -> ResyncRefusal.PausedPlayerMoved
         atPause.lockedChannels != 0 || atEnd.lockedChannels != 0 -> ResyncRefusal.LockedChannels(atPause.lockedChannels or atEnd.lockedChannels)
         else -> null
@@ -104,7 +128,7 @@ class SoundResync(
             val restored = main.loadState(paused) && mainRamIsPaused()
             return ResyncResult.Aborted("main RAM changed after loading the spliced state (paused state restored: $restored)")
         }
-        return ResyncResult.Resynced(decision.atPause.playing.single())
+        return ResyncResult.Resynced(decision.atEnd.playing.single(), decision.atPause.playing.size - 1)
     }
 
     /**
@@ -161,7 +185,12 @@ sealed interface ResyncDecision {
 /** The outcome of a resume with music during pauses. */
 sealed interface ResyncResult {
     /** The game resumed with the shadow's music state, main RAM verified identical. */
-    data class Resynced(val music: SoundDriverState.Player) : ResyncResult
+    data class Resynced(
+        /** The music (the one sequence playing at the shadow's end). */
+        val music: SoundDriverState.Player,
+        /** Sounds that were playing next to the music at the pause and ended during it (sound effects, cries). */
+        val endedDuringPause: Int = 0,
+    ) : ResyncResult
 
     /** Nothing was loaded: the game resumes from its paused state, as without music during pauses. */
     data class Refused(val reason: ResyncRefusal) : ResyncResult
@@ -185,9 +214,9 @@ sealed interface ResyncRefusal {
         override val message get() = "the sound thread was running when the pause started"
     }
 
-    /** The ARM9's command bookkeeping couldn't be read. */
-    data object UnreadableCommands : ResyncRefusal {
-        override val message get() = "the sound commands in flight couldn't be read"
+    /** The ARM9's command bookkeeping couldn't be read ([detail]: the inconsistent values, for logs). */
+    data class UnreadableCommands(val detail: String) : ResyncRefusal {
+        override val message get() = "the sound commands in flight couldn't be read ($detail)"
     }
 
     /** Commands in flight at the pause that can't run twice (they would restart / stop something). */
@@ -201,16 +230,20 @@ sealed interface ResyncRefusal {
     }
 
     /**
-     * Not exactly one sequence (the music) playing, at the pause or at the shadow's end (sound effects, cries...).
-     * Paused players don't count (see [PausedPlayerMoved]).
+     * Not exactly one sequence (the music) playing at the shadow's end: a sound effect or a cry still playing there
+     * (started during the pause: the resumed game would start it again), or nothing. Paused players don't count (see
+     * [PausedPlayerMoved]). Sounds playing at the pause that ended during it are fine (see [SoundResync]).
      */
     data class NotOnlyMusic(val atPause: Int, val atEnd: Int) : ResyncRefusal {
-        override val message get() = "not only the music playing (players: $atPause at the pause, $atEnd at the end)"
+        override val message get() = "not only the music playing at the end (players: $atPause at the pause, $atEnd at the end)"
     }
 
-    /** The song changed during the pause (the game is driving the music: the main console must do it itself). */
+    /**
+     * A sequence active at the shadow's end wasn't active at the pause (the song changed, the battle music started...):
+     * the game is driving the music, the main console must do it itself.
+     */
     data object SongChanged : ResyncRefusal {
-        override val message get() = "the song changed during the pause"
+        override val message get() = "a sequence started or changed during the pause"
     }
 
     /**
