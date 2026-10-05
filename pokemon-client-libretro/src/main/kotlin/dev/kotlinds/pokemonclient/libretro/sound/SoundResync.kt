@@ -52,15 +52,32 @@ class SoundResync(
         return ResyncDecision.Spliced(spliced, atPause, atEnd)
     }
 
-    /** The guards, in order; null when they all pass. */
-    internal fun guards(atPause: SoundDriverState, atEnd: SoundDriverState): ResyncRefusal? = when {
+    /**
+     * The guards that only look at the [paused] state, or null when they pass: whether a pause starting at this frame
+     * can be resynced at all. They fail only for a frame or two (the ARM7 mid-tick, a command list being processed),
+     * so a pause may better start a frame later (see `ShadowAudio` in the app).
+     */
+    fun pauseRefusal(paused: ByteArray): ResyncRefusal? = try {
+        pauseGuards(SoundDriverState.read(splicer.locate(paused), layout))
+    } catch (error: UnsupportedSavestateException) {
+        ResyncRefusal.UnsupportedState(error.message.orEmpty())
+    }
+
+    /** The guards on the paused state alone, in order; null when they all pass. */
+    private fun pauseGuards(atPause: SoundDriverState): ResyncRefusal? = when {
         atPause.soundThreadRunning -> ResyncRefusal.SoundThreadRunningAtPause
         atPause.commandsInFlight == null -> ResyncRefusal.UnreadableCommands
         atPause.commandsInFlight.any { it !in IDEMPOTENT_COMMANDS } ->
             ResyncRefusal.CommandsInFlightAtPause(atPause.commandsInFlight.filter { it !in IDEMPOTENT_COMMANDS })
+        else -> null
+    }
+
+    /** The guards, in order; null when they all pass. */
+    internal fun guards(atPause: SoundDriverState, atEnd: SoundDriverState): ResyncRefusal? = pauseGuards(atPause) ?: when {
         !atEnd.isSafeFrame -> ResyncRefusal.ShadowNotAtSafeFrame
-        atPause.players.size != 1 || atEnd.players.size != 1 -> ResyncRefusal.NotOnlyMusic(atPause.players.size, atEnd.players.size)
+        atPause.playing.size != 1 || atEnd.playing.size != 1 -> ResyncRefusal.NotOnlyMusic(atPause.playing.size, atEnd.playing.size)
         atPause.players != atEnd.players -> ResyncRefusal.SongChanged
+        atPause.pausedPlayerState != atEnd.pausedPlayerState -> ResyncRefusal.PausedPlayerMoved
         atPause.lockedChannels != 0 || atEnd.lockedChannels != 0 -> ResyncRefusal.LockedChannels(atPause.lockedChannels or atEnd.lockedChannels)
         else -> null
     }
@@ -87,7 +104,7 @@ class SoundResync(
             val restored = main.loadState(paused) && mainRamIsPaused()
             return ResyncResult.Aborted("main RAM changed after loading the spliced state (paused state restored: $restored)")
         }
-        return ResyncResult.Resynced(decision.atPause.players.single())
+        return ResyncResult.Resynced(decision.atPause.playing.single())
     }
 
     /**
@@ -183,7 +200,10 @@ sealed interface ResyncRefusal {
         override val message get() = "the shadow didn't reach a safe frame"
     }
 
-    /** Not exactly one sequence (the music) playing, at the pause or at the shadow's end (sound effects, cries...). */
+    /**
+     * Not exactly one sequence (the music) playing, at the pause or at the shadow's end (sound effects, cries...).
+     * Paused players don't count (see [PausedPlayerMoved]).
+     */
     data class NotOnlyMusic(val atPause: Int, val atEnd: Int) : ResyncRefusal {
         override val message get() = "not only the music playing (players: $atPause at the pause, $atEnd at the end)"
     }
@@ -191,6 +211,14 @@ sealed interface ResyncRefusal {
     /** The song changed during the pause (the game is driving the music: the main console must do it itself). */
     data object SongChanged : ResyncRefusal {
         override val message get() = "the song changed during the pause"
+    }
+
+    /**
+     * A paused player (HeartGold's field music during a battle) isn't byte-identical at the shadow's end: the game
+     * touched it during the pause.
+     */
+    data object PausedPlayerMoved : ResyncRefusal {
+        override val message get() = "a paused sequence changed during the pause"
     }
 
     /** Channels locked away from the sequencer (wave out...). */

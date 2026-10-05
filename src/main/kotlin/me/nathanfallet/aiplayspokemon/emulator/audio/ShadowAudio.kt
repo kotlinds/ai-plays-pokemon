@@ -64,6 +64,10 @@ class ShadowAudio(
     var lastResult: ResyncResult? = null
         private set
 
+    /** Called on the console thread with the outcome of every resume that had a shadow playing. */
+    @Volatile
+    var onResume: ((ResyncResult) -> Unit)? = null
+
     /** Set after an unexpected failure: the feature stays off until the app restarts. */
     @Volatile
     private var broken = false
@@ -75,6 +79,15 @@ class ShadowAudio(
 
     /** The current pause's session (console thread only). */
     private var session: Session? = null
+
+    /** Frames the coming pause was already put off by [delaysPause] (console thread only). */
+    private var pauseDelay = 0
+
+    /** The main console's state saved by [delaysPause] for the pause to start from, with its frame and revision. */
+    private var pauseCandidate: Triple<Long, Long, ByteArray>? = null
+
+    /** Whether the shadow should play during pauses now. */
+    private val wanted: Boolean get() = resync != null && enabled && soundOn && !broken
 
     /** One pause. Its [phase] is guarded by [lock]. */
     private class Session(val paused: ByteArray) {
@@ -184,12 +197,35 @@ class ShadowAudio(
 
     // region console thread
 
+    /**
+     * Called by the console thread when the game is about to freeze (the frame before the first [onIdle] of a pause):
+     * true when the pause had better start one frame later, because a pause starting at this frame couldn't be
+     * resynced ([SoundResync.pauseRefusal]: the ARM7 is in the middle of a sequencer tick, or of sound commands that
+     * can't run twice; ~12% of frames, measured). That lasts a frame, so the game then emulates one more frame before
+     * pausing (at most [MAX_PAUSE_DELAY_FRAMES]): it pauses ~17 ms later, through its normal emulation, as if the pause
+     * had been asked then.
+     */
+    fun delaysPause(main: LibretroConsole): Boolean {
+        if (session != null || !wanted) return false
+        val state = main.saveState()
+        if (pauseDelay < MAX_PAUSE_DELAY_FRAMES && resync!!.pauseRefusal(state) != null) {
+            pauseDelay++
+            pauseCandidate = null
+            return true
+        }
+        pauseCandidate = Triple(main.frame, main.revision, state)
+        return false
+    }
+
     /** Called by the console thread while the game is paused (every few ms): starts or stops the shadow. */
     fun onIdle(main: LibretroConsole) {
-        val wanted = resync != null && enabled && soundOn && !broken
+        val wanted = wanted
         val current = session
         if (current == null && wanted) {
-            val started = Session(main.saveState())
+            val candidate = pauseCandidate?.takeIf { (frame, revision) -> frame == main.frame && revision == main.revision }
+            val started = Session(candidate?.third ?: main.saveState())
+            pauseCandidate = null
+            pauseDelay = 0
             session = started
             lock.withLock {
                 pending = started
@@ -232,6 +268,7 @@ class ShadowAudio(
         val result = current.failure?.let { ResyncResult.Refused(ResyncRefusal.ShadowFailed(it)) }
             ?: resync!!.resume(main, current.paused, current.end)
         lastResult = result
+        onResume?.invoke(result)
         when (result) {
             is ResyncResult.Resynced -> Unit
             is ResyncResult.Refused -> {
@@ -252,6 +289,8 @@ class ShadowAudio(
     fun discard() {
         session?.let(::cancel)
         session = null
+        pauseCandidate = null
+        pauseDelay = 0
     }
 
     private fun cancel(current: Session) = lock.withLock {
@@ -312,5 +351,8 @@ class ShadowAudio(
     private companion object {
         /** The shadow reaches a safe frame within 3 frames (~50 ms); past this, resume without it. */
         const val END_TIMEOUT_MILLIS = 500L
+
+        /** A frame where a pause can start comes within 1 frame (measured over 200 pauses); 3 at most. */
+        const val MAX_PAUSE_DELAY_FRAMES = 3
     }
 }

@@ -62,8 +62,10 @@ class ShortList {
  *   then the music jumps back) and `<name>_ideal.wav` (as if the game never paused) to the out dir; prints the guards'
  *   decision, the continuity at resume (correlation with the ideal continuation) and the main RAM differences
  *   with "today" after the resume;
- * - `pausemusicstats:<pauses>[:<pause frames>]`: that many short pauses one after the other (the game runs 7 frames
- *   between two), and the share of each outcome and the mean continuity.
+ * - `pausemusicstats:<pauses>[:<pause frames>[:<max delay>]]`: that many short pauses one after the other (the game
+ *   runs 7 frames between two), and the share of each outcome and the mean continuity; with a max delay, a pause
+ *   starts up to that many frames later when its first frame can't be resynced ([SoundResync.pauseRefusal]), as the
+ *   app does.
  */
 class PauseMusicCheck(
     private val main: LibretroConsole,
@@ -195,6 +197,9 @@ class PauseMusicCheck(
         println("  fixtures written to $out")
     }
 
+    /** `pausemusicdriver`: the sound driver of the current frame (players, sound thread, commands in flight). */
+    fun driver() = println("  driver: ${describe(main.saveState())}")
+
     /** `pausemusicload:<state file>`: the shadow loads a state file (priming if needed) and runs 60 frames. */
     fun load(arg: String) {
         val bytes = Files.readAllBytes(out.resolve(arg))
@@ -206,8 +211,11 @@ class PauseMusicCheck(
     }
 
     fun stats(arg: String) {
-        val pauses = arg.substringBefore(':').toInt()
-        val pauseFrames = arg.substringAfter(':', "60").toInt()
+        val parts = arg.split(':')
+        val pauses = parts[0].toInt()
+        val pauseFrames = parts.getOrNull(1)?.toInt() ?: 60
+        val maxDelay = parts.getOrNull(2)?.toInt() ?: 0
+        val delays = IntArray(maxDelay + 1)
         val outcomes = HashMap<String, Int>()
         val continuity = mutableListOf<Double>()
         val continuityLag = mutableListOf<Double>()
@@ -215,7 +223,15 @@ class PauseMusicCheck(
         val run = ShadowRun(shadow, resync, silence = { shadowTap.muted = it })
         repeat(pauses) {
             main.step(7)
-            val paused = main.saveState()
+            var paused = main.saveState()
+            // As the app does: the pause starts up to maxDelay frames later when this frame can't be resynced.
+            var delay = 0
+            while (delay < maxDelay && resync.pauseRefusal(paused) != null) {
+                main.step(1)
+                paused = main.saveState()
+                delay++
+            }
+            delays[delay]++
             run.begin(paused)
             repeat(pauseFrames) { run.step() }
             val end = run.end()
@@ -238,6 +254,7 @@ class PauseMusicCheck(
                 spectralSimilarity += spectral(after, ideal, 0, 30 * rate / 60)
             }
         }
+        if (maxDelay > 0) println("  pause delayed by 0..$maxDelay frames: ${delays.joinToString()}")
         println("  outcomes over $pauses pauses of $pauseFrames frames: ${outcomes.entries.sortedByDescending { it.value }.joinToString { "${it.key} ${it.value}" }}")
         if (continuity.isNotEmpty()) {
             println("  continuity (corr with ideal, first 0.25 s): mean ${"%.3f".format(continuity.average())}, min ${"%.3f".format(continuity.min())}")

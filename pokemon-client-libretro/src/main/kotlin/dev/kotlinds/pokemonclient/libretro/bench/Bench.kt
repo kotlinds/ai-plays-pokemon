@@ -74,7 +74,7 @@ import kotlin.io.path.writeBytes
  *   message and ball shakes; `truth:on` records the battle message of every frame, `truth:check` compares it with
  *   the recorder's battle messages (what was shown but not recorded), `truth:dump:<name>` writes it to `<name>.trace`
  *   (run-length encoded in tests); `autobattle:<n>[,move:<id>]` plays n decisions of a battle like an agent and checks.
- * - `pausemusic:<name>[:<play>,<pause>,<resume>]` / `pausemusicstats:<pauses>[:<frames>]` / `pausemusicload:<file>` /
+ * - `pausemusic:<name>[:<play>,<pause>,<resume>]` / `pausemusicstats:<pauses>[:<frames>]` / `pausemusicload:<file>` / `pausemusicdriver` /
  *   `pausemusicfixtures:<prefix>[:<frames>]`: music during pauses, end to
  *   end with a shadow core (WAVs, guards, continuity, main RAM checks; see [PauseMusicCheck]).
  */
@@ -270,6 +270,7 @@ private class Bench(
             "pausemusicstats" -> pauseMusic.stats(arg)
             "pausemusicload" -> pauseMusic.load(arg)
             "pausemusicfixtures" -> pauseMusic.fixtures(arg)
+            "pausemusicdriver" -> pauseMusic.driver()
             else -> error("unknown command $command")
         }
     }

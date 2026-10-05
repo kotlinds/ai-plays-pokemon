@@ -17,11 +17,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import me.nathanfallet.aiplayspokemon.emulator.audio.AudioDevice
 import me.nathanfallet.aiplayspokemon.emulator.audio.AudioPlayer
 import me.nathanfallet.aiplayspokemon.emulator.audio.ShadowAudio
 import dev.kotlinds.pokemonclient.console.ConsolePort
 import dev.kotlinds.pokemonclient.libretro.LibretroConsole
 import dev.kotlinds.pokemonclient.libretro.LibretroCoreSpec
+import dev.kotlinds.pokemonclient.libretro.sound.ResyncResult
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -53,6 +55,8 @@ class ConsoleHost(
     private val spec: LibretroCoreSpec,
     private val romPath: Path,
     private val dataDirectory: Path,
+    /** Where the sound goes: the default audio device (tests capture it instead). */
+    private val audioDevice: (sampleRate: Double) -> AudioDevice? = { AudioDevice.default(it) },
 ) : Emulator {
 
     /** Who drives the console right now. */
@@ -111,11 +115,12 @@ class ConsoleHost(
     private val consoleThread = thread(name = "console", isDaemon = true) {
         val console = try {
             LibretroConsole(spec, romPath, dataDirectory, onVideo = { _frames.value = it }, onAudio = { s, n -> audio.play(s, n) }).also {
-                audio = AudioPlayer(it.sampleRate)
+                audio = AudioPlayer(it.sampleRate, audioDevice(it.sampleRate))
                 info = EmulatorInfo(name = it.coreName, fps = it.fps)
                 pacer = FramePacer(it.fps)
                 shadowAudio = ShadowAudio(spec, romPath, dataDirectory, audio, it.fps).apply {
                     enabled = musicDuringPauses
+                    onResume = { result -> musicDuringPausesListener?.invoke(result) }
                     soundOn = !status.value.muted && !status.value.fastForward
                     unsupportedReason?.let { why -> println("[music during pauses] unavailable: $why") }
                 }
@@ -140,11 +145,25 @@ class ConsoleHost(
         startupError?.let { throw IllegalStateException("Failed to start ${spec.name}", it) }
     }
 
+    /** A frame was emulated since the game was last idle: the next idle loop starts a pause (console thread only). */
+    private var steppedSinceIdle = false
+
+    /** Called on the console thread with the outcome of every resume after a pause with music ([ShadowAudio]). */
+    @Volatile
+    var musicDuringPausesListener: ((ResyncResult) -> Unit)? = null
+
     /** Free run: tasks (including agent leases) first, then one real-time frame with the human's inputs. */
     private fun loop(console: LibretroConsole) {
         while (!closed) {
             while (true) tasks.poll()?.invoke(console) ?: break
             if (!status.value.running) {
+                if (steppedSinceIdle && shadowAudio.delaysPause(console)) {
+                    // The pause starts a frame later, at a frame its music can be resynced from (see ShadowAudio).
+                    console.step(1, InputFrame(humanButtons.value, humanTouch))
+                    afterFrame(console)
+                    continue
+                }
+                steppedSinceIdle = false
                 _driver.value = Driver.Idle
                 shadowAudio.onIdle(console)
                 Thread.sleep(5)
@@ -160,6 +179,7 @@ class ConsoleHost(
 
     /** Bookkeeping after every emulated frame, free run or agent: listeners, counters, then pacing. */
     private fun afterFrame(console: LibretroConsole) {
+        steppedSinceIdle = true
         frameListener?.let { listener -> runCatching { listener(console.frame) { mainRam(console) } } }
         val measured = pacer.frameDone(fastForward = status.value.fastForward)
         _status.update { it.copy(frameCount = it.frameCount + 1, measuredFps = measured ?: it.measuredFps) }

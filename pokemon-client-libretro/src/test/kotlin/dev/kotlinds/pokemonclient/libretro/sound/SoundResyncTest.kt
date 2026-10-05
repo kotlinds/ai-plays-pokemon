@@ -22,7 +22,9 @@ import kotlin.test.assertTrue
  * Music during pauses on real save states of HeartGold US (reduced fixtures, see [SoundFixtures], captured with the
  * bench's `pausemusicfixtures`): `_p` the paused game, `_s` the shadow's safe end 120 frames later, `_busy` a frame
  * where the ARM7 runs the sound thread, `_dma` (melonDS) a frame with a DMA mid-burst. `ds_cherry`: DeSmuME 0.9.12
- * in Cherrygrove City; `mel`: melonDS 0.9.3.
+ * in Cherrygrove City; `ds_battle_will` (Elite Four Will) and `ds_battle_wild` (a wild Hoothoot): DeSmuME battles at
+ * the command menu, where HeartGold keeps the field music paused on another player while the battle music plays;
+ * `mel`: melonDS 0.9.3.
  */
 class SoundResyncTest {
 
@@ -99,6 +101,20 @@ class SoundResyncTest {
         }
     }
 
+    /** In a battle, the field music stays paused on its own player while the battle music plays. */
+    @Test
+    fun decodesTheBattleMusicNextToThePausedFieldMusic() {
+        for ((name, music, field) in listOf(Triple("ds_battle_will_p", 6, 4), Triple("ds_battle_wild_p", 12, 9))) {
+            val driver = SoundDriverState.read(SavestateSoundSplicer.DESMUME.locate(fixture(name)), layout)
+            assertEquals(listOf(field, music), driver.players.map { it.index }, name)
+            assertEquals(music, driver.playing.single().index, name)
+            assertEquals(setOf(field), driver.pausedPlayerState.keys, name)
+            val paused = driver.players.first { it.index == field }
+            assertTrue(paused.isPaused, name)
+            assertEquals(0x24 + 0x40 * paused.tracks.size, driver.pausedPlayerState.getValue(field).size, name)
+        }
+    }
+
     @Test
     fun seesTheSoundThreadRunning() {
         assertTrue(SoundDriverState.read(SavestateSoundSplicer.DESMUME.locate(fixture("ds_cherry_busy")), layout).soundThreadRunning)
@@ -172,6 +188,37 @@ class SoundResyncTest {
         assertEquals(ResyncRefusal.NotOnlyMusic(2, 1), refusal(SavestateSoundSplicer.DESMUME, paused, fixture("ds_cherry_s")))
     }
 
+    /** Battles: the paused field music doesn't count as a second sound, and its state stays the paused game's. */
+    @Test
+    fun resyncsABattleWhoseFieldMusicIsPaused() {
+        for (name in listOf("ds_battle_will", "ds_battle_wild")) {
+            val decision = assertIs<ResyncDecision.Spliced>(resync(SavestateSoundSplicer.DESMUME).splice(fixture("${name}_p"), fixture("${name}_s")), name)
+            assertEquals(decision.atPause.pausedPlayerState, SoundDriverState.read(SavestateSoundSplicer.DESMUME.locate(decision.state), layout).pausedPlayerState)
+            val main = FakeConsole(SavestateSoundSplicer.DESMUME, fixture("${name}_p"))
+            val result = resync(SavestateSoundSplicer.DESMUME).apply(main, fixture("${name}_p"), decision)
+            assertEquals(decision.atPause.playing.single(), assertIs<ResyncResult.Resynced>(result, name).music)
+        }
+        assertEquals(ResyncRefusal.SoundThreadRunningAtPause, refusal(SavestateSoundSplicer.DESMUME, fixture("ds_battle_will_busy"), fixture("ds_battle_will_s")))
+    }
+
+    /** A paused player that moved during the pause (the game touched it): not the music's state to take. */
+    @Test
+    fun refusesWhenAPausedPlayerMoved() {
+        val shadow = fixture("ds_battle_will_s").also {
+            val field = layout.work + 0x540 + 4 * 0x24
+            val offset = SavestateSoundSplicer.DESMUME.locate(it).arm7Wram.offset + field + 0x1C - ARM7_WRAM
+            it[offset]++
+        }
+        assertEquals(ResyncRefusal.PausedPlayerMoved, refusal(SavestateSoundSplicer.DESMUME, fixture("ds_battle_will_p"), shadow))
+        // Unpaused during the pause: two sequences playing at the end.
+        val unpaused = fixture("ds_battle_will_s").also {
+            val field = layout.work + 0x540 + 4 * 0x24
+            val offset = SavestateSoundSplicer.DESMUME.locate(it).arm7Wram.offset + field - ARM7_WRAM
+            it[offset] = (it[offset].toInt() and SoundDriverState.PAUSED.inv()).toByte()
+        }
+        assertEquals(ResyncRefusal.NotOnlyMusic(1, 2), refusal(SavestateSoundSplicer.DESMUME, fixture("ds_battle_will_p"), unpaused))
+    }
+
     @Test
     fun refusesWhenTheSongChanged() {
         val shadow = fixture("ds_cherry_s").also {
@@ -211,6 +258,20 @@ class SoundResyncTest {
     @Test
     fun refusesCommandsInFlightThatCantRunTwice() {
         assertEquals(ResyncRefusal.CommandsInFlightAtPause(listOf(0x00)), refusal(SavestateSoundSplicer.DESMUME, withCommandInFlight(0x00), fixture("ds_cherry_s")))
+    }
+
+    /** The paused-state guards alone: what the app checks to start a pause one frame later (see `ShadowAudio`). */
+    @Test
+    fun tellsFramesAPauseCantStartFrom() {
+        val ds = resync(SavestateSoundSplicer.DESMUME)
+        assertNull(ds.pauseRefusal(fixture("ds_cherry_p")))
+        assertNull(ds.pauseRefusal(fixture("ds_battle_will_p")))
+        assertEquals(ResyncRefusal.SoundThreadRunningAtPause, ds.pauseRefusal(fixture("ds_cherry_busy")))
+        assertEquals(ResyncRefusal.SoundThreadRunningAtPause, ds.pauseRefusal(fixture("ds_battle_will_busy")))
+        assertEquals(ResyncRefusal.CommandsInFlightAtPause(listOf(0x00)), ds.pauseRefusal(withCommandInFlight(0x00)))
+        assertNull(ds.pauseRefusal(withCommandInFlight(0x21)))
+        assertIs<ResyncRefusal.UnsupportedState>(ds.pauseRefusal(fixture("mel_p")))
+        assertEquals(ResyncRefusal.SoundThreadRunningAtPause, resync(SavestateSoundSplicer.MELONDS).pauseRefusal(fixture("mel_busy")))
     }
 
     // endregion

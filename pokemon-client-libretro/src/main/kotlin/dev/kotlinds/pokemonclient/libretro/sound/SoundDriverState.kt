@@ -21,7 +21,16 @@ data class SoundDriverState(
      * id (`SND_CMD_*`); null when they couldn't be read (inconsistent tags or pointers).
      */
     val commandsInFlight: List<Int>?,
+    /**
+     * The raw driver state of each paused player (its `SNDPlayer`, then its `SNDTrack`s), by player number. A paused
+     * player doesn't tick: HeartGold pauses the field music while a battle's music plays on another player, and it
+     * must come out of the pause byte-identical.
+     */
+    val pausedPlayerState: Map<Int, List<Byte>> = emptyMap(),
 ) {
+    /** The players playing (active and not paused): the music, plus sound effects or cries if any. */
+    val playing: List<Player> get() = players.filter { !it.isPaused }
+
     /**
      * One sequence player. Two equal players play the same song: same player, flags, bank and sequence data for every
      * track (positions inside the sequence aren't part of it).
@@ -35,7 +44,10 @@ data class SoundDriverState(
         val bank: Int,
         /** The player's tracks: (track index, address of the track's sequence data). */
         val tracks: List<Pair<Int, Int>>,
-    )
+    ) {
+        /** Paused (`SND_PauseSeq`): active but not ticking, its notes released. */
+        val isPaused: Boolean get() = (flags and PAUSED) != 0
+    }
 
     /** No sound command in flight and the sound thread idle: the sequencer state is consistent and complete. */
     val isSafeFrame: Boolean get() = !soundThreadRunning && queuedCommandLists == 0
@@ -47,7 +59,7 @@ data class SoundDriverState(
         private const val TRACK_SIZE = 0x40
         private const val NO_TRACK = 0xFF
         private const val ACTIVE = 0x1
-        private const val PAUSED = 0x4
+        internal const val PAUSED = 0x4
         private const val MAX_COMMANDS = 256
 
         /** Decodes the driver of [state] with [layout]. */
@@ -67,12 +79,22 @@ data class SoundDriverState(
             val current = state.arm7(layout.currentThreadPointer).let { pointer ->
                 if (pointer - SoundDriverLayout.ARM7_WRAM in 0..0xFFFC) state.arm7(pointer) else 0
             }
+            val paused = players.filter { it.isPaused }.associate { player ->
+                val base = work + PLAYERS + player.index * PLAYER_SIZE
+                val bytes = (0 until PLAYER_SIZE).map { wram[state.arm7Wram.offset + base + it - SoundDriverLayout.ARM7_WRAM] } +
+                    player.tracks.filter { it.first < 32 }.flatMap { (t, _) ->
+                        val track = work + TRACKS + t * TRACK_SIZE
+                        (0 until TRACK_SIZE).map { wram[state.arm7Wram.offset + track + it - SoundDriverLayout.ARM7_WRAM] }
+                    }
+                player.index to bytes
+            }
             return SoundDriverState(
                 players = players,
                 soundThreadRunning = current == layout.soundThread,
                 queuedCommandLists = state.arm7(layout.commandQueue + 0x1C),
                 lockedChannels = layout.lockedChannels.fold(0) { mask, address -> mask or state.arm7(address) },
                 commandsInFlight = commandsInFlight(state, layout),
+                pausedPlayerState = paused,
             )
         }
 
