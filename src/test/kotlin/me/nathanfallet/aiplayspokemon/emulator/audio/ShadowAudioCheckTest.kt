@@ -1,5 +1,6 @@
 package me.nathanfallet.aiplayspokemon.emulator.audio
 
+import me.nathanfallet.aiplayspokemon.emulator.toKotlinxPath
 import dev.kotlinds.pokemonclient.console.MemoryRegion
 import dev.kotlinds.pokemonclient.libretro.LibretroConsole
 import dev.kotlinds.pokemonclient.libretro.LibretroCoreSpec
@@ -40,10 +41,10 @@ class ShadowAudioCheckTest {
         val data = System.getenv("PAUSE_MUSIC_DATA")?.let(Path::of) ?: return
         val rom = Path.of(System.getenv("POKEMON_ROM") ?: return)
         val stateFile = Path.of(System.getenv("PAUSE_MUSIC_STATE") ?: return)
-        val spec = LibretroCoreSpec.forRom(rom, System.getenv("EMULATOR_CORE"))
+        val spec = LibretroCoreSpec.forRom(rom.toKotlinxPath(), System.getenv("EMULATOR_CORE"))
         val device = CaptureDevice()
         lateinit var audio: AudioPlayer
-        val main = LibretroConsole(spec, rom, data, onVideo = {}, onAudio = { s, n -> audio.play(s, n) })
+        val main = LibretroConsole(spec, rom.toKotlinxPath(), data.toKotlinxPath(), onVideo = {}, onAudio = { s, n -> audio.play(s, n) })
         audio = AudioPlayer(main.sampleRate, device)
         val shadowAudio = ShadowAudio(spec, rom, data, audio, main.fps)
         try {

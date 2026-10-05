@@ -114,7 +114,7 @@ class ConsoleHost(
 
     private val consoleThread = thread(name = "console", isDaemon = true) {
         val console = try {
-            LibretroConsole(spec, romPath, dataDirectory, onVideo = { _frames.value = it }, onAudio = { s, n -> audio.play(s, n) }).also {
+            LibretroConsole(spec, romPath.toKotlinxPath(), dataDirectory.toKotlinxPath(), onVideo = { _frames.value = it }, onAudio = { s, n -> audio.play(s, n) }).also {
                 audio = AudioPlayer(it.sampleRate, audioDevice(it.sampleRate))
                 info = EmulatorInfo(name = it.coreName, fps = it.fps)
                 pacer = FramePacer(it.fps)

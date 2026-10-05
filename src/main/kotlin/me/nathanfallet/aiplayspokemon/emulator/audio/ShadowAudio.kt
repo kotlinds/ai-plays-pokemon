@@ -1,5 +1,6 @@
 package me.nathanfallet.aiplayspokemon.emulator.audio
 
+import me.nathanfallet.aiplayspokemon.emulator.toKotlinxPath
 import dev.kotlinds.pokemonclient.console.MemoryRegion
 import dev.kotlinds.pokemonclient.libretro.ConsoleRole
 import dev.kotlinds.pokemonclient.libretro.LibretroConsole
@@ -40,11 +41,11 @@ class ShadowAudio(
     fps: Double,
 ) : AutoCloseable {
 
-    private val layout = SoundDriverLayout.forRom(rom)
+    private val layout = SoundDriverLayout.forRom(rom.toKotlinxPath())
 
     /** Why music during pauses can't run with this ROM / core / platform, or null when it can. */
     val unsupportedReason: String? = when {
-        layout == null -> "the ROM's sound driver isn't a known one (ARM7 binary ${SoundDriverLayout.arm7Sha1(rom)})"
+        layout == null -> "the ROM's sound driver isn't a known one (ARM7 binary ${SoundDriverLayout.arm7Sha1(rom.toKotlinxPath())})"
         else -> null
     }
 
@@ -131,7 +132,7 @@ class ShadowAudio(
     }
 
     private fun shadowConsole(): LibretroConsole = shadow ?: LibretroConsole(
-        spec, rom, dataDirectory,
+        spec, rom.toKotlinxPath(), dataDirectory.toKotlinxPath(),
         onVideo = {},
         onAudio = { samples, frames -> onShadowAudio(samples, frames) },
         role = ConsoleRole.SHADOW,

@@ -1,5 +1,6 @@
 package me.nathanfallet.aiplayspokemon.emulator.audio
 
+import me.nathanfallet.aiplayspokemon.emulator.toKotlinxPath
 import dev.kotlinds.pokemonclient.libretro.LibretroCoreSpec
 import dev.kotlinds.pokemonclient.libretro.sound.ResyncResult
 import kotlinx.coroutines.runBlocking
@@ -101,7 +102,7 @@ class RapidPausesCheckTest {
         val stateFile = Path.of(System.getenv("PAUSE_MUSIC_RAPID_STATE") ?: return)
         val cycles = System.getenv("PAUSE_MUSIC_CYCLES")?.toInt() ?: 20
         val random = Random(System.getenv("PAUSE_MUSIC_SEED")?.toInt() ?: 1)
-        val spec = LibretroCoreSpec.forRom(rom, System.getenv("EMULATOR_CORE"))
+        val spec = LibretroCoreSpec.forRom(rom.toKotlinxPath(), System.getenv("EMULATOR_CORE"))
         Files.createDirectories(data.resolve("states"))
         Files.copy(stateFile, data.resolve("states").resolve("${rom.fileName}.state7"), StandardCopyOption.REPLACE_EXISTING)
 

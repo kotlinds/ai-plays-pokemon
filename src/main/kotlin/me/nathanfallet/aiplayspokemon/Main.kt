@@ -1,5 +1,6 @@
 package me.nathanfallet.aiplayspokemon
 
+import me.nathanfallet.aiplayspokemon.emulator.toKotlinxPath
 import kotlin.io.path.readBytes
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -32,7 +33,7 @@ fun main(args: Array<String>) {
     val config = AppConfig.load(args)
     val rom = config.romPath ?: chooseRom()?.also(config::saveRomPath) ?: return
 
-    val emulator = ConsoleHost(LibretroCoreSpec.forRom(rom, config.emulatorCore), rom, config.dataDirectory)
+    val emulator = ConsoleHost(LibretroCoreSpec.forRom(rom.toKotlinxPath(), config.emulatorCore), rom, config.dataDirectory)
     val game = PokemonGames.detect(rom.readBytes())
     if (config.startMuted) emulator.setMuted(true)
     config.startState?.let { slot -> runBlocking { check(emulator.loadState(slot)) { "No save state in slot $slot" } } }
