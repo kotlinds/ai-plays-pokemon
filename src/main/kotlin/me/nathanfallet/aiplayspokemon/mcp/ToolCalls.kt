@@ -15,7 +15,7 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.time.Duration
-import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * How the MCP server runs the work of one tool call that reads or changes the game:
@@ -23,9 +23,11 @@ import kotlin.time.Duration.Companion.milliseconds
  * - the work always runs to its end, even when the client cancels the call (its timeout): a half-done action would
  *   leave the console mid-menu, and the console thread finishes what it started anyway. The cancellation only marks
  *   the answer as lost, so what it carried is given again with the next one;
- * - while it runs, when the client gave a `progressToken`, a `notifications/progress` is sent each time the game made
- *   progress ([ProgressClock]: a new message, a step, a menu moving), at most every [period]: clients that restart
- *   their timeout on progress then only time out on a call that is really stuck.
+ * - while it runs, when the client gave a `progressToken`, a `notifications/progress` is sent every [period] (about
+ *   5 s) as long as the game made progress meanwhile ([ProgressClock]: a new message, a step, a menu moving, a long
+ *   action's report): clients that restart their timeout on progress then only time out on a call that is really
+ *   stuck. Its message is the clock's latest note: the last text shown, or how far a long action has got ("go_to
+ *   Seafoam Islands 1F: 120/480 tiles, Route 20", see `ActionProgress`). Nothing is sent while nothing happens.
  *
  * With the SDK's Streamable HTTP endpoint (JSON answers), notifications about a request are sent on the client's
  * standalone SSE stream (the GET it opens after initializing), where clients match them to the call by token.
@@ -33,7 +35,7 @@ import kotlin.time.Duration.Companion.milliseconds
 class ToolCalls(
     private val progress: ProgressClock,
     val delivery: DeliveryTracker,
-    private val period: Duration = 500.milliseconds,
+    private val period: Duration = DEFAULT_PERIOD,
 ) {
     /**
      * Runs [block] for [request] (under the server's call lock), arrived at [arrival]. [connection] sends the progress
@@ -57,7 +59,9 @@ class ToolCalls(
                             if (ticks == sent) continue
                             sent = ticks
                             try {
-                                val params = ProgressNotificationParams(token, (ticks - first).toDouble(), message = progress.note)
+                                // Only a note of this call (not the previous call's last message or trip).
+                                val note = progress.note.takeIf { progress.noteTick > first }
+                                val params = ProgressNotificationParams(token, (ticks - first).toDouble(), message = note)
                                 connection.notification(ProgressNotification(params), requestId)
                                 delivery.alive(call)
                             } catch (e: CancellationException) {
@@ -77,5 +81,13 @@ class ToolCalls(
         }
         delivery.answered(call, cancelled = job.isCancelled)
         return result
+    }
+
+    companion object {
+        /**
+         * How often a long call says how it goes: often enough for a client's timeout (60 s by default), rarely enough
+         * not to flood the agent's transcript (one line per notification in some clients).
+         */
+        val DEFAULT_PERIOD: Duration = 5.seconds
     }
 }

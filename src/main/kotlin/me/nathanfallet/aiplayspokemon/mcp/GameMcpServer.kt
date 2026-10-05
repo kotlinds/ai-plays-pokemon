@@ -144,7 +144,7 @@ class GameMcpServer(
                     put("action", session.registry.jsonSchema(mode()))
                     putJsonObject("then") {
                         put("type", "array")
-                        put("description", "Optional further actions done right after, only when sure (max 8); stops at the first problem, when the battle changes under it (the foe switched or fainted, one of yours fainted), or when nothing has happened for a while: `not_done` lists what was left and `not_done_code` why. The answer covers every step: `performed` and all the messages.")
+                        put("description", "Optional further actions done right after, only when sure (max 8); stops at the first problem, when the battle changes under it (the foe switched or fainted, one of yours fainted), before a battle step once the battle is over (BATTLE_WON / BATTLE_OVER / BATTLE_LOST), or when nothing has happened for a while: `not_done` lists what was left and `not_done_code` why. The answer covers every step: `performed` and all the messages.")
                     }
                     putJsonObject("note") {
                         put("type", "string")
@@ -260,6 +260,8 @@ class GameMcpServer(
          * A `then` chain starts no further step once nothing has happened in the game for 20 s (it is stuck), or after
          * 90 s in all whatever the progress (a safety cap). Progress notifications keep the call alive meanwhile for
          * clients that restart their timeout on them; for the others, an answer lost to their timeout is given again.
+         * Only checked between steps: one long step (a go_to surfing for minutes) runs to its end, and its tiles count as
+         * progress for the next check.
          */
         val CHAIN_LIMITS = ChainLimits(idle = 20.seconds, total = 90.seconds)
 

@@ -85,6 +85,17 @@ class DeliveryTrackerTest {
     }
 
     @Test
+    fun aClientThatGaveUpWithoutCancellingIsNoticedEvenWhileProgressWasSent() {
+        text("a")
+        val start = clock
+        // A 150 s go_to with progress every 5 s; the client's HTTP request timed out at 60 s without a cancellation,
+        // and the agent's next call arrived then, waiting for the lock.
+        call(150, progressEvery = 5)
+        clock += 1_000
+        assertTrue(call(1, arrival = start + 60_000).repeated)
+    }
+
+    @Test
     fun aCallMadeInParallelDoesNotLoseThePreviousAnswer() {
         text("a")
         val start = clock

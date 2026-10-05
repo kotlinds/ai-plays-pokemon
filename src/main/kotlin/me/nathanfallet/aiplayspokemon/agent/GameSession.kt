@@ -50,7 +50,7 @@ class GameSession(
      * When true, what a response told the agent is only forgotten once [confirmDelivered] is called: a response lost
      * on the way (client timeout) is given again with the next one. Our own loop can't lose responses (false).
      */
-    confirmDelivery: Boolean = false,
+    private val confirmDelivery: Boolean = false,
     /**
      * Whether the walks solve movement puzzles by themselves (boulders, ice blocks, platforms, lifts:
      * [ActionSettings.solvePuzzles]); when false the agent operates them itself.
@@ -99,8 +99,14 @@ class GameSession(
     /** When the game last made progress (the recorder's clock): long chains and progress notifications use it. */
     val progress: dev.kotlinds.pokemonclient.runtime.ProgressClock get() = recorder.progress
 
+    /** What the acts whose answer was lost did, given back with the next answers ([UnansweredCalls]). */
+    private val unanswered = UnansweredCalls()
+
     /** The last response reached the agent: what it carried won't be repeated (see `confirmDelivery`). */
-    fun confirmDelivered() = feed.confirm()
+    fun confirmDelivered() {
+        feed.confirm()
+        unanswered.delivered()
+    }
 
     /** Version of the last state returned to the agent: actions default to it. */
     private var lastServedVersion: Long? = null
@@ -169,25 +175,33 @@ class GameSession(
         ).run(requested)
         val (afterState, legacy) = host.observe { memory -> game.state(memory) to game.observe(memory).state }
         val after = describe(afterState, legacy, full = false, compact = compact)
+        val outcome = outcome(chain)
+        // Kept until this answer is known to have arrived (our own loop can't lose one).
+        if (confirmDelivery) unanswered.answered(requested.map { it.key }, outcome)
         return buildJsonObject {
-            put("ok", chain.failed == null)
-            putJsonArray("performed") { chain.performed.forEach { add(JsonPrimitive(it)) } }
-            if (chain.details.isNotEmpty()) put("detail", chain.details.joinToString("; "))
-            chain.failed?.let { (action, error) ->
-                put("action", action.key)
-                put("error", buildJsonObject {
-                    put("code", error.code)
-                    put("message", error.message)
-                })
-            }
-            if (chain.skipped.isNotEmpty()) {
-                put("not_done", JsonArray(chain.skipped.map { JsonPrimitive(it.key) }))
-                chain.stop?.let { stop ->
-                    put("not_done_code", stop.code)
-                    put("not_done_reason", stop.message)
-                }
-            }
+            outcome.forEach { (k, v) -> put(k, v) }
             after.forEach { (k, v) -> put(k, v) }
+        }
+    }
+
+    /** What a chain did, as the agent reads it: `ok`, `performed`, `detail`, the failed `action` and its `error`, `not_done`. */
+    private fun outcome(chain: dev.kotlinds.pokemonclient.actions.ChainResult): JsonObject = buildJsonObject {
+        put("ok", chain.failed == null)
+        putJsonArray("performed") { chain.performed.forEach { add(JsonPrimitive(it)) } }
+        if (chain.details.isNotEmpty()) put("detail", chain.details.joinToString("; "))
+        chain.failed?.let { (action, error) ->
+            put("action", action.key)
+            put("error", buildJsonObject {
+                put("code", error.code)
+                put("message", error.message)
+            })
+        }
+        if (chain.skipped.isNotEmpty()) {
+            put("not_done", JsonArray(chain.skipped.map { JsonPrimitive(it.key) }))
+            chain.stop?.let { stop ->
+                put("not_done_code", stop.code)
+                put("not_done_reason", stop.message)
+            }
         }
     }
 
@@ -205,7 +219,9 @@ class GameSession(
         ActGate.refusal(humanPlaying = host.humanActivity.isPlaying(), userPaused = host.isUserPaused)
             ?.let { return ActionOutcome.Failed(it) }
         return try {
-            host.lease(action.key, game.inputProbe) {
+            // A long action's progress (the tiles of a go_to) goes to the recorder's clock: the MCP server's progress
+            // notifications say it, and it counts as progress for a chain's IDLE limit.
+            host.lease(action.key, game.inputProbe, onProgress = recorder.progress::report) {
                 if (action is GameAction.Press || action is GameAction.Touch) countBlind(game.state(memory()).screen)
                 // The game settles after the action, but one step never runs much past STEP_FRAMES in all (the agent's
                 // call must answer before its client gives up): a long action leaves less time to settle.
@@ -231,6 +247,9 @@ class GameSession(
         val batch = feed.take()
         val events = batch.events
         if (batch.repeated) put("messages_repeated", "your previous call seems not to have received its answer (timeout?): what happened since the call before it is given again")
+        // The outcome of the acts whose answer was lost: they ran to their end here, whatever the client saw (even
+        // without any message to repeat: a go_to says nothing).
+        unanswered.describe().forEach { (k, v) -> put(k, v) }
         val messages = events.filterIsInstance<GameEvent.TextShown>()
         if (messages.isNotEmpty()) {
             putJsonArray("messages_since_last_call") {
@@ -286,7 +305,8 @@ class GameSession(
         if (!solvePuzzles() && here != null && (full || here.puzzle != null)) put("movement_puzzles", PUZZLES_LEFT_TO_AGENT)
         val story = state.story
         if (story != null && knowledge().allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH)) {
-            story.goal?.let { put("story_goal", it.description) }
+            // Always a list: one goal, or every open goal when the game leaves the choice (the Kanto gyms...).
+            put("story_goals", JsonArray(story.openGoals.map { JsonPrimitive(it.description) }))
             if (story.blockers.isNotEmpty()) put("blocked_by", JsonArray(story.blockers.map { JsonPrimitive("${it.target}: ${it.reason}") }))
         }
         val mode = mode()

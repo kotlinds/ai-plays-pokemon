@@ -7,8 +7,10 @@ package me.nathanfallet.aiplayspokemon.mcp
  * The verdict on a call is given when the next call arrives ([arrived]), with everything known by then. Its answer is
  * taken as lost when:
  * - the client cancelled it (`notifications/cancelled`: MCP clients send it when their request times out);
- * - another call arrived while it was still running, at least [minClientTimeoutMillis] after its last sign of life (the
- *   client gave up waiting and moved on; a call made in parallel arrives right away, not seconds later);
+ * - another call arrived while it was still running, at least [minClientTimeoutMillis] after it started (the client
+ *   gave up waiting and moved on; a call made in parallel arrives right away, not seconds later). Its start, not its
+ *   last sign of life: a long `go_to` sends progress until its end, and a client that gave up without cancelling (an
+ *   HTTP timeout) must still be noticed;
  * - it was answered more than [clientTimeoutMillis] after its last sign of life (the default timeout of MCP clients).
  * A sign of life is the call's start, or a progress notification sent for it (clients may restart their timeout on
  * each one). A call answered late but received (a long chain that ended in `not_done`) is therefore confirmed: the
@@ -37,7 +39,7 @@ class DeliveryTracker(
     fun arrived(at: Long = now()) {
         val previous = pending ?: return
         val answered = previous.answeredAt
-        if (answered != null && answered > at && at - previous.lastSignOfLife >= minClientTimeoutMillis) previous.lost = true
+        if (answered != null && answered > at && at - previous.started >= minClientTimeoutMillis) previous.lost = true
         if (answered == null) return // still running (only possible without the lock): judged when it ends
         if (!previous.lost) confirm()
         pending = null

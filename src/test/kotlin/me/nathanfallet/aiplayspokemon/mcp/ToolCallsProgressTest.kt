@@ -1,6 +1,8 @@
 package me.nathanfallet.aiplayspokemon.mcp
 
+import dev.kotlinds.pokemonclient.runtime.ActionProgress
 import dev.kotlinds.pokemonclient.runtime.ProgressClock
+import dev.kotlinds.pokemonclient.runtime.ProgressUnit
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.embeddedServer
 import io.modelcontextprotocol.kotlin.sdk.server.Server
@@ -37,18 +39,45 @@ class ToolCallsProgressTest {
 
     @Test
     fun aLongCallSendsProgressNotificationsBeforeItsAnswer() {
-        val port = ServerSocket(0).use { it.localPort }
         val clock = ProgressClock()
+        val progress = progressOf(clock) {
+            repeat(6) { i ->
+                delay(250)
+                clock.progressed("message $i")
+            }
+        }
+        assertTrue(progress.size >= 3, "progress notifications: $progress")
+        assertTrue(progress.any { it["message"]?.jsonPrimitive?.content?.startsWith("message") == true })
+    }
+
+    @Test
+    fun aLongGoToSaysHowManyTilesItHasWalkedAndWhere() {
+        // A go_to surfing with nothing on screen: only its tiles change (reported by the library's walk).
+        val clock = ProgressClock()
+        val progress = progressOf(clock) {
+            for (tile in 1..12) {
+                delay(50)
+                clock.report(ActionProgress("go_to Seafoam Islands 1F", tile * 10, 480, ProgressUnit.TILES, if (tile < 8) "Route 21" else "Route 20"))
+            }
+        }
+        val messages = progress.mapNotNull { it["message"]?.jsonPrimitive?.content }
+        assertTrue(messages.size >= 3, "progress notifications: $progress")
+        assertTrue(messages.all { Regex("go_to Seafoam Islands 1F: \\d+/480 tiles, Route 2[01]").matches(it) }, messages.toString())
+    }
+
+    /**
+     * Runs [work] as a tool call with a progress token, over HTTP like a client with its standalone SSE stream, and
+     * returns the params of the progress notifications received before the answer (checked: same token, growing).
+     */
+    private fun progressOf(clock: ProgressClock, work: suspend () -> Unit): List<kotlinx.serialization.json.JsonObject> {
+        val port = ServerSocket(0).use { it.localPort }
         val calls = ToolCalls(clock, DeliveryTracker(confirm = {}), period = 100.milliseconds)
         val engine = embeddedServer(CIO, port = port, host = "127.0.0.1") {
             mcpStreamableHttp(path = "/mcp") {
                 Server(Implementation("test", "1"), ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false)))) {
                     addTool(name = "slow", description = "a long action") { request ->
                         calls.run(this, request, System.currentTimeMillis()) {
-                            repeat(6) { i ->
-                                delay(250)
-                                clock.progressed("message $i")
-                            }
+                            work()
                             CallToolResult(content = listOf(TextContent("done")))
                         }
                     }
@@ -80,14 +109,13 @@ class ToolCallsProgressTest {
             // A stream starts with an empty priming event (its id, for resumption).
             val progress = events.mapNotNull { (at, data) -> runCatching { at to json.parseToJsonElement(data).jsonObject }.getOrNull() }
                 .filter { (_, message) -> message["method"]?.jsonPrimitive?.content == "notifications/progress" }
-            assertTrue(progress.size >= 3, "progress notifications: $events")
             progress.forEach { (at, message) ->
                 assertEquals("tok-1", message["params"]!!.jsonObject["progressToken"]!!.jsonPrimitive.content)
                 assertTrue(at <= answeredAt + 50, "a progress notification after the answer")
             }
             val values = progress.map { it.second["params"]!!.jsonObject["progress"]!!.jsonPrimitive.double }
             assertEquals(values.sorted(), values, "progress only grows")
-            assertTrue(progress.any { it.second["params"]!!.jsonObject["message"]?.jsonPrimitive?.content?.startsWith("message") == true })
+            return progress.map { it.second["params"]!!.jsonObject }
         } finally {
             engine.stop(100, 500)
         }

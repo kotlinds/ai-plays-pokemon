@@ -1,5 +1,7 @@
 package me.nathanfallet.aiplayspokemon.agent
 
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonArray
 import dev.kotlinds.pokemonclient.data.KnowledgeLevel
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -47,7 +49,7 @@ object DecisionPrompt {
         append(". ")
         append(CONVENTIONS)
         append(" Choose the next option that makes the most progress towards `objective`")
-        if (settings.knowledge.allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH)) append(" and `story_goal`")
+        if (settings.knowledge.allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH)) append(" and `story_goals` (when there are several open goals, any of them)")
         append(". If your recent actions changed nothing, do something different.")
         if (planner) append(" You are the planner: also write in `note` the goal and plan the fast decision model should follow next.")
     }
@@ -65,7 +67,7 @@ object DecisionPrompt {
     ) = ChoiceRequest(
         state = buildJsonObject {
             put("objective", objective)
-            if (settings.knowledge.allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH)) turn.observation.storyGoal?.let { put("story_goal", it) }
+            if (settings.knowledge.allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH)) put("story_goals", JsonArray(turn.observation.storyGoals.map { JsonPrimitive(it) }))
             plannerGoal?.let { put("goal_from_planner", it) }
             put("game", turn.state)
             put("memory", memory.describe(settings.exploredMap, turn.observation))

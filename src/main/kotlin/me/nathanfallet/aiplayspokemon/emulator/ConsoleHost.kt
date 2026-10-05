@@ -190,9 +190,15 @@ class ConsoleHost(
      * every frame it steps is emulated right away. Waits while the game is paused by the user.
      *
      * Throws [dev.kotlinds.pokemonclient.runtime.ActionInterruptedException] when a human presses a button
-     * or touches the screen during the action.
+     * or touches the screen during the action. [onProgress] is told how far a long action has got (on the console
+     * thread, often: it must only store it).
      */
-    suspend fun <T> lease(label: String, inputProbe: InputProbe, block: ActionScope.() -> T): T {
+    suspend fun <T> lease(
+        label: String,
+        inputProbe: InputProbe,
+        onProgress: (dev.kotlinds.pokemonclient.runtime.ActionProgress) -> Unit = {},
+        block: ActionScope.() -> T,
+    ): T {
         userPaused.first { !it }
         return onConsoleThread { console ->
             leaseActive = true
@@ -209,6 +215,7 @@ class ConsoleHost(
                         }
                     },
                     onFrame = { afterFrame(console) },
+                    onProgress = onProgress,
                 )
                 scope.block()
             } finally {
