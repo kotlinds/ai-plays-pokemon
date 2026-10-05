@@ -2,7 +2,6 @@ import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
     alias(libs.plugins.kotlinJvm)
-    alias(libs.plugins.kotlinMultiplatform) apply false
     alias(libs.plugins.kotlinSerialization)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
@@ -39,19 +38,15 @@ dependencies {
     implementation(libs.koog.openrouter) // OpenRouter: Gemini, Mistral, DeepSeek, Llama... behind one key
     runtimeOnly(libs.slf4j.nop) // Koog logs through SLF4J: silence it
 
-    // The Pokémon game client library of this repository (reads the game, typed actions), and its bridge to a
-    // libretro core (console adapter, DeSmuME / melonDS cores, saves, headless bench)
-    implementation(project(":pokemon-client"))
-    implementation(project(":pokemon-client-libretro"))
+    // The Pokémon game client library (github.com/kotlinds/pokemon-client: reads the game, typed actions), and its
+    // bridge to a libretro core (console adapter, DeSmuME / melonDS cores, saves). While developing, a -SNAPSHOT
+    // published with `./gradlew publishToMavenLocal` in that repository.
+    implementation(libs.pokemon.client)
+    implementation(libs.pokemon.client.libretro)
 
     // MCP server: lets an external agent (e.g. Claude Code) play through tools
     implementation(libs.mcp.server)
     implementation(libs.ktor.server.cio)
-
-
-    // Test coverage: `./gradlew koverHtmlReport` covers the app and the pokemon-client library together.
-    kover(project(":pokemon-client"))
-    kover(project(":pokemon-client-libretro"))
 
     testImplementation(libs.kotlin.test)
     testImplementation(libs.kotlinx.coroutines.test)

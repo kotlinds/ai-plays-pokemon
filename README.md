@@ -43,7 +43,9 @@ checked by SHA-256). In-game saves are converted between the cores' formats auto
 **On a new computer** (macOS, Linux or Windows, x86-64 or Apple Silicon), either:
 
 - **from source**: JDK 21, `git clone`, then `./gradlew run`. Gradle downloads the libraries from Maven Central
-  (libretro-kmp included);
+  (libretro-kmp included). While the app depends on a `-SNAPSHOT` of
+  [pokemon-client](https://github.com/kotlinds/pokemon-client) (see `gradle/libs.versions.toml`), clone that
+  repository too and run `./gradlew publishToMavenLocal` in it first;
 - **from a prebuilt jar**: Java 21 only, then `java -jar "AI Plays Pokemon-….jar"`. To build one jar that runs on
   every platform: `./gradlew packageUberJarForCurrentOS -Puniversal`, written to `build/compose/jars/` (the name
   carries the platform it was built on, but `-Puniversal` adds the other platforms' natives).
@@ -149,12 +151,13 @@ server implementing the same `POST /v1/systemone` protocol, e.g. an open-weight 
  │          ActionRegistry (schema, availability, typed errors)           │
  │ world: Area, Pathfinder (levels, ledges, surf, triggers)  view: MapView│
  │ data: GameData, Lookup, KnowledgeLevel                                 │
- │ hgss: HeartGold/SoulSilver — RAM decoders per screen family, ROM maps │
- │       and data (kotlinds), story table                                 │
+ │ games: gen4 (shared Gen 4 engine) · hgss · platinum — RAM decoders,   │
+ │        ROM maps and data (kotlinds), story table                       │
  └────────────────────────────────────────────────────────────────────────┘
 ```
 
-Three modules:
+The app, and the [pokemon-client](https://github.com/kotlinds/pokemon-client) library (its own repository, on Maven
+Central; a `-SNAPSHOT` from `mavenLocal()` while developing):
 
 - **`pokemon-client`** (Kotlin Multiplatform, as much as possible in `commonMain`) is the library: it knows Pokémon,
   not emulators. A game reads the RAM into one common, typed model: `GameState` with a sealed `Screen` (every menu
@@ -164,21 +167,14 @@ Three modules:
   target (3 corrections at most, then an explicit error). Movement uses the maps read from the **ROM** (tiles,
   heights, warps, events) with the live people and the game's script variables on top. Nothing is ever written to
   the game's RAM: everything goes through buttons and the touch screen, like a player.
-- **the app** runs the emulator through [libretro-kmp](https://github.com/kotlinds/libretro-kmp) (a libretro core loaded in process, on Maven Central) on
+- **`pokemon-client-libretro`** (JVM, same repository) plugs the library into a libretro core: `LibretroConsole` (the
+  `ConsolePort` over libretro-kmp), the cores, save formats, and a headless **bench** that runs commands and actions
+  on a ROM without the app. Bringing up a new game happens there.
+- **the app** runs the emulator (through `pokemon-client-libretro` and [libretro-kmp](https://github.com/kotlinds/libretro-kmp), a libretro core loaded in process) on
   a single console thread that drives time (agents get a lease; the human can always take over), and connects the
   deciders: our loop (`PokemonPlayer` with Jev, LLMs through Koog, or `claude -p`) or an external agent through MCP.
 
-- **`pokemon-client-libretro`** (JVM) plugs the library into a libretro core: `LibretroConsole` (the `ConsolePort`
-  over libretro-kmp), save formats, and a headless **bench** (`dev.kotlinds.pokemonclient.libretro.bench.BenchKt`,
-  see its KDoc) that runs commands and actions without the app (`BENCH_WINDOW=1` shows it live) and writes sparse RAM
-  fixtures for the unit tests. A new game can be brought up with the library and this module only:
-
-```bash
-POKEMON_ROM=/path/to/rom.nds EMULATOR_CORE=desmume ./gradlew -q :pokemon-client-libretro:bench \
-  "-PbenchArgs=<data dir>|<out dir>|load:my.state|step:1|act:{\"type\":\"heal\"}|shot:after"
-```
-
-Tests: `./gradlew :pokemon-client:jvmTest :pokemon-client-libretro:test test` (with `POKEMON_ROM` set, the ROM tests run too); coverage with
+Tests: `./gradlew test`; the library's own tests (and the ROM tests) live in its repository. Coverage with
 `./gradlew koverHtmlReport`.
 
 ### Pure, assisted, hybrid: why several modes?
@@ -192,7 +188,8 @@ unsure. Having the three side by side, with milestones recorded for each run, is
 
 ## Extending
 
-- **Another game** (Platinum, Black/White, a GBA game later...), see [docs/adding-a-game.md](docs/adding-a-game.md): implement `PokemonGame` (RAM → `GameState`, screen
+- **Another game** (Diamond/Pearl, Black/White, a GBA game later...), in pokemon-client, see its
+  [adding-a-game guide](https://github.com/kotlinds/pokemon-client/blob/main/docs/adding-a-game.md): implement `PokemonGame` (RAM → `GameState`, screen
   decoders, optionally `world` and `data` from the ROM) and register its ROM code in `PokemonGames`; the plans, the
   navigator, the registry, the MCP server and every decider work unchanged.
 - **Another emulator**: implement `ConsolePort` (or add a `LibretroCoreSpec` entry for another libretro core).
