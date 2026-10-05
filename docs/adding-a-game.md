@@ -4,7 +4,7 @@ How to make another Pokémon game playable by every AI of the project (Platinum,
 GBA game). The plans, the navigator, the action registry, the MCP server and the deciders are shared: a new game
 only has to **read** itself into the common model, and (optionally) describe its maps and data from the ROM.
 
-Validated with Pokémon Platinum (USA), `platinum/`: intro, main menu, naming keyboard, field messages, position and
+Validated with Pokémon Platinum (USA), `games/platinum/`: intro, main menu, naming keyboard, field messages, position and
 the current map, played end to end with the generic actions only (`press`, `advance_dialogue`, `choose`,
 `enter_text`, `go_to`, `soft_reset`), without one line of Platinum-specific action code.
 
@@ -13,11 +13,11 @@ the current map, played end to end with the generic actions only (`press`, `adva
 | Layer | Package | What lives there |
 |---|---|---|
 | Generic contract | `PokemonGame`, `state/`, `actions/`, `world/`, `view/`, `runtime/` | game- and generation-independent: the `Screen` model, actions, navigator, world graph, pathfinding |
-| Generation layer | `gen4/` | what the Gen 4 engine shares (DP/Pt/HGSS): safe RAM reads (`Gen4Memory`), engine struct offsets (`Gen4Structs`: overlay manager, `gSystem`, `String`, `SysTask`, text printer, script manager, map objects, location), text and charmap (`Gen4Text`), message files (`Gen4MessageFile`), input probe, the naming keyboard (`Gen4NamingKeyboard`), map matrix / land data / BDHC / zone events, `Gen4Game` |
-| Game | `hgss/`, `platinum/` | the address table per ROM, the screens that differ, the map header layout, tile behaviours, story |
+| Generation layer | `games/gen4/` | what the Gen 4 engine shares (DP/Pt/HGSS): safe RAM reads (`Gen4Memory`), engine struct offsets (`Gen4Structs`: overlay manager, `gSystem`, `String`, `SysTask`, text printer, script manager, map objects, location), text and charmap (`Gen4Text`), message files (`Gen4MessageFile`), input probe, the naming keyboard (`Gen4NamingKeyboard`), map matrix / land data / BDHC / zone events, `Gen4Game` |
+| Game | `games/hgss/`, `games/platinum/` | the address table per ROM, the screens that differ, the map header layout, tile behaviours, story |
 
-A Gen 5 or GBA game gets its own generation layer (`gen5/`, `gen3/`): don't put Gen 4 things in the generic
-contract, and don't put generic things in `gen4/`.
+A Gen 5 or GBA game gets its own generation layer (`games/gen5/`, `games/gen3/`): don't put Gen 4 things in the generic
+contract, and don't put generic things in `games/gen4/`.
 
 ## What a game provides
 
@@ -112,7 +112,7 @@ Never compare values that depend on the time of day (the RTC follows the host cl
    messages (`Dialogue` FIELD, and SIGN for signpost windows: they are not the message box).
 4. **World from the ROM** with kotlinds (`nds-rom`, `nds-narc`, `nds-compression`): map headers (their layout differs
    per game), matrices, land data (collisions, behaviours, BDHC heights), zone events — the Gen 4 formats are in
-   `gen4/`, only the header table, the NARC paths and the tile behaviour table are per game. Check the map view
+   `games/gen4/`, only the header table, the NARC paths and the tile behaviour table are per game. Check the map view
    against a screenshot and `go_to` a warp.
 5. **Reader**: the save arrays (party with Gen 4/5 encryption and checksums — handle torn reads —, bag, player,
    flags/vars), the battle structures.

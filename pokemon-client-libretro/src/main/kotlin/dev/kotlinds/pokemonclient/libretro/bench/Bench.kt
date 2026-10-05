@@ -1,16 +1,16 @@
 package dev.kotlinds.pokemonclient.libretro.bench
 
 import dev.kotlinds.pokemonclient.view.MapView
-import dev.kotlinds.pokemonclient.hgss.HgssWorldSource
-import dev.kotlinds.pokemonclient.hgss.HgssLoadedMap
-import dev.kotlinds.pokemonclient.hgss.HgssData
+import dev.kotlinds.pokemonclient.games.hgss.HgssWorldSource
+import dev.kotlinds.pokemonclient.games.hgss.HgssLoadedMap
+import dev.kotlinds.pokemonclient.games.hgss.HgssData
 import dev.kotlinds.NdsRom
-import dev.kotlinds.pokemonclient.hgss.HgssVersion
-import dev.kotlinds.pokemonclient.hgss.HgssReader
-import dev.kotlinds.pokemonclient.hgss.HgssMemory
-import dev.kotlinds.pokemonclient.hgss.HgssGame
-import dev.kotlinds.pokemonclient.hgss.HgssFishing
-import dev.kotlinds.pokemonclient.hgss.FishingState
+import dev.kotlinds.pokemonclient.games.hgss.HgssVersion
+import dev.kotlinds.pokemonclient.games.hgss.HgssReader
+import dev.kotlinds.pokemonclient.games.hgss.HgssMemory
+import dev.kotlinds.pokemonclient.games.hgss.HgssGame
+import dev.kotlinds.pokemonclient.games.hgss.HgssFishing
+import dev.kotlinds.pokemonclient.games.hgss.FishingState
 import dev.kotlinds.pokemonclient.console.InputFrame
 import dev.kotlinds.pokemonclient.Memory
 import dev.kotlinds.pokemonclient.PokemonGame
@@ -169,7 +169,7 @@ private class Bench(
                 repeat(arg.substringAfter('x', "1").toInt()) { println("  ${scope.tap(button)}") }
             }
             "hold" -> arg.split(':').let { (b, n) -> scope.step(n.toInt(), InputFrame(b.split('+').map { Button.valueOf(it.uppercase()) }.toSet())); scope.step(2) }
-            "raw" -> dev.kotlinds.pokemonclient.hgss.HgssReader(scope.memory()).read()?.let { st ->
+            "raw" -> dev.kotlinds.pokemonclient.games.hgss.HgssReader(scope.memory()).read()?.let { st ->
                 println("  mode=${st.mode} detail=${st.modeDetail} awaiting=${st.awaitingInput} fading=${st.fading}")
                 println("  loc=${st.location?.let { "${it.mapName} ${it.x},${it.z} ${it.facing}" }}")
                 println("  menu=${st.menu} app=${st.app} dialogue=${st.dialogue?.text?.take(120)}")
@@ -230,8 +230,8 @@ private class Bench(
                 println("  slot $i: " + b.joinToString("") { "%02x".format(it) })
             }
             "box" -> HgssReader(scope.memory(), HgssVersion.HEARTGOLD_US).boxRaw(arg.toInt()).forEachIndexed { i, b ->
-                dev.kotlinds.pokemonclient.hgss.HgssPokemon.decode(b)?.let { m ->
-                    println("  $i: mon:%08x.%08x species ${m.species} ${dev.kotlinds.pokemonclient.hgss.HgssData.speciesName(m.species)} exp ${m.exp}".format(m.personality, m.otId))
+                dev.kotlinds.pokemonclient.games.hgss.HgssPokemon.decode(b)?.let { m ->
+                    println("  $i: mon:%08x.%08x species ${m.species} ${dev.kotlinds.pokemonclient.games.hgss.HgssData.speciesName(m.species)} exp ${m.exp}".format(m.personality, m.otId))
                 }
             }
             "events" -> recorder.log.since(0).filterNot { it is dev.kotlinds.pokemonclient.state.GameEvent.ScreenChanged }.forEach { println("  $it") }
@@ -383,13 +383,13 @@ private class Bench(
      * caught encrypted / decrypted / torn, see HgssPokemon.decode).
      */
     private fun midRewrite(raw: ByteArray): Boolean {
-        val mon = dev.kotlinds.pokemonclient.hgss.HgssPokemon
+        val mon = dev.kotlinds.pokemonclient.games.hgss.HgssPokemon
         val flags = mon.u16(raw, 4)
         val checksum = mon.u16(raw, 6)
         val box = raw.copyOfRange(8, 0x88).also { if (flags and 2 == 0) mon.crypt(it, 0, it.size, checksum.toLong()) }
         val boxOk = (0 until 0x40).sumOf { mon.u16(box, 2 * it) } and 0xFFFF == checksum
         val naive = mon.decode(raw) { true } ?: return false
-        return !boxOk || !dev.kotlinds.pokemonclient.hgss.HgssMonCheck.isPlausible(naive)
+        return !boxOk || !dev.kotlinds.pokemonclient.games.hgss.HgssMonCheck.isPlausible(naive)
     }
 
     private fun saveTornFixture(memory: Memory) {

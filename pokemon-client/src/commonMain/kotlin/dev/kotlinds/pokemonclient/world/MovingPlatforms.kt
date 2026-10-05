@@ -12,7 +12,7 @@ data class PlatformRide(val poses: List<PlatformPose>, val playerX: Int, val pla
 
 /**
  * Platforms that the player rides and moves by stepping on their trigger tiles (the Blackthorn Gym's platforms on the
- * lava). The rules are the game's ([dev.kotlinds.pokemonclient.hgss.HgssBlackthornGym] for HeartGold / SoulSilver);
+ * lava). The rules are the game's ([dev.kotlinds.pokemonclient.games.hgss.HgssBlackthornGym] for HeartGold / SoulSilver);
  * [PlatformPlanner] searches routes with them.
  */
 interface MovingPlatforms {

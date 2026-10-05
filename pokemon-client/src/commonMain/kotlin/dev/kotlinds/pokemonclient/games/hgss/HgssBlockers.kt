@@ -1,0 +1,443 @@
+package dev.kotlinds.pokemonclient.games.hgss
+
+import dev.kotlinds.pokemonclient.state.Blocker
+import dev.kotlinds.pokemonclient.state.BlockerCause
+import dev.kotlinds.pokemonclient.state.RadioStation
+import dev.kotlinds.pokemonclient.state.StoryCondition
+
+/**
+ * People and coordinate triggers of the current map that block a way, with why and how to get past.
+ *
+ * Everything comes from the RAM (the zone's live map objects and its loaded coordinate events, see
+ * [HgssReader]): an object of the zone whose event flag is set isn't spawned, so every live object is one whose
+ * event isn't done yet.
+ * - **Curated** ([curated]): the well-known story blockers, from the decomp scripts, with our walkthrough reason.
+ *   A curated person blocks while it is on the map and its [Curated.liftedWhen] doesn't hold yet (some never
+ *   leave: they step aside once the condition holds); a curated trigger blocks while its var condition holds.
+ * - **Generic**: any other trigger whose var condition holds now (stepping on it starts a story scene; skipped when
+ *   a map has more than [MAX_GENERIC_TRIGGERS] of them: gym pits, hideout traps), and any other person that will
+ *   leave after a story event (non-zero event flag, not a trainer) standing in a one-tile passage of the terrain.
+ *
+ * Targets are `person:<event id>` (the object's local id, as in [dev.kotlinds.pokemonclient.state.FieldObject.id])
+ * and `trigger:<index>` (index in the zone's coordinate events).
+ */
+object HgssBlockers {
+
+    /** What a curated blocker is attached to, on map [mapId] (MAP_ ids of include/constants/maps.h). */
+    sealed interface Target {
+        val mapId: Int
+
+        /** The person with local event id [objectId] (obj_<map>_... index of the zone's events). */
+        data class Person(override val mapId: Int, val objectId: Int) : Target
+
+        /** The coordinate trigger at [index] of the zone's coordinate events. */
+        data class Trigger(override val mapId: Int, val index: Int) : Target
+    }
+
+    /**
+     * A known blocker: [reason] says why it blocks and how to lift it; it stops blocking once [liftedWhen] holds.
+     * [closedAt]: for a door object that slides aside when it opens, the tiles it stands on while closed (it blocks
+     * only there). [cause]: the typed mechanism.
+     */
+    data class Curated(
+        val target: Target,
+        val reason: String,
+        val liftedWhen: StoryCondition? = null,
+        val closedAt: Set<Pair<Int, Int>>? = null,
+        val cause: Cause? = null,
+    )
+
+    /** The typed mechanism of a [Curated] blocker, turned into a [BlockerCause] with the live story state. */
+    sealed interface Cause {
+        /** A door opening with A once [knownWhen] holds (the password heard), told by [from]. */
+        data class Password(val from: List<String>, val knownWhen: StoryCondition) : Cause
+
+        /** A Pokémon of species [speciesId] battled with A. */
+        data class Battle(val speciesId: Int) : Cause
+
+        /** A sleeping Pokémon of species [speciesId] that wakes when talked to while the radio plays [station]. */
+        data class WakesToRadio(val speciesId: Int, val station: RadioStation) : Cause
+
+        fun toBlockerCause(story: StoryInfo): BlockerCause = when (this) {
+            is Password -> BlockerCause.PasswordDoor(from, knownWhen.holds(story))
+            is Battle -> BlockerCause.WildPokemon(speciesId)
+            is WakesToRadio -> BlockerCause.SleepingPokemon(speciesId, station)
+        }
+    }
+
+    /** The blockers of the map the player stands on. Empty outside the field. */
+    fun of(state: HgssState): List<Blocker> {
+        val mapId = state.location?.mapId ?: return emptyList()
+        val around = state.surroundings ?: return emptyList()
+        val story = state.story ?: StoryInfo()
+        val out = mutableListOf<Blocker>()
+        for (o in around.objects) {
+            if (o.hidden || o.kind != "npc") continue
+            val zone = o.mapId.takeIf { it >= 0 } ?: mapId
+            val known = byPerson[Target.Person(zone, o.id)]
+            if (known != null) {
+                // A door object slid aside is open.
+                if (known.closedAt != null && (o.x to o.z) !in known.closedAt) continue
+                if (known.liftedWhen?.holds(story) != true) out += Blocker(HgssObjectIds.idOf(o, mapId), known.reason, known.cause?.toBlockerCause(story))
+            } else if (zone == mapId && o.eventFlag != 0 && o.type !in HgssZoneEvents.TRAINER_TYPES && !battlesWhenTalkedTo(zone, o) &&
+                standsInPassage(around.grid, o.x, o.z)
+            ) {
+                out += Blocker(
+                    "person:${o.id}",
+                    "Stands in a narrow passage and only leaves after a story event: follow the story goal (or talk to them to learn what they wait for).",
+                )
+            }
+        }
+        // Mechanisms (a lift's tile...) are puzzles, never story blockers; placeholder triggers (an empty script,
+        // Trigger.inert) start no scene: not blockers either.
+        val area = HgssData.world?.areaOf(mapId)
+        val inert = area?.triggers.orEmpty().filter { it.zone == mapId && it.inert }.map { it.id }.toSet()
+        // Warp pads (a script moving the player on this map: the Saffron Gym's exit pad) are puzzle teleports, holes
+        // are ways down, and a trigger on a warp's single tile runs that warp (New Bark's ladder to Elm's lab 2F):
+        // exits, not story scenes.
+        val warpTiles = area?.warps.orEmpty().filter { it.zone == mapId }.map { it.x to it.y }.toSet()
+        val moves = area?.scriptWarps.orEmpty().filter { it.zone == mapId }.map { it.trigger }.toSet() +
+            area?.triggerWarps.orEmpty().filter { it.zone == mapId }.map { it.trigger } +
+            area?.triggers.orEmpty().filter { it.zone == mapId && it.width <= 1 && it.height <= 1 && (it.x to it.y) in warpTiles }.map { it.id }
+        val active = around.triggers.filter { it.active == true && it.index !in inert && it.index !in moves && Target.Trigger(mapId, it.index) !in mechanisms }
+        val (known, unknown) = active.partition { Target.Trigger(mapId, it.index) in byTrigger }
+        for (t in known) {
+            val curated = byTrigger.getValue(Target.Trigger(mapId, t.index))
+            if (curated.liftedWhen?.holds(story) != true) out += Blocker("trigger:${t.index}", curated.reason)
+        }
+        // Many armed triggers on one map are a mechanism (gym pits, hideout traps, puzzle tiles), not story gates.
+        if (unknown.size <= MAX_GENERIC_TRIGGERS) for (t in unknown) {
+            out += Blocker(
+                "trigger:${t.index}",
+                "Stepping here (x ${t.x}..${t.x + maxOf(t.width, 1) - 1}, y ${t.z}..${t.z + maxOf(t.height, 1) - 1}) starts a story scene now; it may stop you or send you back until the story moves on.",
+            )
+        }
+        return out
+    }
+
+    /**
+     * True when [o] (of zone [zone]) starts a trainer battle when talked to: a gym leader, a scripted trainer. They wait
+     * for the player to challenge them; that is no story block, even when they stand in a passage (Sabrina).
+     */
+    private fun battlesWhenTalkedTo(zone: Int, o: MapObjectInfo): Boolean = HgssTrainers.trainerOf(zone, o.id, o.scriptId) != null
+
+    /**
+     * True when (x, z) is a walkable tile between two walls (west/east or north/south) with a way on at least one
+     * open side: whoever stands there closes the passage.
+     */
+    internal fun standsInPassage(grid: LocalGrid?, x: Int, z: Int): Boolean {
+        grid ?: return false
+        fun open(c: Char) = c == '.' || c == '"'
+        fun wall(c: Char) = c == '#' || c == '-' || c == '~'
+        if (!open(grid.at(x, z))) return false
+        val west = grid.at(x - 1, z)
+        val east = grid.at(x + 1, z)
+        val north = grid.at(x, z - 1)
+        val south = grid.at(x, z + 1)
+        return (wall(west) && wall(east) && (open(north) || open(south))) ||
+            (wall(north) && wall(south) && (open(west) || open(east)))
+    }
+
+    /** SPECIES_SNORLAX (include/constants/species.h). */
+    private const val SPECIES_SNORLAX = 143
+
+    /** Above this many armed, non-curated triggers on a map, they are a puzzle or trap mechanism: not reported. */
+    private const val MAX_GENERIC_TRIGGERS = 3
+
+    // Map ids (include/constants/maps.h).
+    private const val MAP_ECRUTEAK_GYM = 80
+    private const val MAP_ROUTE_32 = 36
+    private const val MAP_ROUTE_36 = 40
+    private const val MAP_AZALEA = 74
+    private const val MAP_BURNED_TOWER_1F = 7
+    private const val MAP_BURNED_TOWER_B1F = 217
+    private const val MAP_BELL_TOWER_BARRIER_STATION = 83
+    private const val MAP_BELL_TOWER_1F = 111
+    private const val MAP_NEW_BARK = 60
+    private const val MAP_OLIVINE_LIGHTHOUSE_TOP = 225
+    private const val MAP_MAHOGANY = 87
+    private const val MAP_ROUTE_43_GATE = 245
+    private const val MAP_RADIO_TOWER_1F = 112
+    private const val MAP_RADIO_TOWER_3F = 187
+    private const val MAP_GOLDENROD_TUNNEL_B1F = 199
+    private const val MAP_BLACKTHORN = 89
+    private const val MAP_ROUTE_11 = 19
+    private const val MAP_ROUTE_19 = 91
+    private const val MAP_ROUTE_24 = 28
+    private const val MAP_VIRIDIAN = 50
+    private const val MAP_LEAGUE_GATE = 299
+    private const val MAP_VIOLET_GYM = 135
+    private const val MAP_GOLDENROD_GYM = 137
+    private const val MAP_CIANWOOD_GYM = 139
+    private const val MAP_SS_AQUA_1F_SOUTHEAST_ROOMS = 309
+    private const val MAP_SS_AQUA_B1F = 329
+
+    /**
+     * The S.S. Aqua's B1F guard (scr_seq_0162_P01R0307.s): obj_P01R0307_seaman_2 at (38,18) and the trigger in front of
+     * him (38,17..19, armed while VAR_UNK_40CB is 2) push the player back and set FLAG_UNK_0ED; with that flag, the
+     * sleeping Sailor Stanly (obj_P01R0303_seaman_2, scr_seq_0158_P01R0303.s) wakes up when talked to, battles, and
+     * sets the var to 3, which lets the player past the guard. Before the flag, talking to Stanly only prints a snore.
+     */
+    private const val SS_AQUA_GUARD =
+        "A sailor guards the way east on B1F (to the other passengers): stepping next to him makes him push you back, " +
+            "every time, until his sleeping colleague Sailor Stanly (1F, south-east cabins) has been woken and beaten. " +
+            "Having met this guard (here, or by talking to him) is what lets Stanly wake up: go talk to Stanly now."
+
+    /** Coordinate triggers that are a map mechanism (see [HgssGymPuzzles]), not a story scene. */
+    private val mechanisms: Set<Target.Trigger> = setOf(
+        // The Violet Gym lift (scr_seq_T22GYM0101_004, always armed): field.puzzle.
+        Target.Trigger(MAP_VIOLET_GYM, 0),
+    )
+
+    /** `FLAG_UNK_0B7`: set once the Lass came to say Whitney stopped crying (scr_seq_T25GYM0101_001). */
+    private const val FLAG_WHITNEY_CALMED = 0xB7
+    private const val MAP_ROCKET_HQ_B2F = 248
+    private const val MAP_ROCKET_HQ_B3F = 249
+
+    /** `SPECIES_ELECTRODE`. */
+    private const val ELECTRODE = 101
+
+    /** `FLAG_UNK_0D3`: set when the Murkrow screams Petrel's password at the B2F door (scr_seq_D35R0103_011). */
+    private const val FLAG_HQ_B2F_PASSWORD = 0xD3
+
+    /** `FLAG_REMOVED_ROCKET_HIDEOUT_B3F_ELECTRODE_1..3` (include/constants/flags.h; the B2F transmitter room). */
+    private const val FLAG_HQ_ELECTRODE_1 = 0xCB
+
+    /** Grunts telling the B3F door's two passwords: `TRAINER_TEAM_ROCKET_GRUNT_19`, `TRAINER_TEAM_ROCKET_F_GRUNT_5`. */
+    private val HQ_B3F_PASSWORD_TRAINERS = listOf(222, 404)
+
+    /** The well-known blockers, from the decomp's scripts and zone events (files/fielddata). */
+    val curated: List<Curated> = listOf(
+        // Route 32 north exit: scr_seq_0232_R32.s turns the player back until the Zephyr Badge and the Togepi Egg.
+        Curated(
+            Target.Trigger(MAP_ROUTE_32, 0),
+            "Elm's aide stops you here until you have the Zephyr Badge AND the egg from Elm's aide in the Violet City Poké Mart.",
+        ),
+        // Azalea: the Rocket on the Gym door (obj_T23_rocketm_2, FLAG_UNK_1A9) leaves once Proton is beaten in the well.
+        Curated(
+            Target.Person(MAP_AZALEA, 1),
+            "A Team Rocket grunt blocks the Gym door: clear the Slowpoke Well (north of town, Kurt opens it) to make him leave.",
+            StoryCondition.FlagSet(HgssStoryTable.Flags.BEAT_PROTON_IN_WELL),
+        ),
+        Curated(
+            Target.Person(MAP_AZALEA, 0),
+            "A Team Rocket grunt guards the Slowpoke Well: talk to Kurt (house in the north-west of Azalea) first; he goes in and the way opens.",
+            StoryCondition.FlagSet(HgssStoryTable.Flags.AZALEA_ROCKETS_BEATEN),
+        ),
+        Curated(
+            Target.Trigger(MAP_AZALEA, 0),
+            "Your rival waits at the west exit toward Ilex Forest: stepping here starts the battle (heal first).",
+        ),
+        // Route 36: the Sudowoodo (obj_R36_usokky) needs the SquirtBottle (Goldenrod Flower Shop, after the Plain Badge).
+        Curated(
+            Target.Person(MAP_ROUTE_36, 4),
+            "The odd tree (a Sudowoodo) blocks Route 36: water it with the SquirtBottle (Goldenrod Flower Shop, given once you have the Plain Badge) and defeat or catch it.",
+            StoryCondition.FlagSet(HgssStoryTable.Flags.SUDOWOODO_GONE),
+        ),
+        Curated(
+            Target.Trigger(MAP_BURNED_TOWER_1F, 1),
+            "Your rival waits here in the Burned Tower: stepping here starts the battle (heal first).",
+        ),
+        Curated(
+            Target.Trigger(MAP_BURNED_TOWER_B1F, 0),
+            "The legendary beasts sleep here: stepping here starts the scene where they flee (it opens the Ecruteak Gym).",
+        ),
+        // The gym's old man (obj gsoldman1, FLAG_UNK_247) walks the player out until the Burned Tower is done.
+        Curated(
+            Target.Person(MAP_ECRUTEAK_GYM, 6),
+            "The Gym is closed: Morty is at the Burned Tower (north-west of Ecruteak). Go there first (rival battle, then the basement scene).",
+            StoryCondition.VarAtLeast(HgssStoryTable.Vars.BURNED_TOWER_BEASTS, 1),
+        ),
+        // Olivine Lighthouse top: an invisible "stop" object (FLAG_UNK_1D8) keeps the player by Jasmine until they talk.
+        Curated(
+            Target.Person(MAP_OLIVINE_LIGHTHOUSE_TOP, 4),
+            "Jasmine stands by the sick Ampharos: talk to her (the way on opens after that).",
+            StoryCondition.FlagSet(HgssStoryTable.Flags.TALKED_TO_JASMINE_LIGHTHOUSE),
+        ),
+        // Mahogany: the man on the Gym door (FLAG_UNK_1F9) leaves once the Rocket hideout is cleared.
+        Curated(
+            Target.Person(MAP_MAHOGANY, 2),
+            "A man blocks the Gym door: clear the Team Rocket hideout under the souvenir shop first (meet Lance at the Lake of Rage, north on Route 43).",
+            StoryCondition.FlagSet(HgssStoryTable.Flags.MAHOGANY_GYM_DOOR_FREE),
+        ),
+        // Mahogany: the Rage Candy Bar seller pushes the player back from the Route 44 exit until the Radio Tower is freed.
+        Curated(
+            Target.Trigger(MAP_MAHOGANY, 0),
+            "The east exit to Route 44 is closed: a man stops you and sends you back until Team Rocket is driven out of the Goldenrod Radio Tower.",
+        ),
+        Curated(
+            Target.Person(MAP_ROUTE_43_GATE, 0),
+            "Team Rocket grunts charge a toll in this gate (pay or go around); they leave once their Mahogany hideout is cleared.",
+            StoryCondition.FlagSet(HgssStoryTable.Flags.ROCKET_HIDEOUT_CLEARED),
+        ),
+        Curated(
+            Target.Person(MAP_ROUTE_43_GATE, 1),
+            "Team Rocket grunts charge a toll in this gate (pay or go around); they leave once their Mahogany hideout is cleared.",
+            StoryCondition.FlagSet(HgssStoryTable.Flags.ROCKET_HIDEOUT_CLEARED),
+        ),
+        // Radio Tower 1F: the grunt on the stairs only lets a disguised player up (takeover var 3).
+        Curated(
+            Target.Person(MAP_RADIO_TOWER_1F, 6),
+            "A Rocket grunt guards the stairs: he only lets someone in a Team Rocket uniform up. Get it in the Goldenrod Underground (Basement), from the Rocket hideout there.",
+            StoryCondition.VarAtLeast(HgssStoryTable.Vars.ROCKET_TAKEOVER, 3),
+        ),
+        Curated(
+            Target.Person(MAP_RADIO_TOWER_3F, 7),
+            "A locked shutter: it opens with the Card Key the Radio Director gives you in the Goldenrod Underground Warehouse.",
+        ),
+        Curated(
+            Target.Person(MAP_RADIO_TOWER_3F, 8),
+            "A locked shutter: it opens with the Card Key the Radio Director gives you in the Goldenrod Underground Warehouse.",
+        ),
+        Curated(
+            Target.Person(MAP_GOLDENROD_TUNNEL_B1F, 11),
+            "A locked door: it opens with the Basement Key (from the Rocket executive on Radio Tower 5F).",
+        ),
+        // Blackthorn: the Gym guard leaves after the Radio Tower; the Dragon's Den guard after Clair is beaten.
+        Curated(
+            Target.Person(MAP_BLACKTHORN, 0),
+            "A man blocks the Gym door: he leaves once Team Rocket is out of the Goldenrod Radio Tower.",
+            StoryCondition.FlagSet(HgssStoryTable.Flags.BEAT_RADIO_TOWER_ROCKETS),
+        ),
+        Curated(
+            Target.Person(MAP_BLACKTHORN, 1),
+            "A man guards the way to the Dragon's Den (behind the Gym): beat Clair at the Gym first.",
+            StoryCondition.FlagSet(HgssStoryTable.Flags.BEAT_CLAIR),
+        ),
+        // Bell Tower: the barrier station sage (Fog Badge, steps aside for the visit) and the 1F sage (Rainbow Wing).
+        Curated(
+            Target.Person(MAP_BELL_TOWER_BARRIER_STATION, 0),
+            "A sage guards the way to the Bell Tower: he lets you through (for this visit) if you have the Fog Badge; talk to him.",
+            StoryCondition.FlagSet(HgssStoryTable.Flags.HO_OH_DONE),
+        ),
+        Curated(
+            Target.Trigger(MAP_BELL_TOWER_1F, 0),
+            "The Bell Tower's sage stops you: only someone holding the Rainbow Wing (from the Goldenrod Radio Director) may climb.",
+        ),
+        Curated(
+            Target.Trigger(MAP_BELL_TOWER_1F, 1),
+            "The Bell Tower's sage stops you: only someone holding the Rainbow Wing (from the Goldenrod Radio Director) may climb.",
+        ),
+        // New Bark east exit (the way to Route 27 and the League): Mom, then Lyra, stop the player.
+        Curated(
+            Target.Trigger(MAP_NEW_BARK, 2),
+            "Mom stops you at the east exit: visit Prof. Elm's lab first.",
+        ),
+        Curated(
+            Target.Trigger(MAP_NEW_BARK, 3),
+            "Your friend stops you at the east exit: the Kimono Girls' story must be finished first (Clear Bell, then Ho-Oh at the top of the Bell Tower).",
+        ),
+        // Goldenrod Gym: beaten, Whitney cries and gives no badge (VAR_UNK_410A = 1 arms this trigger) until the Lass
+        // comes to the player on (13,11) (FLAG_UNK_0B7); then talking to Whitney again gives the Plain Badge.
+        Curated(
+            Target.Trigger(MAP_GOLDENROD_GYM, 0),
+            "Whitney cries after losing and won't give the badge yet: step here (a trainer comes to talk to you), then talk to Whitney (person:0) again for the Plain Badge.",
+            StoryCondition.Or(StoryCondition.FlagSet(FLAG_WHITNEY_CALMED), StoryCondition.HasBadge(HgssStoryTable.PLAIN)),
+        ),
+        // Cianwood Gym: Chuck trains under the waterfall and won't battle (VAR_TEMP_x4000 == 0) until the winch is turned
+        // (FLAG_SYS_CIANWOOD_WATERFALL_DISABLE, cleared on each entry); scr_seq_0877_T24GYM0101.s.
+        Curated(
+            Target.Person(MAP_CIANWOOD_GYM, 0),
+            "Chuck under the waterfall: turn the winch (interact sign:0, at the top-left, facing north; answer yes) to stop the waterfall, then talk to him.",
+            // Not lifted by the badge: Chuck stays under the waterfall on every visit (rematch, TM).
+            StoryCondition.FlagSet(HgssGymPuzzles.FLAG_WATERFALL_DISABLE),
+        ),
+        // Team Rocket HQ (Mahogany). B2F (scr_seq_0090_D35R0103.s): the door of the transmitter room (two door objects,
+        // slid west when it opens) checks Petrel's voice; it opens when the Murkrow that repeats his password screams it
+        // in front of it (coordinate trigger 3, after following it from B2F to B3F and back), or with A once heard.
+        *listOf(5, 6).map { id ->
+            Curated(
+                Target.Person(MAP_ROCKET_HQ_B2F, id),
+                "A voice-recognition door (the radio transmitter room): only Petrel's voice opens it. Follow the Murkrow that repeats his password (B2F north-west, then B3F, then back near this door); when it screams the password in front of the door, it opens. Once heard, talking to the door (A) opens it too.",
+                closedAt = setOf(30 to 22, 31 to 22),
+                cause = Cause.Password(listOf("person:16", "person:17", "person:18"), StoryCondition.FlagSet(FLAG_HQ_B2F_PASSWORD)),
+            )
+        }.toTypedArray(),
+        // The three Electrode powering the transmitter (static battles, scr_seq_D35R0103_004..006); Lance takes the others.
+        *(0 until 3).map { i ->
+            Curated(
+                Target.Person(MAP_ROCKET_HQ_B2F, 9 + i),
+                "An Electrode powering the radio transmitter: battle it (A) and make it faint (or catch it). Once all three are gone, the signal stops.",
+                StoryCondition.FlagSet(FLAG_HQ_ELECTRODE_1 + i),
+                cause = Cause.Battle(ELECTRODE),
+            )
+        }.toTypedArray(),
+        // B3F (scr_seq_0091_D35R0104.s): a door needing two passwords, each told by a grunt once beaten (scr 004).
+        *listOf(10, 11).map { id ->
+            Curated(
+                Target.Person(MAP_ROCKET_HQ_B3F, id),
+                "A locked door that needs two passwords: beat the two Rocket grunts who know them (person:3 and person:4 on this floor), then talk to the door (A) to say them.",
+                closedAt = setOf(23 to 15, 24 to 15),
+                cause = Cause.Password(
+                    listOf("person:3", "person:4"),
+                    StoryCondition.And(HQ_B3F_PASSWORD_TRAINERS.map { StoryCondition.FlagSet(HgssSave.TRAINER_FLAG_BASE + it) }),
+                ),
+            )
+        }.toTypedArray(),
+        // Kanto.
+        Curated(
+            Target.Trigger(MAP_ROUTE_24, 0),
+            "The Rocket grunt who fled the Cerulean Gym waits here: stepping here starts the battle.",
+        ),
+        Curated(
+            Target.Person(MAP_SS_AQUA_1F_SOUTHEAST_ROOMS, 0),
+            "Sailor Stanly is fast asleep: talking to him does nothing until you have met the sailor guarding the way east on " +
+                "B1F (walk up to him or talk to him). Then talk to Stanly: he wakes up and battles you, and the B1F guard lets you through.",
+            StoryCondition.VarAtLeast(HgssStoryTable.Vars.SS_AQUA, 3),
+        ),
+        Curated(Target.Person(MAP_SS_AQUA_B1F, 1), SS_AQUA_GUARD, StoryCondition.VarAtLeast(HgssStoryTable.Vars.SS_AQUA, 3)),
+        Curated(Target.Trigger(MAP_SS_AQUA_B1F, 0), SS_AQUA_GUARD, StoryCondition.VarAtLeast(HgssStoryTable.Vars.SS_AQUA, 3)),
+        *listOf(4, 7, 8, 9).map { id ->
+            Curated(
+                Target.Person(MAP_ROUTE_11, id),
+                "A sleeping Snorlax blocks the entrance of Diglett's Cave. It wakes to the Poké Flute: with the Expansion Card " +
+                    "(Lavender Radio Station director, after restoring the Power Plant), stand next to it and tune_radio station:poke_flute " +
+                    "(close: true closes the Pokégear; the flute keeps playing), then talk to the Snorlax again (interact) while the " +
+                    "flute plays: it wakes up and the battle starts (defeat or catch it). Closing the Pokégear alone doesn't wake it.",
+                StoryCondition.FlagSet(HgssStoryTable.Flags.SNORLAX_BEATEN),
+                cause = Cause.WakesToRadio(SPECIES_SNORLAX, RadioStation.POKE_FLUTE),
+            )
+        }.toTypedArray(),
+        Curated(
+            Target.Person(MAP_VIRIDIAN, 0),
+            "An old man stands in front of the Gym door: the Gym leader (Blue) is away on Cinnabar Island; talk to him there once you have seven Kanto badges.",
+            StoryCondition.FlagSet(HgssStoryTable.Flags.BLUE_OPENED_VIRIDIAN_GYM),
+        ),
+        Curated(
+            Target.Person(MAP_LEAGUE_GATE, 2),
+            "A guard closes the way west to Route 22 and Viridian City until you have been to western Kanto (through Diglett's Cave).",
+            StoryCondition.FlagSet(HgssStoryTable.Flags.UNLOCKED_WEST_KANTO),
+        ),
+        Curated(
+            Target.Trigger(MAP_LEAGUE_GATE, 2),
+            "A guard closes the way west to Route 22 and Viridian City until you have been to western Kanto (through Diglett's Cave).",
+        ),
+        Curated(
+            Target.Person(MAP_LEAGUE_GATE, 1),
+            "A guard closes the way to Route 28 and Mt. Silver: only Prof. Oak's permission (all 16 badges) opens it.",
+            StoryCondition.FlagSet(HgssStoryTable.Flags.UNLOCKED_MT_SILVER),
+        ),
+        Curated(
+            Target.Trigger(MAP_LEAGUE_GATE, 1),
+            "A guard closes the way to Route 28 and Mt. Silver: only Prof. Oak's permission (all 16 badges) opens it.",
+        ),
+        *listOf(13, 14).map { id ->
+            Curated(
+                Target.Person(MAP_ROUTE_19, id),
+                "Workmen close the sea route south of Fuchsia City until Blaine is beaten: reach Cinnabar Island from Pallet Town (Route 21) instead.",
+                StoryCondition.HasBadge(HgssStoryTable.VOLCANO),
+            )
+        }.toTypedArray(),
+    )
+
+    private val byPerson: Map<Target.Person, Curated> = curated.filter { it.target is Target.Person }.associateBy { it.target as Target.Person }
+    private val byTrigger: Map<Target.Trigger, Curated> = curated.filter { it.target is Target.Trigger }.associateBy { it.target as Target.Trigger }
+
+    /** Every flag the curated blockers read. */
+    val flagIds: Set<Int> get() = curated.flatMapTo(mutableSetOf()) {
+        it.liftedWhen?.flagIds().orEmpty() + ((it.cause as? Cause.Password)?.knownWhen?.flagIds().orEmpty())
+    }
+
+    /** Every var the curated blockers read. */
+    val varIds: Set<Int> get() = curated.flatMapTo(mutableSetOf()) { it.liftedWhen?.varIds().orEmpty() }
+}

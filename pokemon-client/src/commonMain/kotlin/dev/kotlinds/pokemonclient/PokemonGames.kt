@@ -1,10 +1,10 @@
 package dev.kotlinds.pokemonclient
 
 import dev.kotlinds.NdsRom
-import dev.kotlinds.pokemonclient.hgss.HgssGame
-import dev.kotlinds.pokemonclient.hgss.HgssVersion
-import dev.kotlinds.pokemonclient.platinum.PlatinumGame
-import dev.kotlinds.pokemonclient.platinum.PlatinumVersion
+import dev.kotlinds.pokemonclient.games.hgss.HgssGame
+import dev.kotlinds.pokemonclient.games.hgss.HgssVersion
+import dev.kotlinds.pokemonclient.games.platinum.PlatinumGame
+import dev.kotlinds.pokemonclient.games.platinum.PlatinumVersion
 
 /**
  * Registry of supported ROMs, keyed by the NDS game code.

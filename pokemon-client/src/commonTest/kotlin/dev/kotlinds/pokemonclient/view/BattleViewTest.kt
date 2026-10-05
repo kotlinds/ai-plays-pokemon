@@ -1,7 +1,7 @@
 package dev.kotlinds.pokemonclient.view
 
 import dev.kotlinds.pokemonclient.data.MoveCategory
-import dev.kotlinds.pokemonclient.hgss.HgssStatuses
+import dev.kotlinds.pokemonclient.games.hgss.HgssStatuses
 import dev.kotlinds.pokemonclient.state.BattleKind
 import dev.kotlinds.pokemonclient.state.BattleState
 import dev.kotlinds.pokemonclient.state.BattlerRef
