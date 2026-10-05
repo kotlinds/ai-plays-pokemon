@@ -1,0 +1,58 @@
+# Attaches the universal jar (runs on macOS, Linux and Windows with Java 21) to every GitHub release.
+#
+# Triggered when a release is published (create the tag with the release, or publish a release on an existing tag),
+# or by hand for an existing release (Actions → Release jar → Run workflow, with its tag) to rebuild its jar.
+name: Release jar
+
+on:
+  release:
+    types: [ published ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag of the existing release to attach the jar to (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write # upload the jar to the release
+
+jobs:
+  jar:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Checkout the release's tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Set up the JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # In development the app uses a -SNAPSHOT of pokemon-client from mavenLocal, which CI doesn't have: a release
+      # builds against the published version of the same number (0.1.1-SNAPSHOT → 0.1.1 on Maven Central). Nothing
+      # changes when the tag already names a released version.
+      - name: Use the released pokemon-client
+        run: |
+          sed -i -E 's/^(pokemon-client = "[^"]+)-SNAPSHOT"/\1"/' gradle/libs.versions.toml
+          grep '^pokemon-client = ' gradle/libs.versions.toml
+
+      # -Puniversal ships the UI natives of every desktop platform in the one jar (see build.gradle.kts).
+      - name: Build the universal jar
+        run: ./gradlew packageUberJarForCurrentOS -Puniversal
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jar=$(ls build/compose/jars/*.jar | head -n 1)
+          asset="ai-plays-pokemon-${TAG}-universal.jar"
+          cp "$jar" "$asset"
+          gh release upload "$TAG" "$asset" --clobber
