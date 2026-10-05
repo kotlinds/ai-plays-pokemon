@@ -150,7 +150,7 @@ class GameSession(
     /**
      * Executes [requested] one after the other (the first one checked against [expectedVersion]) as one chain
      * ([ChainRunner]): it stops at the first failure, when the battle changed under it (the foe replaced or fainted, one
-     * of the player's Pokémon fainted), or before a step once [limits] are reached (no progress for a while, or the
+     * of the player's Pokémon fainted), after a failed escape, or before a step once [limits] are reached (no progress for a while, or the
      * safety cap). One response for the whole sequence: `performed` lists every step done, and the messages / events
      * cover all of them (nothing said by the game between two steps is lost). [onStep] is told before each step.
      */
@@ -184,7 +184,11 @@ class GameSession(
         }
     }
 
-    /** What a chain did, as the agent reads it: `ok`, `performed`, `detail`, the failed `action` and its `error`, `not_done`. */
+    /**
+     * What a chain did, as the agent reads it: `ok`, `performed`, `detail`, the failed `action` and its `error`,
+     * `not_done` (the steps left when it stopped, and why), `dropped` (battle steps skipped once the battle was over,
+     * and how it ended, while the chain went on with its field steps).
+     */
     private fun outcome(chain: dev.kotlinds.pokemonclient.actions.ChainResult): JsonObject = buildJsonObject {
         put("ok", chain.failed == null)
         putJsonArray("performed") { chain.performed.forEach { add(JsonPrimitive(it)) } }
@@ -201,6 +205,13 @@ class GameSession(
             chain.stop?.let { stop ->
                 put("not_done_code", stop.code)
                 put("not_done_reason", stop.message)
+            }
+        }
+        if (chain.dropped.isNotEmpty()) {
+            put("dropped", JsonArray(chain.dropped.map { JsonPrimitive(it.key) }))
+            chain.droppedBecause?.let { ended ->
+                put("dropped_code", ended.code)
+                put("dropped_reason", ended.message)
             }
         }
     }

@@ -144,7 +144,12 @@ class GameMcpServer(
                     put("action", session.registry.jsonSchema(mode()))
                     putJsonObject("then") {
                         put("type", "array")
-                        put("description", "Optional further actions done right after, only when sure (max 8); stops at the first problem, when the battle changes under it (the foe switched or fainted, one of yours fainted), before a battle step once the battle is over (BATTLE_WON / BATTLE_OVER / BATTLE_LOST), or when nothing has happened for a while: `not_done` lists what was left and `not_done_code` why. The answer covers every step: `performed` and all the messages.")
+                        put("description", "Optional further actions done right after, only when sure (max 8). Stops at the first problem, when the battle changes under it " +
+                            "(FOE_CHANGED: the foe switched or a new one was sent, even of the same species; FOE_FAINTED; OWN_FAINTED), after a `run` that couldn't escape " +
+                            "(ESCAPE_FAILED), or when nothing has happened for a while (IDLE / TIME_CAP): `not_done` lists the steps left and `not_done_code` why. " +
+                            "Once the battle is over, only its battle steps are dropped (attack, switch, keep_battling, run, throw_ball, use_item of a battle-only " +
+                            "item like X Attack): `dropped` lists them and `dropped_code` how it ended (BATTLE_WON / BATTLE_OVER / BATTLE_LOST); every other step " +
+                            "(walking, interact, a Potion or Repel, learning a move, reading messages) goes on. The answer covers every step: `performed` and all the messages.")
                     }
                     putJsonObject("note") {
                         put("type", "string")
