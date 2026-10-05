@@ -89,6 +89,7 @@ fun ControlPanel(controller: AppController, modifier: Modifier = Modifier) {
                 label = { Text("Sound") },
             )
             MusicDuringPausesChip(controller)
+            WaitForSongChangeChip(controller)
         }
 
         // Which AI plays: Jev, or an LLM (provider + model)
@@ -133,6 +134,22 @@ private fun MusicDuringPausesChip(controller: AppController) {
         enabled = unavailable == null,
         onClick = { controller.updateSettings { it.copy(musicDuringPauses = !it.musicDuringPauses) } },
         label = { Text(if (unavailable == null) "Music during pauses" else "Music during pauses (unavailable)") },
+    )
+}
+
+/**
+ * "Wait for the song change": with music during pauses, a pause asked while the game changes its song starts once the
+ * new song plays, so the music doesn't jump back at resume. Only meaningful (enabled) with music during pauses.
+ */
+@Composable
+private fun WaitForSongChangeChip(controller: AppController) {
+    val settings by controller.settings.collectAsState()
+    val available = settings.musicDuringPauses && controller.emulator.musicDuringPausesUnavailable == null
+    FilterChip(
+        selected = settings.waitForSongChange && available,
+        enabled = available,
+        onClick = { controller.updateSettings { it.copy(waitForSongChange = !it.waitForSongChange) } },
+        label = { Text("Wait for the song change") },
     )
 }
 

@@ -55,6 +55,15 @@ class ShadowAudio(
     @Volatile
     var enabled = true
 
+    /**
+     * The setting ("Wait for the song change"): when the game is about to change its song as it pauses (it is fading
+     * the old one out, e.g. right after walking into a route with its own music), the pause starts once the new song
+     * plays, up to [MAX_SONG_CHANGE_WAIT_FRAMES] later (see [delaysPause]). Off, such a pause starts at once and,
+     * lasting past the change, resumes with the music jumping back to the old song's fade.
+     */
+    @Volatile
+    var waitForSongChange = true
+
     /** The game's sound is heard (not muted, not fast-forwarding). */
     @Volatile
     var soundOn = true
@@ -80,8 +89,11 @@ class ShadowAudio(
     /** The current pause's session (console thread only). */
     private var session: Session? = null
 
-    /** Frames the coming pause was already put off by [delaysPause] (console thread only). */
+    /** Frames the coming pause was already put off by [delaysPause] for a busy sound driver (console thread only). */
     private var pauseDelay = 0
+
+    /** Frames the coming pause was already put off by [delaysPause] for a song change (console thread only). */
+    private var songChangeWait = 0
 
     /** The main console's state saved by [delaysPause] for the pause to start from, with its frame and revision. */
     private var pauseCandidate: Triple<Long, Long, ByteArray>? = null
@@ -199,22 +211,34 @@ class ShadowAudio(
 
     /**
      * Called by the console thread when the game is about to freeze (the frame before the first [onIdle] of a pause):
-     * true when the pause had better start one frame later, because a pause starting at this frame couldn't be
-     * resynced ([SoundResync.pauseRefusal]: the ARM7 is in the middle of a sequencer tick, or of sound commands that
-     * can't run twice; ~12% of frames, measured). That lasts a frame, so the game then emulates one more frame before
-     * pausing (at most [MAX_PAUSE_DELAY_FRAMES]): it pauses ~17 ms later, through its normal emulation, as if the pause
-     * had been asked then.
+     * true when the pause had better start one frame later, the game then emulating one more frame through its normal
+     * emulation, as if the pause had been asked then:
+     * - while the game is about to change its song ([SoundResync.songChangePending]: fading the old one out, ~2 s from
+     *   the step into a route with its own music) and [waitForSongChange] is on, up to [MAX_SONG_CHANGE_WAIT_FRAMES]:
+     *   a pause lasting past the change can't be resynced (the new song's data is loaded during the pause), one
+     *   starting on the new song can. The game runs on meanwhile (sound heard, the AI's next action starting at once
+     *   if it comes), so what it shows may move on a little after the pause was asked;
+     * - then, because a pause starting at this frame couldn't be resynced ([SoundResync.pauseRefusal]: the ARM7 is in
+     *   the middle of a sequencer tick, or of sound commands that can't run twice; ~12% of frames, measured). That
+     *   lasts a frame: at most [MAX_PAUSE_DELAY_FRAMES], the pause starting ~17 ms later.
      */
     fun delaysPause(main: LibretroConsole): Boolean {
         if (session != null || !wanted) return false
         val state = main.saveState()
-        if (pauseDelay < MAX_PAUSE_DELAY_FRAMES && resync!!.pauseRefusal(state) != null) {
-            pauseDelay++
-            pauseCandidate = null
-            return true
+        val resync = resync!!
+        val delayed = when {
+            waitForSongChange && songChangeWait < MAX_SONG_CHANGE_WAIT_FRAMES && resync.songChangePending(state, afterFadeOut = songChangeWait > 0) -> {
+                if (++songChangeWait == MAX_SONG_CHANGE_WAIT_FRAMES) log("the song change didn't come within $MAX_SONG_CHANGE_WAIT_FRAMES frames: pausing anyway")
+                true
+            }
+            pauseDelay < MAX_PAUSE_DELAY_FRAMES && resync.pauseRefusal(state) != null -> {
+                pauseDelay++
+                true
+            }
+            else -> false
         }
-        pauseCandidate = Triple(main.frame, main.revision, state)
-        return false
+        pauseCandidate = if (delayed) null else Triple(main.frame, main.revision, state)
+        return delayed
     }
 
     /** Called by the console thread while the game is paused (every few ms): starts or stops the shadow. */
@@ -225,7 +249,7 @@ class ShadowAudio(
             val candidate = pauseCandidate?.takeIf { (frame, revision) -> frame == main.frame && revision == main.revision }
             val started = Session(candidate?.third ?: main.saveState())
             pauseCandidate = null
-            pauseDelay = 0
+            resetPauseDelays()
             session = started
             lock.withLock {
                 pending = started
@@ -242,6 +266,7 @@ class ShadowAudio(
      * during the pause, resyncs the game's music with it; otherwise does nothing.
      */
     fun beforeMainFrame(main: LibretroConsole) {
+        resetPauseDelays() // the game runs: a pause coming later is another one
         val current = session ?: return
         session = null
         val ended = lock.withLock {
@@ -290,7 +315,13 @@ class ShadowAudio(
         session?.let(::cancel)
         session = null
         pauseCandidate = null
+        resetPauseDelays()
+    }
+
+    /** The coming pause wasn't put off yet ([delaysPause]). */
+    private fun resetPauseDelays() {
         pauseDelay = 0
+        songChangeWait = 0
     }
 
     private fun cancel(current: Session) = lock.withLock {
@@ -366,5 +397,13 @@ class ShadowAudio(
 
         /** A frame where a pause can start comes within 1 frame (measured over 200 pauses); 3 at most. */
         const val MAX_PAUSE_DELAY_FRAMES = 3
+
+        /**
+         * A song change the game has queued comes within ~2.5 s: the field fades the old song out over 30 to 60 ticks
+         * of its 30 Hz loop, then waits 0 to 15 more (HeartGold `FieldBGM_GetFadeOutAndWaitFrames`); measured from
+         * Viridian City onto Route 22: 121 frames from the step into the route. Past this (a fanfare holds the
+         * countdown), the pause starts anyway.
+         */
+        const val MAX_SONG_CHANGE_WAIT_FRAMES = 180
     }
 }

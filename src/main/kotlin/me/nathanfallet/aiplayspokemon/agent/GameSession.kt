@@ -93,6 +93,9 @@ class GameSession(
     /** What the agent has seen of the opponents this battle (revealed abilities and held items). */
     private val battleKnowledge = dev.kotlinds.pokemonclient.data.BattleKnowledge()
 
+    /** The fly suggestions of the story goals (kept between calls: each costs a search of the world). */
+    private val flyAdvisor = dev.kotlinds.pokemonclient.actions.FlyAdvisor(game)
+
     /** The events the agent hasn't received yet (kept until a response carrying them is delivered). */
     private val feed = EventFeed(recorder.log, autoConfirm = !confirmDelivery)
 
@@ -162,9 +165,13 @@ class GameSession(
         onStep: (index: Int, total: Int, action: GameAction) -> Unit = { _, _, _ -> },
     ): JsonObject {
         require(requested.isNotEmpty()) { "no action" }
+        // The recorder sees every frame: how the battle was decided, even when it left the screen during a step.
+        val since = recorder.log.lastSeq
         val chain = ChainRunner(
             observe = { host.observe { memory -> game.state(memory) } },
             execute = { action, index -> execute(action, if (index == 0) expectedVersion else null) },
+            settle = ::settleBattle,
+            decided = { recorder.log.since(since).filterIsInstance<GameEvent.BattleDecided>().firstOrNull()?.outcome },
             limits = limits,
             idle = { recorder.progress.idle },
             onStep = { index, total, action ->
@@ -245,6 +252,23 @@ class GameSession(
         }
     }
 
+    /**
+     * Lets a battle still playing out between two steps of a chain settle (frames only, never a button) and reads the
+     * state then ([ChainRunner]: the battle is checked once the turn has played, not while the foe's attack and the
+     * K.O. it causes are still on their way). Nothing runs while a human plays or the game is paused: the state as it
+     * is then.
+     */
+    private suspend fun settleBattle(): GameState {
+        if (ActGate.refusal(humanPlaying = host.humanActivity.isPlaying(), userPaused = host.isUserPaused) != null) return state()
+        return try {
+            host.lease("settle", game.inputProbe, onProgress = recorder.progress::report) {
+                Navigator(this, game).settle(maxFrames = SETTLE_FRAMES)
+            }
+        } catch (_: ActionInterruptedException) {
+            state()
+        }
+    }
+
     /** The team and position last sent, for [compact] answers that only repeat what changed. */
     private val compactView = CompactView()
 
@@ -316,8 +340,12 @@ class GameSession(
         if (!solvePuzzles() && here != null && (full || here.puzzle != null)) put("movement_puzzles", PUZZLES_LEFT_TO_AGENT)
         val story = state.story
         if (story != null && knowledge().allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH)) {
-            // Always a list: one goal, or every open goal when the game leaves the choice (the Kanto gyms...).
-            put("story_goals", JsonArray(story.openGoals.map { JsonPrimitive(it.description) }))
+            // Always a list: one goal, or every open goal when the game leaves the choice (the Kanto gyms...). A goal
+            // in one place says which visited fly destination lands nearest when flying beats walking there.
+            put("story_goals", JsonArray(story.openGoals.map { goal ->
+                val fly = goal.place?.let { flyAdvisor.suggest(state, it) }
+                JsonPrimitive(goal.description + (fly?.let { " (${it.text})" } ?: ""))
+            }))
             if (story.blockers.isNotEmpty()) put("blocked_by", JsonArray(story.blockers.map { JsonPrimitive("${it.target}: ${it.reason}") }))
         }
         val mode = mode()

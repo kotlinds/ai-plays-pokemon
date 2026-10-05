@@ -92,6 +92,7 @@ class AppController(
 
     init {
         emulator.setMusicDuringPauses(_settings.value.musicDuringPauses)
+        emulator.setWaitForSongChange(_settings.value.waitForSongChange)
         recorder?.let { r ->
             emulator.frameListener = r::onFrame
             emulator.humanInputListener = { r.humanInput(emulator.status.value.frameCount) }
@@ -106,6 +107,7 @@ class AppController(
         _settings.value = updated
         config.playerSettings = updated
         emulator.setMusicDuringPauses(updated.musicDuringPauses)
+        emulator.setWaitForSongChange(updated.waitForSongChange)
     }
 
     /** Runs the MCP server only while the MCP tab is selected (one player at a time). */

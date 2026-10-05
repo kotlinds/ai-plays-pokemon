@@ -109,6 +109,9 @@ class ConsoleHost(
     /** The "Music during pauses" setting, until [shadowAudio] exists (it is created on the console thread). */
     @Volatile private var musicDuringPauses = true
 
+    /** The "Wait for the song change" setting, until [shadowAudio] exists. */
+    @Volatile private var waitForSongChange = true
+
     private val ready = CountDownLatch(1)
     private var startupError: Throwable? = null
 
@@ -120,6 +123,7 @@ class ConsoleHost(
                 pacer = FramePacer(it.fps)
                 shadowAudio = ShadowAudio(spec, romPath, dataDirectory, audio, it.fps).apply {
                     enabled = musicDuringPauses
+                    waitForSongChange = this@ConsoleHost.waitForSongChange
                     onResume = { result -> musicDuringPausesListener?.invoke(result) }
                     soundOn = !status.value.muted && !status.value.fastForward
                     unsupportedReason?.let { why -> println("[music during pauses] unavailable: $why") }
@@ -293,6 +297,15 @@ class ConsoleHost(
     fun setMusicDuringPauses(enabled: Boolean) {
         musicDuringPauses = enabled
         shadowAudio.enabled = enabled
+    }
+
+    /**
+     * "Wait for the song change" (on by default, with music during pauses): a pause asked while the game is changing
+     * its song starts once the new song plays (see [ShadowAudio.waitForSongChange]).
+     */
+    fun setWaitForSongChange(enabled: Boolean) {
+        waitForSongChange = enabled
+        shadowAudio.waitForSongChange = enabled
     }
 
     /** Why music during pauses can't work here (ROM, core, platform), or null when it can. */

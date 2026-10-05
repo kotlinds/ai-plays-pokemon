@@ -51,6 +51,12 @@ data class PlayerSettings(
      * the game but its sound playback.
      */
     val musicDuringPauses: Boolean = true,
+    /**
+     * With music during pauses: a pause asked while the game is changing its song (fading the old one out, e.g. just
+     * after walking into a route with its own music) starts once the new song plays (up to ~3 s later, the game running
+     * on meanwhile), so the music doesn't jump back to the old song at resume. Off: the pause starts at once (to compare).
+     */
+    val waitForSongChange: Boolean = true,
 )
 
 enum class ControlMode(val label: String, val description: String) {
