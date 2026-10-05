@@ -209,8 +209,11 @@ sealed interface Screen {
         override val awaiting: Awaiting,
     ) : Screen
 
-    /** A long animation with nothing to do (trade, egg hatching, cut scene...). */
-    data class Animation(val kind: AnimationKind) : Screen {
+    /**
+     * A long animation with nothing to do (trade, egg hatching, cut scene...). [hint]: what is known about it (what it
+     * is, how to get through it faster) when there is something to say.
+     */
+    data class Animation(val kind: AnimationKind, val hint: String? = null) : Screen {
         override val awaiting get() = Awaiting.ANIMATION
     }
 
@@ -229,13 +232,17 @@ sealed interface Screen {
     /**
      * A full-screen application to look at, with nothing to choose: the Pokédex, the trainer card, a Pokémon's
      * summary, the Pokégear's map or radio, the Hall of Fame. [exit] says how to leave it; [details] what it shows
-     * that matters (the Hall of Fame: the team being registered).
+     * that matters (the Hall of Fame: the team being registered and the Pokémon presented now); [radio]: the Pokégear
+     * radio's dial and programme; [apps]: the other applications reachable from here by touch (the Pokégear's app
+     * bar).
      */
     data class Viewer(
         val app: ViewerApp,
         val exit: ViewerExit,
         override val awaiting: Awaiting,
         val details: List<String> = emptyList(),
+        val radio: PokegearRadio? = null,
+        val apps: List<Entry> = emptyList(),
     ) : Screen
 
     /**

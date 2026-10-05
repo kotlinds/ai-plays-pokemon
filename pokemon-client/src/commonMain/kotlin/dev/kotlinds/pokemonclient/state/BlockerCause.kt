@@ -14,4 +14,10 @@ sealed interface BlockerCause {
 
     /** A Pokémon standing in the way, battled with A: it leaves once it faints (or is caught). */
     data class WildPokemon(val speciesId: Int) : BlockerCause
+
+    /**
+     * A Pokémon asleep in the way: it wakes when talked to (A) while the radio plays [station] (the Pokégear radio,
+     * `tune_radio`), then battles; it leaves once it faints (or is caught).
+     */
+    data class SleepingPokemon(val speciesId: Int, val station: RadioStation) : BlockerCause
 }

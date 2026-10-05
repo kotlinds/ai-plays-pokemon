@@ -62,6 +62,17 @@ object HgssStatuses {
         if (c and 0x7 != 0) add(VolatileStatus.Disabled)
         if ((c shr 3) and 0x7 != 0) add(VolatileStatus.Encored)
         if ((c shr 8) and 0x7 != 0) add(VolatileStatus.Taunted)
+        if (s2 and (1 shl 23) != 0) add(VolatileStatus.Raging)
+        // MOVE_EFFECT_FLAG_* (include/constants/battle.h:163).
+        if (me and (0x3 shl 3) != 0) add(VolatileStatus.LockedOn)
+        if (me and (1 shl 8) != 0) add(VolatileStatus.Minimized)
+        if (me and (1 shl 9) != 0) add(VolatileStatus.Charged)
+        if (me and (1 shl 13) != 0) add(VolatileStatus.Imprisoning)
+        if (me and (1 shl 14) != 0) add(VolatileStatus.Grudge)
+        if (me and (1 shl 24) != 0) add(VolatileStatus.AquaRing)
+        if (me and (1 shl 25) != 0) add(VolatileStatus.HealBlocked)
+        if (me and (1 shl 26) != 0) add(VolatileStatus.Embargoed)
+        if (me and (1 shl 27) != 0) add(VolatileStatus.MagnetRise)
     }
 
     /**

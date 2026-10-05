@@ -130,7 +130,7 @@ object MoreActions {
         val after = context.navigator.settle(maxFrames = DRAG_REACTION_FRAMES).screen
         ActionOutcome.Done(
             when {
-                !after.sameAs(before) -> "now: ${after.kind}"
+                !after.sameAs(before) -> if (after.kind == before.kind) "the screen changed (still ${after.kind})" else "now: ${after.kind}"
                 after is Screen.Unknown -> "dragged; this screen isn't decoded: a screenshot shows what moved"
                 else -> "the screen didn't change"
             },

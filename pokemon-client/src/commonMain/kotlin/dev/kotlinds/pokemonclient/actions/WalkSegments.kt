@@ -63,14 +63,18 @@ internal object WalkSegments {
 
     private fun enters(area: Area, edge: Edge) = area.warps.any { it.x == edge.to.x && it.y == edge.to.y }
 
-    /** Walks [segment] holding its direction (with B when running), as described on [WalkSegments]. */
-    fun walk(context: PlanContext, segment: Segment, options: MoveOptions): Result {
+    /**
+     * Walks [segment] holding its direction (with B when running), as described on [WalkSegments]. Entering one of
+     * [scenes] (tiles of active scene triggers) stops it there: the scene starts as the step ends ([Result.Stopped]
+     * with that tile).
+     */
+    fun walk(context: PlanContext, segment: Segment, options: MoveOptions, scenes: Set<Pair<Int, Int>> = emptySet()): Result {
         var remaining = segment.tiles
         var round = 0
         while (remaining.isNotEmpty() && round++ < MAX_ROUNDS) {
             val start = context.state().field ?: return Result.Stopped(context.state())
             val done = segment.tiles.size - remaining.size
-            when (val held = hold(context, segment.direction, remaining, start, options)) {
+            when (val held = hold(context, segment.direction, remaining, start, options, scenes)) {
                 is Held.Stopped -> return Result.Stopped(held.state, done + held.walked, held.at)
                 is Held.Refused -> return Result.Refused(held.from)
                 is Held.Released -> Unit
@@ -97,7 +101,7 @@ internal object WalkSegments {
     }
 
     /** Holds the direction until the release point of [tiles], checking each new position. */
-    private fun hold(context: PlanContext, direction: Direction, tiles: List<Node>, start: FieldState, options: MoveOptions): Held {
+    private fun hold(context: PlanContext, direction: Direction, tiles: List<Node>, start: FieldState, options: MoveOptions, scenes: Set<Pair<Int, Int>>): Held {
         val input = InputFrame(buildSet {
             add(direction.button)
             if (options.run) add(Button.B)
@@ -122,6 +126,8 @@ internal object WalkSegments {
                 val expected = tiles.getOrNull(next)
                 // Anything but the next tile: let go, the caller sees where the player ends.
                 if (expected == null || expected.x != field.x || expected.y != field.y) return Held.Released
+                // A scene trigger: let go, its script runs once this step ends (and may move the player back).
+                if ((field.x to field.y) in scenes) return Held.Stopped(state, next + 1, expected)
                 if (next >= releaseAt) return Held.Released
                 next++
                 continue

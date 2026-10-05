@@ -1,6 +1,8 @@
 package dev.kotlinds.pokemonclient.view
 
 import dev.kotlinds.pokemonclient.Direction
+import dev.kotlinds.pokemonclient.state.ExaminableKind
+import dev.kotlinds.pokemonclient.state.FieldExaminable
 import dev.kotlinds.pokemonclient.state.FieldState
 import dev.kotlinds.pokemonclient.state.GameState
 import dev.kotlinds.pokemonclient.state.MovementMode
@@ -36,6 +38,25 @@ class HiddenKnowledgeViewTest {
         assertTrue("hidden_item:2" in shown && "\$ hidden item" in shown, shown)
         val hidden = MapView.render(area, field(1), showHidden = false).toString()
         assertFalse("hidden_item" in hidden || "\$ hidden item" in hidden, hidden)
+    }
+
+    @Test
+    fun invisibleExaminablesOnlyWithAWalkthroughUnlessTheGameShowsACue() {
+        val part = FieldExaminable("examine:8", "Machine Part", ExaminableKind.ITEM, 5, 2, cue = false)
+        val with = field(1).copy(examinables = listOf(part))
+        val shown = MapView.render(area, with).toString()
+        assertTrue("examine:8 Machine Part (examining picks it up) at 5,2" in shown && "e something invisible" in shown, shown)
+        val hidden = MapView.render(area, with, showHidden = false).toString()
+        assertFalse("examine:8" in hidden || "Machine Part" in hidden, hidden)
+        // With a cue on its tile: "something to examine", never what it is.
+        val cued = MapView.render(area, field(1).copy(examinables = listOf(part.copy(cue = true))), showHidden = false).toString()
+        assertTrue("examine:8 something to examine at 5,2" in cued && "Machine Part" !in cued, cued)
+    }
+
+    @Test
+    fun theLegendSaysTheMapIsAPartialWindow() {
+        val legend = MapView.render(area, field(1)).getValue("legend").toString()
+        assertTrue("partial view" in legend && "map_origin" in legend, legend)
     }
 
     @Test

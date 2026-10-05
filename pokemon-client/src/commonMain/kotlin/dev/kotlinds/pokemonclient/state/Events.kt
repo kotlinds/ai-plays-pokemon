@@ -71,6 +71,9 @@ sealed interface GameEvent {
      * The clerk added [quantity] [item] to a purchase as a bonus (a Premier Ball for 10 Poké Balls bought at once),
      * recorded when the bonus message shows, after the [ItemReceived] of that item.
      */
+    /** The Pokégear gained a card ([card]: the Map Card, the Radio Card, the Expansion Card for Kanto's stations). */
+    data class PokegearUpgraded(override val seq: Long, override val frame: Long, val card: PokegearCard) : GameEvent
+
     data class ShopBonus(override val seq: Long, override val frame: Long, val item: String, val quantity: Int, val itemId: ItemId? = null) : GameEvent
 }
 

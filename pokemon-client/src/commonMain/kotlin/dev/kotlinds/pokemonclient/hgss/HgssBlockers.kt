@@ -2,6 +2,7 @@ package dev.kotlinds.pokemonclient.hgss
 
 import dev.kotlinds.pokemonclient.state.Blocker
 import dev.kotlinds.pokemonclient.state.BlockerCause
+import dev.kotlinds.pokemonclient.state.RadioStation
 import dev.kotlinds.pokemonclient.state.StoryCondition
 
 /**
@@ -54,9 +55,13 @@ object HgssBlockers {
         /** A Pokémon of species [speciesId] battled with A. */
         data class Battle(val speciesId: Int) : Cause
 
+        /** A sleeping Pokémon of species [speciesId] that wakes when talked to while the radio plays [station]. */
+        data class WakesToRadio(val speciesId: Int, val station: RadioStation) : Cause
+
         fun toBlockerCause(story: StoryInfo): BlockerCause = when (this) {
             is Password -> BlockerCause.PasswordDoor(from, knownWhen.holds(story))
             is Battle -> BlockerCause.WildPokemon(speciesId)
+            is WakesToRadio -> BlockerCause.SleepingPokemon(speciesId, station)
         }
     }
 
@@ -73,8 +78,10 @@ object HgssBlockers {
             if (known != null) {
                 // A door object slid aside is open.
                 if (known.closedAt != null && (o.x to o.z) !in known.closedAt) continue
-                if (known.liftedWhen?.holds(story) != true) out += Blocker("person:${o.id}", known.reason, known.cause?.toBlockerCause(story))
-            } else if (zone == mapId && o.eventFlag != 0 && o.type !in HgssZoneEvents.TRAINER_TYPES && standsInPassage(around.grid, o.x, o.z)) {
+                if (known.liftedWhen?.holds(story) != true) out += Blocker(HgssObjectIds.idOf(o, mapId), known.reason, known.cause?.toBlockerCause(story))
+            } else if (zone == mapId && o.eventFlag != 0 && o.type !in HgssZoneEvents.TRAINER_TYPES && !battlesWhenTalkedTo(zone, o) &&
+                standsInPassage(around.grid, o.x, o.z)
+            ) {
                 out += Blocker(
                     "person:${o.id}",
                     "Stands in a narrow passage and only leaves after a story event: follow the story goal (or talk to them to learn what they wait for).",
@@ -83,8 +90,16 @@ object HgssBlockers {
         }
         // Mechanisms (a lift's tile...) are puzzles, never story blockers; placeholder triggers (an empty script,
         // Trigger.inert) start no scene: not blockers either.
-        val inert = HgssData.world?.areaOf(mapId)?.triggers.orEmpty().filter { it.zone == mapId && it.inert }.map { it.id }.toSet()
-        val active = around.triggers.filter { it.active == true && it.index !in inert && Target.Trigger(mapId, it.index) !in mechanisms }
+        val area = HgssData.world?.areaOf(mapId)
+        val inert = area?.triggers.orEmpty().filter { it.zone == mapId && it.inert }.map { it.id }.toSet()
+        // Warp pads (a script moving the player on this map: the Saffron Gym's exit pad) are puzzle teleports, holes
+        // are ways down, and a trigger on a warp's single tile runs that warp (New Bark's ladder to Elm's lab 2F):
+        // exits, not story scenes.
+        val warpTiles = area?.warps.orEmpty().filter { it.zone == mapId }.map { it.x to it.y }.toSet()
+        val moves = area?.scriptWarps.orEmpty().filter { it.zone == mapId }.map { it.trigger }.toSet() +
+            area?.triggerWarps.orEmpty().filter { it.zone == mapId }.map { it.trigger } +
+            area?.triggers.orEmpty().filter { it.zone == mapId && it.width <= 1 && it.height <= 1 && (it.x to it.y) in warpTiles }.map { it.id }
+        val active = around.triggers.filter { it.active == true && it.index !in inert && it.index !in moves && Target.Trigger(mapId, it.index) !in mechanisms }
         val (known, unknown) = active.partition { Target.Trigger(mapId, it.index) in byTrigger }
         for (t in known) {
             val curated = byTrigger.getValue(Target.Trigger(mapId, t.index))
@@ -99,6 +114,12 @@ object HgssBlockers {
         }
         return out
     }
+
+    /**
+     * True when [o] (of zone [zone]) starts a trainer battle when talked to: a gym leader, a scripted trainer. They wait
+     * for the player to challenge them; that is no story block, even when they stand in a passage (Sabrina).
+     */
+    private fun battlesWhenTalkedTo(zone: Int, o: MapObjectInfo): Boolean = HgssTrainers.trainerOf(zone, o.id, o.scriptId) != null
 
     /**
      * True when (x, z) is a walkable tile between two walls (west/east or north/south) with a way on at least one
@@ -116,6 +137,9 @@ object HgssBlockers {
         return (wall(west) && wall(east) && (open(north) || open(south))) ||
             (wall(north) && wall(south) && (open(west) || open(east)))
     }
+
+    /** SPECIES_SNORLAX (include/constants/species.h). */
+    private const val SPECIES_SNORLAX = 143
 
     /** Above this many armed, non-curated triggers on a map, they are a puzzle or trap mechanism: not reported. */
     private const val MAX_GENERIC_TRIGGERS = 3
@@ -145,6 +169,19 @@ object HgssBlockers {
     private const val MAP_VIOLET_GYM = 135
     private const val MAP_GOLDENROD_GYM = 137
     private const val MAP_CIANWOOD_GYM = 139
+    private const val MAP_SS_AQUA_1F_SOUTHEAST_ROOMS = 309
+    private const val MAP_SS_AQUA_B1F = 329
+
+    /**
+     * The S.S. Aqua's B1F guard (scr_seq_0162_P01R0307.s): obj_P01R0307_seaman_2 at (38,18) and the trigger in front of
+     * him (38,17..19, armed while VAR_UNK_40CB is 2) push the player back and set FLAG_UNK_0ED; with that flag, the
+     * sleeping Sailor Stanly (obj_P01R0303_seaman_2, scr_seq_0158_P01R0303.s) wakes up when talked to, battles, and
+     * sets the var to 3, which lets the player past the guard. Before the flag, talking to Stanly only prints a snore.
+     */
+    private const val SS_AQUA_GUARD =
+        "A sailor guards the way east on B1F (to the other passengers): stepping next to him makes him push you back, " +
+            "every time, until his sleeping colleague Sailor Stanly (1F, south-east cabins) has been woken and beaten. " +
+            "Having met this guard (here, or by talking to him) is what lets Stanly wake up: go talk to Stanly now."
 
     /** Coordinate triggers that are a map mechanism (see [HgssGymPuzzles]), not a story scene. */
     private val mechanisms: Set<Target.Trigger> = setOf(
@@ -342,11 +379,23 @@ object HgssBlockers {
             Target.Trigger(MAP_ROUTE_24, 0),
             "The Rocket grunt who fled the Cerulean Gym waits here: stepping here starts the battle.",
         ),
+        Curated(
+            Target.Person(MAP_SS_AQUA_1F_SOUTHEAST_ROOMS, 0),
+            "Sailor Stanly is fast asleep: talking to him does nothing until you have met the sailor guarding the way east on " +
+                "B1F (walk up to him or talk to him). Then talk to Stanly: he wakes up and battles you, and the B1F guard lets you through.",
+            StoryCondition.VarAtLeast(HgssStoryTable.Vars.SS_AQUA, 3),
+        ),
+        Curated(Target.Person(MAP_SS_AQUA_B1F, 1), SS_AQUA_GUARD, StoryCondition.VarAtLeast(HgssStoryTable.Vars.SS_AQUA, 3)),
+        Curated(Target.Trigger(MAP_SS_AQUA_B1F, 0), SS_AQUA_GUARD, StoryCondition.VarAtLeast(HgssStoryTable.Vars.SS_AQUA, 3)),
         *listOf(4, 7, 8, 9).map { id ->
             Curated(
                 Target.Person(MAP_ROUTE_11, id),
-                "A sleeping Snorlax blocks the entrance of Diglett's Cave: get the Expansion Card (Lavender Radio Station director, after restoring the Power Plant), tune the Pokégear radio to the Poké Flute channel next to it, then defeat or catch it.",
+                "A sleeping Snorlax blocks the entrance of Diglett's Cave. It wakes to the Poké Flute: with the Expansion Card " +
+                    "(Lavender Radio Station director, after restoring the Power Plant), stand next to it and tune_radio station:poke_flute " +
+                    "(close: true closes the Pokégear; the flute keeps playing), then talk to the Snorlax again (interact) while the " +
+                    "flute plays: it wakes up and the battle starts (defeat or catch it). Closing the Pokégear alone doesn't wake it.",
                 StoryCondition.FlagSet(HgssStoryTable.Flags.SNORLAX_BEATEN),
+                cause = Cause.WakesToRadio(SPECIES_SNORLAX, RadioStation.POKE_FLUTE),
             )
         }.toTypedArray(),
         Curated(

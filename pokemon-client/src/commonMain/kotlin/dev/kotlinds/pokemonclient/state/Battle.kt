@@ -76,6 +76,11 @@ data class BattlerState(
     val abilityRevealed: Boolean = false,
     /** Capture rate of the species (0..255, higher is easier), for a wild foe. */
     val catchRate: Int? = null,
+    /**
+     * Which Pokémon this is, when the game tells (its personality value): tells a Pokémon sent in apart from another of
+     * the same species and level (two Electrode). Not shown to agents.
+     */
+    val personality: Long? = null,
 )
 
 /** Stats that can be raised or lowered during a battle. */
@@ -114,4 +119,34 @@ sealed interface VolatileStatus {
     data object Taunted : VolatileStatus
     data object Encored : VolatileStatus
     data object Disabled : VolatileStatus
+
+    /** Grudge: the move that knocks this Pokémon out loses all its PP. */
+    data object Grudge : VolatileStatus
+
+    /** Magnet Rise: floating, Ground moves don't touch it. */
+    data object MagnetRise : VolatileStatus
+
+    /** Aqua Ring: heals a little every turn. */
+    data object AquaRing : VolatileStatus
+
+    /** Heal Block: can't heal. */
+    data object HealBlocked : VolatileStatus
+
+    /** Embargo: can't use items. */
+    data object Embargoed : VolatileStatus
+
+    /** Charge: its next Electric move is doubled. */
+    data object Charged : VolatileStatus
+
+    /** Minimize: harder to hit (Stomp doubles against it). */
+    data object Minimized : VolatileStatus
+
+    /** Lock-On / Mind Reader on a target: its next move can't miss. */
+    data object LockedOn : VolatileStatus
+
+    /** Rage: its Attack rises each time it is hit. */
+    data object Raging : VolatileStatus
+
+    /** Imprison: the foes can't use the moves it knows. */
+    data object Imprisoning : VolatileStatus
 }

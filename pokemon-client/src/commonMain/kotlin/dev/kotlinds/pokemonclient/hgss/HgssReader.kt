@@ -934,6 +934,10 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
                 spriteName in OBSTACLE_SPRITES -> "obstacle"
                 else -> "npc"
             }
+            // An object of the zone just left, kept on screen across a map connection, is re-tagged with the new zone:
+            // script 0xFFFF, and its old zone in the event flag (sub_0205F058, src/map_object.c).
+            val script = s32(o + A.MO_SCRIPT_ID)
+            val carried = script == A.MO_SCRIPT_CARRIED
             out += MapObjectInfo(
                 id = s32(o + A.MO_ID),
                 sprite = spriteName,
@@ -949,12 +953,12 @@ class HgssReader(private val memory: Memory, private val version: HgssVersion? =
                 hidden = flags and A.MO_FLAG_HIDDEN != 0L,
                 kind = kind,
                 label = if (kind == "follower") "your Pokémon (following you)" else HgssLabels.person(spriteName),
-                mapId = s32(o + A.MO_MAP_ID),
-                eventFlag = s32(o + A.MO_EVENT_FLAG),
+                mapId = if (carried) s32(o + A.MO_EVENT_FLAG) else s32(o + A.MO_MAP_ID),
+                eventFlag = if (carried) 0 else s32(o + A.MO_EVENT_FLAG),
                 param0 = s32(o + A.MO_PARAM0),
             )
         }
-        return out.sortedBy { Math.abs(it.dx) + Math.abs(it.dz) }
+        return HgssLabels.bigSpriteParts(out).sortedBy { Math.abs(it.dx) + Math.abs(it.dz) }
     }
 
     private fun readEvents(

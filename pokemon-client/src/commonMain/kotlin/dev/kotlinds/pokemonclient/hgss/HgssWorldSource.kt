@@ -185,12 +185,18 @@ class HgssWorldSource(private val rom: NdsRom, private val version: HgssVersion)
             Sign(zone, index, bg.x, bg.z, bg.script, SignKind.HIDDEN_ITEM, bg.script - HIDDEN_ITEM_SCRIPTS.first + HIDDEN_ITEMS_FLAG_BASE)
         } else Sign(zone, index, bg.x, bg.z, bg.script)
 
-    /** Coordinate triggers of [zone] whose script warps the player to another zone: holes ([HgssScripts.zoneWarp]). */
+    /**
+     * Coordinate triggers of [zone] whose script warps the player to another zone: holes ([HgssScripts.zoneWarp]). A
+     * trigger on a warp's own tile leading to the warp's map is that warp (New Bark's trigger on the ladder up to Elm's
+     * lab 2F runs the warp with a scene around it): the warp already lists it, it is no hole.
+     */
     private fun triggerWarps(zone: Int, events: HgssZoneEvents): List<TriggerWarp> {
         if (events.coords.isEmpty()) return emptyList()
         val file = header(zone)?.scriptsBank?.let { scriptFiles.getOrNull(it) } ?: return emptyList()
         return events.coords.mapIndexedNotNull { i, c ->
-            HgssScripts.zoneWarp(file, c.script, zone, headers.size)?.let { w -> TriggerWarp(zone, i, c.x, c.z, w.zone, w.x, w.z) }
+            HgssScripts.zoneWarp(file, c.script, zone, headers.size)
+                ?.takeIf { w -> events.warps.none { it.x == c.x && it.z == c.z && it.header == w.zone } }
+                ?.let { w -> TriggerWarp(zone, i, c.x, c.z, w.zone, w.x, w.z) }
         }
     }
 

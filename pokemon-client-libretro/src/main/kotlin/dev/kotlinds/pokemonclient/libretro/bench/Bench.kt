@@ -174,7 +174,7 @@ private class Bench(
                 st.surroundings?.bgEvents?.forEach { println("  bg $it") }
                 st.surroundings?.warps?.forEach { println("  warp ${it.x},${it.z} -> ${it.destMapName} ${it.kind} ${it.pressDirection}") }
                 st.surroundings?.grid?.let { g -> println("  origin ${g.originX},${g.originZ}"); g.rows.forEachIndexed { i, row -> println("  | ${g.originZ + i} $row") } }
-                st.surroundings?.objects?.forEach { println("  obj ${it.label} ${it.x},${it.z}") }
+                st.surroundings?.objects?.forEach { println("  obj ${it.label} ${it.x},${it.z} id=${it.id} zone=${it.mapId} sprite=${it.sprite} flag=${it.eventFlag} script=${it.scriptId} hidden=${it.hidden} move=${it.movement}") }
             }
             "touch" -> arg.split(',').let { (x, y) -> scope.touch(TouchPoint(x.toInt(), y.toInt())) }
             "until" -> {
@@ -259,6 +259,36 @@ private class Bench(
                 println("  $outcome ($actFrames frames)")
                 println("  " + game.state(scope.memory()).screen)
             }
+            // `chain:[{json}, {json}...]`: an action and its `then` steps run like the app's GameSession (ChainRunner: stops
+            // when the battle changes under it), each step settling like `act`.
+            "chain" -> {
+                val steps = Json.parseToJsonElement(arg) as kotlinx.serialization.json.JsonArray
+                val actions = steps.map { registry.parse(it.jsonObject, ActionMode.ASSISTED).getOrThrow() }
+                val result = kotlinx.coroutines.runBlocking {
+                    dev.kotlinds.pokemonclient.actions.ChainRunner(
+                        observe = { game.state(scope.memory()) },
+                        execute = { action, _ ->
+                            registry.execute(action, scope, game, settings).also { Navigator(scope, game).settle(maxFrames = 1800) }
+                        },
+                        idle = { recorder.progress.idle },
+                    ).run(actions)
+                }
+                println("  performed ${result.performed} details ${result.details}")
+                result.failed?.let { (a, e) -> println("  failed ${a.key}: ${e.code} ${e.message}") }
+                if (result.skipped.isNotEmpty()) println("  not_done ${result.skipped.map { it.key }} code=${result.stop?.code} reason=${result.stop?.message}")
+                println("  " + game.state(scope.memory()).screen)
+            }
+            // `partyfx`: the battle's effectiveness lines (the active Pokémon, then the switch candidates), like get_state.
+            "partyfx" -> {
+                val state = game.state(scope.memory())
+                val battle = state.battle
+                val data = game.data
+                if (battle == null || data == null) println("  no battle / no game data") else {
+                    battle.battlers.forEach { println("  ${it.ref.wire} ${it.species.name} L${it.level} ${it.hp}/${it.maxHp} volatile=${it.volatile}") }
+                    dev.kotlinds.pokemonclient.data.Matchups.estimate(battle, data).forEach { println("  effectiveness ${it.move} → ${it.target.wire}: ${it.label}") }
+                    dev.kotlinds.pokemonclient.data.Matchups.party(battle, state.party, data).forEach { println("  party_effectiveness ${it.line(battle.isDouble)}") }
+                }
+            }
             "log" -> {
                 recorder.log.since(logCursor).forEach { println("  $it") }
                 logCursor = recorder.log.lastSeq
@@ -321,8 +351,8 @@ private class Bench(
         val memory = scope.memory()
         val raw = HgssReader(memory, HgssVersion.HEARTGOLD_US).read() ?: return
         val state = game.state(memory)
-        val rawLine = raw.party.joinToString(" | ") { "${it.slot}:${it.speciesName} L${it.level} ${it.hp}/${it.maxHp} x${it.exp} ${it.status}${if (it.checksumOk) "" else " CS!"}${if (it.plausible) "" else " IMPL"}" }
-        val shown = state.party.joinToString(" | ") { "${it.slot}:${it.species.name} L${it.level} ${it.hp}/${it.maxHp}" }
+        val rawLine = raw.party.joinToString(" | ") { "${it.slot}:${it.speciesName} L${it.level} ${it.hp}/${it.maxHp} x${it.exp} ${it.status} m=${it.moves.joinToString("/") { m -> "${m.id}:${m.pp}" }}${if (it.checksumOk) "" else " CS!"}${if (it.plausible) "" else " IMPL"}" }
+        val shown = state.party.joinToString(" | ") { "${it.slot}:${it.species.name} L${it.level} ${it.hp}/${it.maxHp} m=${it.moves.joinToString("/") { m -> "${m.move.id.value}:${m.pp}" }}" }
         val line = "${brief(state.screen)}\n    raw  $rawLine\n    show $shown" + state.warnings.joinToString("") { "\n    warn ${it.detail}" }
         if (line != lastWatch) println("  [${console.frame}] $line")
         lastWatch = line

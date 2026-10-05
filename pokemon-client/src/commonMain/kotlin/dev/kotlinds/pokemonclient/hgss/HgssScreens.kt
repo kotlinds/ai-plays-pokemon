@@ -20,6 +20,7 @@ internal object HgssScreens {
         HgssIntroScreens,
         HgssIncomingCall,
         HgssViewerScreens,
+        HgssCutsceneScreens,
     )
 }
 

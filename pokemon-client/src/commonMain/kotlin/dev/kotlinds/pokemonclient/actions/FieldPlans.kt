@@ -9,6 +9,7 @@ import dev.kotlinds.pokemonclient.runtime.kind
 import dev.kotlinds.pokemonclient.state.GameState
 import dev.kotlinds.pokemonclient.state.MenuKind
 import dev.kotlinds.pokemonclient.state.PersonRole
+import dev.kotlinds.pokemonclient.state.Entry
 import dev.kotlinds.pokemonclient.state.Screen
 
 /** Recipes of field actions reached from the start menu (save...). */
@@ -215,8 +216,14 @@ internal object FieldPlans {
      * D-pad when it's off screen (each press re-read). Fails for towns not visited yet.
      */
     private fun flyTarget(context: PlanContext, destination: String, start: GameState, startMap: Int?): Step<dev.kotlinds.pokemonclient.console.TouchPoint> {
+        // `fly:<id>`, the town's label, or its map's name with or without "Town" / "City" ("Cerulean" = "Cerulean City").
+        fun names(e: Entry): Boolean {
+            val id = e.id.removePrefix("fly:").toIntOrNull() ?: return false
+            return matchesRef(destination, "fly", id, e.label) || WorldTravel.sameMapName(e.label, destination) ||
+                context.game.zoneName(id)?.let { WorldTravel.sameMapName(it, destination) } == true
+        }
         fun find(state: GameState) = (state.screen as? Screen.FlyMap)?.entries?.firstOrNull { e ->
-            e.id == destination || (e.id.startsWith("fly:") && matchesRef(destination, "fly", e.id.removePrefix("fly:").toInt(), e.label))
+            e.id == destination || (e.id.startsWith("fly:") && names(e))
         }
         val entry = find(start)
             ?: return Step.Failed(FlyHints.otherRegion(context, destination, startMap) ?: ActionError.InvalidParameter("destination", destination,

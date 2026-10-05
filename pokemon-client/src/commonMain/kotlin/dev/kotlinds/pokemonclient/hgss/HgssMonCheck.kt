@@ -44,6 +44,15 @@ object HgssMonCheck {
             override val detail get() = "$stat $value" + (expected?.let { " (expected ${it.first}..${it.last})" } ?: "")
         }
 
+        /**
+         * Moves no Pokémon can have: an id above the last move, a move after an empty slot, the same move twice, or more
+         * PP than the move's maximum (a reading caught mid-rewrite whose checksum matched by accident, see
+         * [HgssPokemon.decode]: "learned MOVE_57918, forgot Strength").
+         */
+        data class BadMoves(val moves: List<Int>, val pp: List<Int>) : Problem {
+            override val detail get() = "moves ${moves.joinToString("/")} pp ${pp.joinToString("/")}"
+        }
+
         /** Status word with unknown bits or several major conditions. */
         data class BadStatus(val raw: Long) : Problem {
             override val detail get() = "status 0x${raw.toString(16)}"
@@ -52,6 +61,9 @@ object HgssMonCheck {
 
     /** Highest species id of Gen 4 (Arceus). */
     private const val MAX_SPECIES = 493
+
+    /** Highest move id of Gen 4 (Shadow Force, NUM_MOVES in include/constants/moves.h). */
+    private const val MAX_MOVE = 467
 
     /** Highest stat value a Gen 4 Pokémon can have (well above Blissey's 714 HP). */
     private const val MAX_STAT = 999
@@ -70,6 +82,7 @@ object HgssMonCheck {
             add(Problem.BadSpecies(species))
             return@buildList
         }
+        movesProblem(mon)?.let(::add)
         if (mon.party == null) return@buildList
         if (!statusOk(mon.status)) add(Problem.BadStatus(mon.status))
         val info = HgssData.gameData?.species(SpeciesId(species))
@@ -85,6 +98,20 @@ object HgssMonCheck {
         val stats = listOf("atk" to mon.atk, "def" to mon.def, "speed" to mon.speed, "spAtk" to mon.spAtk, "spDef" to mon.spDef)
         stats.filter { (_, v) -> v !in 1..MAX_STAT }.forEach { (name, v) -> add(Problem.BadStat(name, v, null)) }
         if (isEmpty() && info != null && !mon.isEgg && mon.form == 0) addAll(statProblems(mon, info))
+    }
+
+    /**
+     * The moves of [mon] when no Pokémon can know them (see [Problem.BadMoves]): ids in 1..[MAX_MOVE], packed from the
+     * first slot (a Pokémon always knows at least one move), all different, PP within the maximum with the PP Ups.
+     */
+    private fun movesProblem(mon: HgssPokemon.Decoded): Problem.BadMoves? {
+        val moves = (0 until 4).map { mon.move(it) }
+        val pp = (0 until 4).map { mon.movePp(it) }
+        val known = moves.takeWhile { it != 0 }
+        val ok = known.isNotEmpty() && moves.drop(known.size).all { it == 0 } && known.all { it in 1..MAX_MOVE } &&
+            known.toSet().size == known.size &&
+            known.indices.all { i -> HgssData.moveData[known[i]] == null || pp[i] <= HgssPokemon.maxPp(known[i], mon.movePpUps(i)) }
+        return if (ok) null else Problem.BadMoves(moves, pp)
     }
 
     /** Sleep turns (bits 0-2) or one of poison / burn / freeze / paralysis / bad poison, plus the toxic counter. */

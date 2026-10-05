@@ -78,6 +78,12 @@ class Recorder(
     /** First frame of the last shop message ("Here you are! Thank you!"): the clerk's bonus is added after it. */
     private var shopMessageStart: Long? = null
 
+    /** When the game last changed in a way a player would see (text, menu, cursor, position, HP...). */
+    val progress = ProgressClock()
+
+    /** [ProgressClock.key] of the previous state. */
+    private var previousKey: Any? = null
+
     /** The last state decoded by the recorder (null before the first one). */
     val latest: GameState? get() = previous
 
@@ -85,7 +91,14 @@ class Recorder(
     fun onFrame(frame: Long, memory: () -> Memory) {
         if (frame % every != 0L) return
         val state = runCatching { game.state(memory()) }.getOrNull() ?: return
+        val lastSeq = log.lastSeq
         record(frame, previous, state)
+        val key = ProgressClock.key(state)
+        val recorded = log.lastSeq != lastSeq
+        if (key != previousKey || recorded) {
+            progress.progressed(if (recorded) log.since(lastSeq).filterIsInstance<GameEvent.TextShown>().lastOrNull()?.text?.replace('\n', ' ') else null)
+        }
+        previousKey = key
         previous = state
     }
 
@@ -125,7 +138,10 @@ class Recorder(
         // A short transition (a fade while the box stays up) doesn't end the text: it isn't recorded twice. Nor does
         // the yes/no menu shown over that text: once answered, the box shows the question again for a few frames
         // (the nurse's "Would you like to rest your Pokémon?").
-        val askingLastText = screen is Screen.YesNo && lastText?.let { sameText(it, screen.question) } == true
+        // A script's multichoice menu is drawn over the box that keeps its question ("Which PC should be accessed?"):
+        // once a choice is made the box shows it again, not a new text.
+        val askingLastText = (screen is Screen.YesNo && lastText?.let { sameText(it, screen.question) } == true) ||
+            (screen is Screen.ListMenu && screen.kind == dev.kotlinds.pokemonclient.state.MenuKind.MULTICHOICE && lastText != null)
         if (screen !is Screen.Dialogue && pressedText == null && banner == null && screen !is Screen.Animation && !askingLastText) lastText = null
         recordBattleMessage(frame, message)
         if (now.battle == null) lastBattleMessage = null
@@ -151,6 +167,13 @@ class Recorder(
         // Bag: quantities that went up, once they stay up for a moment (see [recordItems]).
         recordItems(frame, before, now)
         recordShopBonus(frame, before.screen, screen)
+
+        // Pokégear cards (not bag items: never an item event).
+        val oldCards = before.player?.pokegearCards
+        val newCards = now.player?.pokegearCards
+        if (oldCards != null && newCards != null) {
+            newCards.filter { it !in oldCards }.forEach { card -> log.append { GameEvent.PokegearUpgraded(it, frame, card) } }
+        }
 
         // Badges.
         val oldBadges = before.player?.badges.orEmpty().toSet()
@@ -273,23 +296,43 @@ class Recorder(
                 }
                 mon.level > was.level -> log.append { GameEvent.LevelUp(it, frame, mon.id, mon.level, mon.displayName) }
             }
-            if (was != null && !mon.isEgg && !was.isEgg) recordMoves(frame, was, mon)
+            // A new moveset is only taken once read the same twice (see [recordMoves]); until then the known one stays.
+            val moves = if (was != null && !mon.isEgg && !was.isEgg) recordMoves(frame, was, mon) else mon.moves
             pastSpecies.getOrPut(mon.id) { mutableSetOf() } += mon.species.id
-            known[mon.id] = if (was != null && mon.level < was.level) mon.copy(level = was.level) else mon
+            known[mon.id] = (if (was != null && mon.level < was.level) mon.copy(level = was.level) else mon).let { if (it.moves == moves) it else it.copy(moves = moves) }
         }
     }
 
-    /** Moves [now] knows that it didn't know as [was]: learned, replacing the one that is gone (if any). */
-    private fun recordMoves(frame: Long, was: PartyMon, now: PartyMon) {
-        if (was.moves.isEmpty() || now.moves.isEmpty()) return
+    /**
+     * Moves [now] knows that it didn't know as [was]: learned, replacing the one that is gone (if any). Returns the
+     * moves to remember. A different set of moves must read the same on two polls in a row before it counts: a reading
+     * caught while the game rewrites the Pokémon (the nurse restoring PP) can pass every check by accident, and must
+     * not make up "learned MOVE_57918, forgot Strength" (then the reverse).
+     */
+    private fun recordMoves(frame: Long, was: PartyMon, now: PartyMon): List<dev.kotlinds.pokemonclient.state.KnownMove> {
+        if (was.moves.isEmpty() || now.moves.isEmpty()) return now.moves
         val before = was.moves.map { it.move.id }.toSet()
         val after = now.moves.map { it.move.id }.toSet()
+        if (before == after) {
+            pendingMoves.remove(now.id)
+            return now.moves
+        }
+        val ids = now.moves.map { it.move.id }
+        if (pendingMoves[now.id] != ids) {
+            pendingMoves[now.id] = ids
+            return was.moves
+        }
+        pendingMoves.remove(now.id)
         val forgotten = was.moves.filter { it.move.id !in after }.toMutableList()
         now.moves.filter { it.move.id !in before }.forEach { learned ->
             val forgot = forgotten.removeFirstOrNull()
             log.append { GameEvent.LearnedMove(it, frame, now.id, now.displayName, learned.move.name, forgot?.move?.name) }
         }
+        return now.moves
     }
+
+    /** A new set of moves read once per Pokémon, waiting for a second identical reading (see [recordMoves]). */
+    private val pendingMoves = mutableMapOf<MonId, List<dev.kotlinds.pokemonclient.state.MoveId>>()
 
     /**
      * New Pokémon in the PC boxes that were never in the party: the game sent them there (a capture or a gift with a

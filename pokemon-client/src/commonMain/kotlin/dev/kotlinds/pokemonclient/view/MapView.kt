@@ -1,6 +1,7 @@
 package dev.kotlinds.pokemonclient.view
 
 import dev.kotlinds.pokemonclient.Direction
+import dev.kotlinds.pokemonclient.state.ExaminableKind
 import dev.kotlinds.pokemonclient.state.FieldObjectKind
 import dev.kotlinds.pokemonclient.state.FieldState
 import dev.kotlinds.pokemonclient.state.TeleportKind
@@ -20,7 +21,7 @@ import kotlinx.serialization.json.put
 /**
  * The text map of the player's surroundings, the same for every game: built from the ROM's [Area] (tiles, warps,
  * signs) and the live [FieldState] (position, people). Everything listed has the id actions take (`warp:N`, `hole:N`,
- * `exit:<direction>`, `person:N`, `item:N`, `sign:N`, `hidden_item:N`) and both absolute coordinates (for `go_to`) and
+ * `exit:<direction>`, `person:N`, `item:N`, `sign:N`, `hidden_item:N`, `examine:N`) and both absolute coordinates (for `go_to`) and
  * relative ones ("3 west, 2 north"). Exits name the destination map and the arrival tile, when [world] is given.
  */
 object MapView {
@@ -28,7 +29,8 @@ object MapView {
     /**
      * Renders the [width] × [height] tiles around the player (the DS screen shows about 15 × 11). [zoneName] names the
      * map a warp leads to, when known; [world] gives the arrival tiles of warps (and the other zones' maps).
-     * [showHidden]: show the hidden items (never seen by the player: walkthrough knowledge, see [Sightings]).
+     * [showHidden]: show the hidden items and the invisible examinables without a cue (never seen by the player:
+     * walkthrough knowledge, see [Sightings]); without it, an examinable with a cue is only "something to examine".
      */
     fun render(
         area: Area,
@@ -49,6 +51,8 @@ object MapView {
         val signs = area.signs.filter { it.zone == field.mapId && it.kind == SignKind.SIGN }
         val hiddenItems = if (!showHidden) emptyList()
         else area.signs.filter { it.zone == field.mapId && it.kind == SignKind.HIDDEN_ITEM && "hidden_item:${it.id}" !in field.pickedUp }
+        // Invisible things that answer A: like hidden items, known only with a walkthrough, unless the game shows a cue.
+        val examinables = field.examinables.filter { showHidden || it.cue }
         fun shown(x: Int, y: Int) = x in left until left + width && y in top until top + height
         val objects = field.objects.filter { shown(it.x, it.y) }
         // The live puzzle: closed gates / shutters, and the tiles that start a teleport, a ride or a lift.
@@ -71,6 +75,7 @@ object MapView {
                         ?: (x to y).takeIf { it in field.activeTriggers }?.let { 'x' }
                         ?: signs.firstOrNull { it.x == x && it.y == y }?.let { 'S' }
                         ?: hiddenItems.firstOrNull { it.x == x && it.y == y }?.let { '$' }
+                        ?: examinables.firstOrNull { it.x == x && it.y == y }?.let { 'e' }
                         ?: area.tile(x, y)?.let { tile -> symbol(tile.kind, tile.blocked) }
                         ?: ' '
                 }
@@ -82,7 +87,8 @@ object MapView {
         return buildJsonObject {
             put("map", JsonArray(listOf("     " + (left until left + width).joinToString(" ") { (it % 10).toString() }).plus(rows).map(::JsonPrimitive)))
             put("map_origin", "x $left..${left + width - 1}, y $top..${top + height - 1} (columns show x mod 10)")
-            put("legend", used.mapNotNull { c -> LEGEND[c]?.let { "$c $it" } }.joinToString(" · "))
+            put("legend", "a partial view: only the $width×$height tiles around you (see map_origin), the map goes on beyond " +
+                "(exits and people_off_screen list what is further) · " + used.mapNotNull { c -> LEGEND[c]?.let { "$c $it" } }.joinToString(" · "))
             levels(area, field, left, top, width, height)?.let { (grid, mine) ->
                 put("levels", JsonArray(grid.map(::JsonPrimitive)))
                 put("levels_legend", "height level of each walkable tile (0 = lowest in view; you are on level $mine); a level is left only by stairs or slopes, never by stepping off an edge. b = a bridge (two levels on the tile), blank = not walkable")
@@ -126,6 +132,11 @@ object MapView {
             if (nearSigns.isNotEmpty()) put("signs", JsonArray(nearSigns.map { s -> JsonPrimitive("sign:${s.id} at ${s.x},${s.y} (${relative(field, s.x, s.y)})") }))
             if (hiddenItems.isNotEmpty()) put("hidden_items", JsonArray(hiddenItems.sortedBy { distance(field, it.x, it.y) }.map { s ->
                 JsonPrimitive("hidden_item:${s.id} at ${s.x},${s.y} (${relative(field, s.x, s.y)}): face it and press A (interact)")
+            }))
+            if (examinables.isNotEmpty()) put("examinables", JsonArray(examinables.sortedBy { distance(field, it.x, it.y) }.map { e ->
+                // Without a walkthrough (a cue only), what it is stays unknown.
+                val what = if (showHidden) e.label + (if (e.kind == ExaminableKind.ITEM) " (examining picks it up)" else "") else "something to examine"
+                JsonPrimitive("${e.id} $what at ${e.x},${e.y} (${relative(field, e.x, e.y)}): nothing is drawn there and it blocks the tile; face it and press A (interact)")
             }))
         }
     }
@@ -240,7 +251,7 @@ object MapView {
         '|' to "waterfall", '@' to "whirlpool", '_' to "ice (slides)", '!' to "lava", 'H' to "ladder", '=' to "counter (talk across it)",
         'C' to "PC", 'E' to "exit / door (see exits)", '*' to "arrow tile (pushes)", '+' to "stop tile (ends a push)", '%' to "rocky wall (Rock Climb)", '?' to "unknown floor", 'P' to "person (see people)",
         ':' to "bridge (walk on it; water or a lower floor under it)", 'O' to "hole (you fall to the floor below, see exits)",
-        '$' to "hidden item (see hidden_items)",
+        '$' to "hidden item (see hidden_items)", 'e' to "something invisible to examine (see examinables)",
         'W' to "teleport tile: a pad, pit or cart station that moves you (see puzzle.teleports)",
         'L' to "lift: stepping on it takes you to the other floor (see puzzle)", 'G' to "closed gate / shutter (see puzzle)",
         'f' to "your Pokémon (follows you)", 'o' to "item ball (see items)", 'R' to "obstacle", 'S' to "sign (see signs)",

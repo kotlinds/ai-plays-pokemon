@@ -14,6 +14,8 @@ import dev.kotlinds.pokemonclient.console.Platform
 import dev.kotlinds.pokemonclient.runtime.ActionScope
 import dev.kotlinds.pokemonclient.runtime.InputProbe
 import dev.kotlinds.pokemonclient.state.Awaiting
+import dev.kotlinds.pokemonclient.state.ExaminableKind
+import dev.kotlinds.pokemonclient.state.FieldExaminable
 import dev.kotlinds.pokemonclient.state.FieldObject
 import dev.kotlinds.pokemonclient.state.FieldObjectKind
 import dev.kotlinds.pokemonclient.state.FieldState
@@ -149,10 +151,33 @@ class PuzzleSolvingTest {
         val revealed = PlanContext(ActionScope(game.console, game.inputProbe), game)
         assertEquals(3 to 0, MovePlans.resolve(revealed, "hidden_item:3", null, null)?.let { it.x to it.y })
     }
+
+    /** The Cerulean Gym's Machine Part (an invisible object): a target only when revealed, and a wall either way. */
+    @Test
+    fun invisibleExaminablesAreTargetsOnlyWhenRevealedAndBlockTheirTile() {
+        val map = area("....", "....")
+        val part = FieldExaminable("examine:8", "Machine Part", ExaminableKind.ITEM, 2, 1)
+        val game = PuzzleGame(map, 0, 0, null, listOf(part))
+        val hidden = PlanContext(ActionScope(game.console, game.inputProbe), game, settings = ActionSettings(revealHidden = false))
+        assertNull(MovePlans.resolve(hidden, "examine:8", null, null))
+        val failed = assertIs<ActionOutcome.Failed>(MovePlans.interact.run(GameAction.Interact("examine:8"), hidden))
+        assertFalse("examine:8" in assertIs<ActionError.InvalidParameter>(failed.error).allowed)
+        val revealed = PlanContext(ActionScope(game.console, game.inputProbe), game)
+        val target = assertIs<MovePlans.Target>(MovePlans.resolve(revealed, "examine:8", null, null))
+        assertEquals(2 to 1, target.x to target.y)
+        // Examined from a tile next to it, never from the tile itself.
+        assertTrue(target.isGoal!!(Node(2, 0)) && !target.isGoal!!(Node(2, 1)) && !target.isGoal!!(Node(0, 0)))
+        // A cue makes it known without a walkthrough.
+        val cued = PuzzleGame(map, 0, 0, null, listOf(part.copy(cue = true)))
+        assertEquals(2 to 1, MovePlans.resolve(PlanContext(ActionScope(cued.console, cued.inputProbe), cued, settings = ActionSettings(revealHidden = false)), "examine:8", null, null)?.let { it.x to it.y })
+        // Its tile is a wall: the walk to 3,1 goes round it by the top row.
+        assertIs<ActionOutcome.Done>(MovePlans.goTo.run(GameAction.GoTo(3, 1, null), revealed))
+        assertFalse((2 to 1) in game.visited, game.visited.toString())
+    }
 }
 
 /** A field where holding a direction moves the player one tile every few frames (walls block), with a [puzzle]. */
-private class PuzzleGame(val area: Area, var x: Int, var y: Int, val puzzle: PuzzleState?) : PokemonGame {
+private class PuzzleGame(val area: Area, var x: Int, var y: Int, val puzzle: PuzzleState?, val examinables: List<FieldExaminable> = emptyList()) : PokemonGame {
     var facing = Direction.SOUTH
     val visited = mutableListOf(x to y)
     private var held: Set<Button> = emptySet()
@@ -165,7 +190,7 @@ private class PuzzleGame(val area: Area, var x: Int, var y: Int, val puzzle: Puz
     override val inputProbe = InputProbe { held }
     override fun observe(memory: Memory) = Observation(GameMode.UNKNOWN, null, "", JsonObject(emptyMap()))
     override fun state(memory: Memory): GameState {
-        val field = FieldState(1, "test", x, y, 0, facing, MovementMode.WALK, moving = false, puzzle = puzzle)
+        val field = FieldState(1, "test", x, y, 0, facing, MovementMode.WALK, moving = false, puzzle = puzzle, examinables = examinables)
         return GameState(0, Screen.Overworld(null, Awaiting.INPUT), null, emptyList(), null, null, field)
     }
 

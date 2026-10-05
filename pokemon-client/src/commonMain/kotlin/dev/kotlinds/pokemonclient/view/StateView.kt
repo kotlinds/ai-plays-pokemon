@@ -7,6 +7,8 @@ import dev.kotlinds.pokemonclient.state.Cursor
 import dev.kotlinds.pokemonclient.state.GameState
 import dev.kotlinds.pokemonclient.state.MajorStatus
 import dev.kotlinds.pokemonclient.state.PartyMon
+import dev.kotlinds.pokemonclient.state.PokegearRadio
+import dev.kotlinds.pokemonclient.state.RadioStation
 import dev.kotlinds.pokemonclient.state.PuzzleState
 import dev.kotlinds.pokemonclient.state.PuzzleTile
 import dev.kotlinds.pokemonclient.state.Screen
@@ -111,11 +113,42 @@ object StateView {
                 screen.exit.button?.let { put("exit", "press ${it.name.lowercase()}") }
                 screen.exit.touch?.let { put("exit", "touch ${it.x},${it.y}") }
                 if (screen.details.isNotEmpty()) put("details", JsonArray(screen.details.map(::JsonPrimitive)))
+                screen.radio?.let { put("radio", radio(it)) }
+                if (screen.apps.isNotEmpty()) {
+                    put("apps", JsonArray(screen.apps.map { a ->
+                        JsonPrimitive("${a.id} = ${a.label}" + (a.touch?.let { " (touch ${it.x},${it.y})" } ?: "") + if (a.selectable) "" else " (locked)")
+                    }))
+                }
             }
+            is Screen.Animation -> screen.hint?.let { put("hint", it) }
             is Screen.Unknown -> screen.hint?.let { put("hint", it) }
             is Screen.Intro -> put("detail", screen.detail)
             else -> Unit
         }
+    }
+
+    /**
+     * The Pokégear radio: band, what is tuned and airs, the dial's channels with the point to touch for each (ids are
+     * the language-independent [RadioStation.wire] ids `tune_radio` takes).
+     */
+    fun radio(radio: PokegearRadio): JsonObject = buildJsonObject {
+        put("band", radio.band.name.lowercase())
+        val tuned = radio.tuned?.let { c -> radio.channels.firstOrNull { it.index == c } }
+        put("tuned", when {
+            tuned != null -> "channel ${tuned.index} (" + (if (radio.clear) "clear" else "static") + ")"
+            radio.channels.isEmpty() -> "no signal here"
+            else -> "between channels: nothing"
+        })
+        radio.station?.let { put("station", it.wire) }
+        radio.title?.let { put("title", it) }
+        radio.host?.let { put("host", it) }
+        radio.line?.let { put("text", it) }
+        radio.playing?.let { put("music_playing", it.wire) }
+        put("cursor", "${radio.cursor.x},${radio.cursor.y}" + if (radio.inAppBar) " (the app bar has the cursor)" else "")
+        put("channels", JsonArray(radio.channels.map { c ->
+            JsonPrimitive("channel ${c.index}: ${c.stations.joinToString(" / ") { it.wire }} at ${c.touch.x},${c.touch.y} (clear within ${c.clearRadius} px)")
+        }))
+        put("hint", "tune_radio station:<id> tunes the dial (presets for channels 0-3, a drag of the cursor otherwise)")
     }
 
     /** One party Pokémon on one line-ish object. */
@@ -183,7 +216,12 @@ object StateView {
             put("money", p.money)
             put("badges", JsonArray(p.badges.map(::JsonPrimitive)))
             p.playTime?.let { put("play_time", it.toString()) }
+            if (p.momParcels.isNotEmpty()) {
+                put("mom_parcels", "Mom bought " + p.momParcels.joinToString { "${it.item.name} x${it.quantity}" } +
+                    " for you: the delivery man standing in any Poké Mart hands it (talk to him, one parcel per visit)")
+            }
         }
+        state.field?.radioMusic?.let { put("radio_music", "${it.wire} (the Pokégear radio keeps playing it)") }
         if (state.warnings.isNotEmpty()) put("warnings", JsonArray(state.warnings.map { JsonPrimitive(it.detail) }))
     }
 

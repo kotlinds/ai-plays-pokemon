@@ -18,8 +18,12 @@ import dev.kotlinds.pokemonclient.state.Screen
  */
 internal object PartyBagPlans {
 
-    /** Moves [GameAction.ReorderParty.mon] to a position: party → mon → SWITCH → the mon at that position. */
+    /**
+     * Moves [GameAction.ReorderParty.mon] to a position: party → mon → SWITCH → the mon at that position. With an
+     * [GameAction.ReorderParty.order], every position in turn in the same party session (see [reorderWhole]).
+     */
     val reorderParty = ActionPlan<GameAction.ReorderParty> { action, context ->
+        if (action.order.isNotEmpty()) return@ActionPlan reorderWhole(action.order, context)
         val state = context.state()
         val target = state.party.getOrNull(action.position - 1)
             ?: return@ActionPlan ActionOutcome.Failed(ActionError.InvalidParameter("position", action.position.toString(), (1..state.party.size).map(Int::toString)))
@@ -36,6 +40,44 @@ internal object PartyBagPlans {
             if (moved == action.mon) ActionOutcome.Done() else ActionOutcome.Failed(ActionError.Timeout("the party order didn't change as expected"))
         }
     }
+
+    /**
+     * Puts the party in [order] (the Pokémon left out keep the remaining places): in one party session, for each position
+     * whose Pokémon isn't the wanted one, mon → SWITCH → the Pokémon at that position. Refused before anything is pressed
+     * when an id isn't in the party; checked on the final order.
+     */
+    private fun reorderWhole(order: List<MonId>, context: PlanContext): ActionOutcome {
+        val party = context.state().party
+        order.firstOrNull { id -> party.none { it.id == id } }?.let { missing ->
+            return ActionOutcome.Failed(ActionError.InvalidParameter("order", missing.toString(), party.map { "${it.id} = ${it.displayName}" }))
+        }
+        if (party.take(order.size).map { it.id } == order) return ActionOutcome.Done("already in that order")
+        var step: Step<GameState> = openParty(context)
+        for ((position, wanted) in order.withIndex()) {
+            step = step.andThen { now ->
+                val current = now.party.getOrNull(position)
+                if (current == null || current.id == wanted) return@andThen Step.Done(now)
+                context.navigator.choose(Screen.PartyGrid::class, "the Pokémon to move") { it.id == wanted.toString() }.andThen {
+                    context.navigator.choose(Screen.ContextMenu::class, "SWITCH") { it.id == "option:switch" }
+                }.andThen {
+                    context.navigator.choose(Screen.PartyGrid::class, "position ${position + 1}") { it.id == current.id.toString() }
+                }.andThen {
+                    // The two Pokémon slide to their new places: the party order changes at the end of the animation.
+                    val swapped = context.scope.stepUntil(SWAP_FRAMES) { memory -> context.game.state(memory).party.getOrNull(position)?.id == wanted }
+                    if (swapped) Step.Done(context.navigator.settle())
+                    else Step.Failed(ActionError.Timeout("$wanted didn't come to position ${position + 1}"))
+                }
+            }
+        }
+        return step.then {
+            closeToOverworld(context)
+            val now = context.state().party.take(order.size).map { it.id }
+            if (now == order) ActionOutcome.Done() else ActionOutcome.Failed(ActionError.Timeout("the party order is ${now.joinToString()} instead of ${order.joinToString()}"))
+        }
+    }
+
+    /** Frames the party screen's swap animation may take before the new order shows in the party. */
+    private const val SWAP_FRAMES = 300
 
     /**
      * Takes the item held by a Pokémon: party → mon → ITEM → TAKE. For Mail (MAIL → TAKE), the game then asks "Send the

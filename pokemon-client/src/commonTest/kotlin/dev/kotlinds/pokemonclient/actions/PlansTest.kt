@@ -84,6 +84,54 @@ class PlansTest {
     }
 
     @Test
+    fun ssReorderPartyWithAWholeOrderSwapsEachPositionInOneSession() {
+        val ui = Ui(listOf(mon(1), mon(2), mon(3), mon(4)))
+        var moving: String? = null
+        ui.onA = { screen, id ->
+            when {
+                screen is Screen.ListMenu && id == "option:pokemon" -> grid(ui.party)
+                screen is Screen.PartyGrid && moving == null -> { moving = id; menu("option:summary", "option:switch", "option:item") }
+                screen is Screen.ContextMenu && id == "option:switch" -> grid(ui.party, PartyPurpose.SWITCH)
+                screen is Screen.PartyGrid -> {
+                    val a = ui.party.indexOfFirst { it.id.toString() == moving }
+                    val b = ui.party.indexOfFirst { it.id.toString() == id }
+                    ui.party = ui.party.toMutableList().also { it[a] = ui.party[b]; it[b] = ui.party[a] }
+                    moving = null
+                    grid(ui.party)
+                }
+                else -> screen
+            }
+        }
+        val action = GameAction.ReorderParty(MonId(3, 1), 1, order = listOf(MonId(3, 1), MonId(1, 1), MonId(2, 1)))
+        assertIs<ActionOutcome.Done>(PartyBagPlans.reorderParty.run(action, ui.game.context()))
+        assertEquals(listOf(3L, 1L, 2L, 4L), ui.party.map { it.id.personality })
+        assertEquals(1, ui.game.presses.count { it == Button.X }, "one party session")
+        assertIs<Screen.Overworld>(ui.game.screen)
+    }
+
+    @Test
+    fun ssReorderPartyParsesAWholeOrder() {
+        val json = kotlinx.serialization.json.Json.parseToJsonElement(
+            """{"type":"reorder_party","order":["mon:00000003.00000001","mon:00000001.00000001"]}""",
+        ) as kotlinx.serialization.json.JsonObject
+        val action = assertIs<GameAction.ReorderParty>(ActionRegistry.of().parse(json, ActionMode.ASSISTED).getOrThrow())
+        assertEquals(listOf(MonId(3, 1), MonId(1, 1)), action.order)
+        val twice = kotlinx.serialization.json.Json.parseToJsonElement(
+            """{"type":"reorder_party","order":["mon:00000003.00000001","mon:00000003.00000001"]}""",
+        ) as kotlinx.serialization.json.JsonObject
+        assertTrue(ActionRegistry.of().parse(twice, ActionMode.ASSISTED).isFailure)
+    }
+
+    @Test
+    fun ssReorderPartyRefusesAnOrderWithAPokemonNotInTheParty() {
+        val ui = Ui(listOf(mon(1), mon(2)))
+        val action = GameAction.ReorderParty(MonId(2, 1), 1, order = listOf(MonId(2, 1), MonId(9, 1)))
+        val outcome = assertIs<ActionOutcome.Failed>(PartyBagPlans.reorderParty.run(action, ui.game.context()))
+        assertIs<ActionError.InvalidParameter>(outcome.error)
+        assertTrue(ui.game.presses.isEmpty())
+    }
+
+    @Test
     fun reorderPartyRefusesAPositionOutsideTheParty() {
         val ui = Ui(listOf(mon(1), mon(2)))
         val outcome = assertIs<ActionOutcome.Failed>(PartyBagPlans.reorderParty.run(GameAction.ReorderParty(MonId(2, 1), 5), ui.game.context()))

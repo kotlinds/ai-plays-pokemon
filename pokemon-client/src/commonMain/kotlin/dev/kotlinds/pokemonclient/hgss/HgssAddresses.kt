@@ -57,7 +57,7 @@ object HgssAddresses {
         64 to "hall_of_fame", 68 to "move_relearner", 69 to "geonet_globe", 71 to "trade", 76 to "credits",
         78 to "certificates", 87 to "scratch_off_cards", 95 to "hatch_egg", 96 to "pokeathlon", 100 to "pokegear",
         101 to "town_map", 102 to "easy_chat", 106 to "legendary_cinematic", 109 to "photo_album", 110 to "alph_puzzle",
-        103 to "mailbox", 111 to "bug_contest_swap", 113 to "unown_report", 122 to "voltorb_flip",
+        103 to "mailbox", 105 to "ship_crossing", 111 to "bug_contest_swap", 113 to "unown_report", 122 to "voltorb_flip",
     )
 
     // ------------------------------------------------------------------------------------------------
@@ -136,6 +136,9 @@ object HgssAddresses {
     const val MO_TYPE = 0x18L
     const val MO_EVENT_FLAG = 0x1CL
     const val MO_SCRIPT_ID = 0x20L
+
+    /** [MO_SCRIPT_ID] of an object carried over from the zone just left ([MO_EVENT_FLAG] then holds that zone). */
+    const val MO_SCRIPT_CARRIED = 0xFFFF
     const val MO_FACING = 0x28L              // DIR_NORTH 0, SOUTH 1, WEST 2, EAST 3
     const val MO_PARAM0 = 0x38L              // param[0]: for a trainer (type 1), its sight range in tiles
     const val MO_PREVIOUS_X = 0x58L

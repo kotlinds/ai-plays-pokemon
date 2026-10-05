@@ -86,6 +86,10 @@ data class PlayerInfo(
      * HGSS: 0..7 Johto (Zephyr .. Rising), 8..15 Kanto (Boulder .. Earth). Empty when unknown.
      */
     val badgeIds: Set<Int> = emptySet(),
+    /** The cards the Pokégear has gained (Map, Radio, Expansion), null when unknown. */
+    val pokegearCards: Set<PokegearCard>? = null,
+    /** Items Mom bought that wait at a Poké Mart's delivery man. */
+    val momParcels: List<MomParcel> = emptyList(),
 )
 
 /** A play time counter. */
@@ -134,6 +138,13 @@ data class FieldState(
     val activeTriggers: Set<Pair<Int, Int>> = emptySet(),
     /** Whether the bicycle can be ridden on this map, null when unknown. */
     val bikeAllowed: Boolean? = null,
+    /**
+     * Invisible things of the map that answer A ([FieldExaminable]), present now (gone once their event is done).
+     * Their tiles block like walls. Walkthrough knowledge unless they have a cue: the views decide what to show.
+     */
+    val examinables: List<FieldExaminable> = emptyList(),
+    /** The radio programme whose music plays over the field (the Pokégear radio left on), null when none. */
+    val radioMusic: RadioStation? = null,
 )
 
 /** A person or object standing on the map. */

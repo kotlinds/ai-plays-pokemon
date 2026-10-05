@@ -86,8 +86,9 @@ class HgssGame(private val version: HgssVersion, rom: NdsRom? = null) : PokemonG
         val triggers = area?.triggers.orEmpty().filter { it.zone == field.mapId && reader.variable(it.variable) == it.value }
             .flatMap { t -> (t.x until t.x + maxOf(1, t.width)).flatMap { x -> (t.y until t.y + maxOf(1, t.height)).map { y -> x to y } } }
             .toSet()
-        if (puzzle == null && pickedUp.isEmpty() && triggers.isEmpty()) return mapped
-        return mapped.copy(field = field.copy(puzzle = puzzle, pickedUp = pickedUp, activeTriggers = triggers))
+        val examinables = HgssExaminables.of(state.surroundings?.objects.orEmpty(), field.mapId, world ?: HgssData.world, reader::flag)
+        if (puzzle == null && pickedUp.isEmpty() && triggers.isEmpty() && examinables.isEmpty()) return mapped
+        return mapped.copy(field = field.copy(puzzle = puzzle, pickedUp = pickedUp, activeTriggers = triggers, examinables = examinables))
     }
 
     override fun observe(memory: Memory): Observation {

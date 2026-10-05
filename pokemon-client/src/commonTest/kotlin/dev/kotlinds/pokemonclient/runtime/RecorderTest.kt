@@ -95,6 +95,31 @@ class RecorderTest {
         assertEquals(listOf(TextSource.FIELD to question, TextSource.FIELD to ok), fieldTexts(screens))
     }
 
+    /**
+     * Live (Indigo Plateau Center, `pc` deposit + withdraw): the box keeps "Which PC should be accessed?" under the
+     * script's multichoice and shows it again once a choice is made: once per time the game asks (NOTES.md, Kanto: x7).
+     */
+    @Test
+    fun `the PC question is recorded once around its multichoice menu`() {
+        val question = "Which PC should be accessed?"
+        val menu = Screen.ListMenu(
+            dev.kotlinds.pokemonclient.state.MenuKind.MULTICHOICE,
+            listOf(dev.kotlinds.pokemonclient.state.Entry("option:0", "BILL'S PC"), dev.kotlinds.pokemonclient.state.Entry("option:1", "SWITCH OFF")),
+            dev.kotlinds.pokemonclient.state.Cursor.At(0), dev.kotlinds.pokemonclient.state.Topology.vertical(2),
+        )
+        val session = listOf(
+            Screen.Dialogue(TextSource.FIELD, null, question, Awaiting.INPUT),
+            Screen.Animation(AnimationKind.TRANSITION),
+            menu,
+            Screen.Dialogue(TextSource.FIELD, null, question, Awaiting.INPUT),
+            menu,
+            Screen.Dialogue(TextSource.FIELD, null, question, Awaiting.INPUT),
+            Screen.Overworld(null, Awaiting.INPUT),
+        )
+        // Asked again later (back from the boxes): recorded again, once.
+        assertEquals(listOf(TextSource.FIELD to question, TextSource.FIELD to question), fieldTexts(session + session))
+    }
+
     @Test
     fun `a sign banner is recorded once`() {
         val sign = "Goldenrod City Game Corner"

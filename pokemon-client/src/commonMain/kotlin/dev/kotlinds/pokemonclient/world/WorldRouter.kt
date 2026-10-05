@@ -49,7 +49,9 @@ class WorldRouter(
         val infos = HashMap<Area, AreaInfo>()
         fun info(area: Area, zone: Int): AreaInfo = infos.getOrPut(area) {
             val zones = if (area.zoneBounds.isEmpty()) setOf(zone) else area.zoneBounds.keys
-            val links = zones.flatMap { WorldLinks.links(world, area, it) }.associateBy { it.x to it.y }
+            // Pads to the same map are teleports of the area's pathfinder (see [staticOverlay]), not links.
+            val pads = zones.flatMap { z -> WorldLinks.sameZoneTeleports(area, z).map { it.fromX to it.fromY } }.toSet()
+            val links = zones.flatMap { WorldLinks.links(world, area, it) }.filterNot { (it.x to it.y) in pads }.associateBy { it.x to it.y }
             AreaInfo(Pathfinder(area, overlayFor(zone, area)), links, goalTiles(area))
         }
         val startPlace = Place(startArea, start)
@@ -124,7 +126,7 @@ class WorldRouter(
         /**
          * What is known of [area] without seeing it: its obstacles (boulders, rocks, trees) where its events place
          * them, and its warp pads ([Area.scriptWarps]: stepping on the trigger takes the player to the pad's
-         * destination), assumed active.
+         * destination, assumed active; warps to the same map, [WorldLinks.sameZoneTeleports]).
          */
         fun staticOverlay(area: Area): Overlay = Overlay(
             objects = area.people.filter { it.obstacle != null }.map { LiveObject(it.x, it.y, it.facing, clearedBy = it.obstacle) },
@@ -133,8 +135,13 @@ class WorldRouter(
                 (trigger.x until trigger.x + maxOf(1, trigger.width)).flatMap { x ->
                     (trigger.y until trigger.y + maxOf(1, trigger.height)).map { y -> TeleportLink(x, y, pad.x, pad.y) }
                 }
-            },
+            } + sameZoneTeleports(area),
         )
+
+        /** The warps of every zone of [area] that lead to the same zone ([WorldLinks.sameZoneTeleports]). */
+        fun sameZoneTeleports(area: Area): List<TeleportLink> =
+            (if (area.zoneBounds.isEmpty()) area.warps.map { it.zone }.distinct() else area.zoneBounds.keys.toList())
+                .flatMap { WorldLinks.sameZoneTeleports(area, it) }
 
         /** A warp or a fall takes a few seconds (fade): worth about this many steps. */
         const val LINK_COST = 10

@@ -103,6 +103,35 @@ internal object HgssScripts {
         return start + 2 <= file.size && u16(file, start) == END_OPCODE
     }
 
+    /**
+     * The item event script [scriptId] (1-based) of [file] gives, or null: the `ItemVars item, quantity` of an item
+     * gift (`SetVar VAR_SPECIAL_x8004, item`) followed by `CallStd std_obtain_item_verbose` / `std_give_item_verbose`
+     * before the next script starts (the Cerulean Gym's Machine Part, scr_seq_T04GYM0101_005).
+     */
+    fun givenItem(file: ByteArray, scriptId: Int): Int? {
+        val starts = scriptStarts(file)
+        val start = starts.getOrNull(scriptId - 1) ?: return null
+        val end = minOf(starts.filter { it > start }.minOrNull() ?: file.size, start + MAX_ITEM_SCAN, file.size)
+        var item: Int? = null
+        for (o in start..end - 4) {
+            if (o + 6 <= end && u16(file, o) == SETVAR_OPCODE && u16(file, o + 2) == VAR_ITEM) item = u16(file, o + 4)
+            if (item != null && u16(file, o) == CALLSTD_OPCODE && u16(file, o + 2) in ITEM_GIFT_STDS) return item
+        }
+        return null
+    }
+
+    /** `CallStd` (script command 20, asm/macros/script.inc). */
+    private const val CALLSTD_OPCODE = 20
+
+    /** `VAR_SPECIAL_x8004`: the item of `ItemVars`. */
+    private const val VAR_ITEM = 0x8004
+
+    /** `std_obtain_item_verbose` (2008), `std_give_item_verbose` (2033): include/constants/std_script.h. */
+    private val ITEM_GIFT_STDS = setOf(2008, 2033)
+
+    /** An item gift script (message, bag check, gift, hide the objects) is short. */
+    private const val MAX_ITEM_SCAN = 0x80
+
     /** `End` (script command 2). */
     private const val END_OPCODE = 2
     private const val SETVAR_OPCODE = 41

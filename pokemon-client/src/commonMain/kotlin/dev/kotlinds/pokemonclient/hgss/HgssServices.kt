@@ -26,9 +26,13 @@ internal class HgssServices {
             storage = runCatching { boxes.read(mem, save) }.getOrNull(),
             options = runCatching { save.options() }.getOrNull(),
             startMenu = runCatching { save.startMenu() }.getOrNull(),
+            player = mapped.player?.copy(
+                pokegearCards = runCatching { HgssPokegearSave.cards(mem, save) }.getOrNull(),
+                momParcels = runCatching { HgssPokegearSave.momParcels(mem, save) }.getOrNull().orEmpty(),
+            ),
         )
         val field = withSave.field ?: return withSave
-        val objects = raw.surroundings?.objects.orEmpty().associateBy { "person:${it.id}" }
+        val objects = raw.surroundings?.objects.orEmpty().associateBy { HgssObjectIds.idOf(it, raw.location?.mapId) }
         val badges = withSave.player?.badges?.size ?: 0
         val badgeIds = raw.story?.badges
         return withSave.copy(
@@ -36,6 +40,7 @@ internal class HgssServices {
                 flyAllowed = HgssData.world?.header(field.mapId)?.flyAllowed,
                 hasPc = hasPc(field.mapId),
                 bikeAllowed = HgssData.world?.header(field.mapId)?.bikeAllowed,
+                radioMusic = HgssRadio.playing(mem),
                 objects = field.objects.map { o -> objects[o.id]?.let { info -> enrichObject(o, info, field.mapId, badges, save, badgeIds) } ?: o },
             ),
         )

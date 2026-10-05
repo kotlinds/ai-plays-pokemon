@@ -57,6 +57,21 @@ object WorldLinks {
     }
 
     /**
+     * Warps of [zone] leading to [zone] itself (the Saffron Gym's warp pads, Diglett's Cave's ladders between the two
+     * halves of its map): stepping on one moves the player elsewhere on the same map, so routes take them as
+     * [TeleportLink]s (to the destination warp's tile) rather than as ways out. Warps taken with a press on them (exit
+     * mats, stairs) are left out: a teleport fires on entering the tile.
+     */
+    fun sameZoneTeleports(area: Area, zone: Int): List<TeleportLink> = sameZoneWarps(area, zone).mapNotNull { w ->
+        if (w.exitDirection != null) return@mapNotNull null
+        val arrival = area.warps.firstOrNull { it.zone == zone && it.id == w.targetWarp } ?: return@mapNotNull null
+        TeleportLink(w.x, w.y, arrival.x, arrival.y)
+    }
+
+    /** Warps of [zone] whose destination is [zone] itself (see [sameZoneTeleports]). */
+    fun sameZoneWarps(area: Area, zone: Int): List<Warp> = area.warps.filter { it.zone == zone && it.targetZone == zone }
+
+    /**
      * The edges of [zone] towards the other zones of [area], grouped by direction and neighbour. Only edges the
      * player can cross: both tiles free (water counts, with [MapConnection.byWater]).
      */

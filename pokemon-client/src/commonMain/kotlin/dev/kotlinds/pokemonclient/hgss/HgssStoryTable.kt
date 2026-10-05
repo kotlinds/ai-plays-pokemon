@@ -467,7 +467,7 @@ object HgssStoryTable {
             Or(atLeast(Vars.ROUTE_24_ROCKET, 3), flag(Flags.RESTORED_POWER)),
         ),
         HgssStoryStep(
-            "kanto:machine_part", "Get the Machine Part hidden in the Cerulean City Gym's pool (examine the middle of the pool)",
+            "kanto:machine_part", "Get the Machine Part hidden in the Cerulean City Gym: it lies on the pool's left edge by the buoys (tiles 3,10 and 4,10, nothing drawn there): stand north of it (4,9), face south and press A (examine:N in examinables)",
             Or(atLeast(Vars.ROUTE_24_ROCKET, 4), flag(Flags.RESTORED_POWER)),
         ),
         HgssStoryStep("kanto:restore_power", "Bring the Machine Part back to the Power Plant manager", flag(Flags.RESTORED_POWER)),

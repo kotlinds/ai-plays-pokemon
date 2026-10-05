@@ -146,9 +146,9 @@ class HgssStateMapper {
                     },
                     moving = l.moving,
                     trainerEncounter = state.dialogue?.engagedTrainer != null,
-                    objects = state.surroundings?.objects.orEmpty().filterNot { it.hidden }.map { o ->
+                    objects = state.surroundings?.objects.orEmpty().filterNot { it.hidden || HgssObjectIds.isProp(it, l.mapId) }.map { o ->
                         FieldObject(
-                            id = "person:${o.id}",
+                            id = HgssObjectIds.idOf(o, l.mapId),
                             label = o.label,
                             kind = when (o.kind) {
                                 "follower" -> FieldObjectKind.FOLLOWER
@@ -409,6 +409,7 @@ class HgssStateMapper {
                 heldItem = battler.heldItem?.takeIf { battler.heldItemId != 0 }?.let { Named(ItemId(battler.heldItemId), it) },
                 abilityRevealed = HgssStatuses.abilityAnnounced(battler.announceFlags, battler.counters),
                 catchRate = if (b.isWild && !ref.isPlayerSide) HgssData.gameData?.species(SpeciesId(battler.species))?.catchRate else null,
+                personality = battler.personality,
             ).also { lastGoodBattlers[ref] = battler.personality to it }
         }
         val bySlot = party.associateBy { it.slot }

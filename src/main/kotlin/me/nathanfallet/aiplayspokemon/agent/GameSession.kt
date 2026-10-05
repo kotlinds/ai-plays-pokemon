@@ -6,7 +6,8 @@ import dev.kotlinds.pokemonclient.data.Matchups
 import dev.kotlinds.pokemonclient.PokemonGame
 import dev.kotlinds.pokemonclient.actions.ActionError
 import dev.kotlinds.pokemonclient.actions.ActionMode
-import dev.kotlinds.pokemonclient.actions.ActionChains
+import dev.kotlinds.pokemonclient.actions.ChainLimits
+import dev.kotlinds.pokemonclient.actions.ChainRunner
 import dev.kotlinds.pokemonclient.actions.ActionOutcome
 import dev.kotlinds.pokemonclient.actions.ActionRegistry
 import dev.kotlinds.pokemonclient.actions.ActionSettings
@@ -95,6 +96,9 @@ class GameSession(
     /** The events the agent hasn't received yet (kept until a response carrying them is delivered). */
     private val feed = EventFeed(recorder.log, autoConfirm = !confirmDelivery)
 
+    /** When the game last made progress (the recorder's clock): long chains and progress notifications use it. */
+    val progress: dev.kotlinds.pokemonclient.runtime.ProgressClock get() = recorder.progress
+
     /** The last response reached the agent: what it carried won't be repeated (see `confirmDelivery`). */
     fun confirmDelivered() = feed.confirm()
 
@@ -138,58 +142,50 @@ class GameSession(
     suspend fun act(action: GameAction, expectedVersion: Long? = lastServedVersion): JsonObject = act(listOf(action), expectedVersion)
 
     /**
-     * Executes [actions] one after the other (the first one checked against [expectedVersion]), stopping at the
-     * first failure, or before starting a step once [budgetMillis] have passed (so the agent's call doesn't time out).
-     * One response for the whole sequence: `performed` lists every step done, and the messages / events cover all
-     * of them (nothing said by the game between two steps is lost).
+     * Executes [requested] one after the other (the first one checked against [expectedVersion]) as one chain
+     * ([ChainRunner]): it stops at the first failure, when the battle changed under it (the foe replaced or fainted, one
+     * of the player's Pokémon fainted), or before a step once [limits] are reached (no progress for a while, or the
+     * safety cap). One response for the whole sequence: `performed` lists every step done, and the messages / events
+     * cover all of them (nothing said by the game between two steps is lost). [onStep] is told before each step.
      */
-    suspend fun act(requested: List<GameAction>, expectedVersion: Long? = lastServedVersion, budgetMillis: Long? = null, compact: Boolean = false): JsonObject {
+    suspend fun act(
+        requested: List<GameAction>,
+        expectedVersion: Long? = lastServedVersion,
+        limits: ChainLimits? = null,
+        compact: Boolean = false,
+        onStep: (index: Int, total: Int, action: GameAction) -> Unit = { _, _, _ -> },
+    ): JsonObject {
         require(requested.isNotEmpty()) { "no action" }
-        // Field item uses in a row: one bag session instead of closing and reopening the bag for each item.
-        val actions = ActionChains.coalesce(requested, inBattle = host.observe { memory -> game.state(memory).battle != null })
-        val started = System.currentTimeMillis()
-        val performed = mutableListOf<String>()
-        val details = mutableListOf<String>()
-        var failed: Pair<GameAction, ActionError>? = null
-        var skipped = emptyList<GameAction>()
-        for ((index, action) in actions.withIndex()) {
-            if (index > 0 && budgetMillis != null && System.currentTimeMillis() - started > budgetMillis) {
-                skipped = actions.drop(index)
-                break
-            }
-            when (val outcome = execute(action, if (index == 0) expectedVersion else null)) {
-                is ActionOutcome.Done -> {
-                    performed += action.key
-                    outcome.detail?.let { details += if (actions.size > 1) "${action.key}: $it" else it }
-                }
-                is ActionOutcome.Failed -> {
-                    // A spare advance_dialogue (the dialogue ended sooner than expected): nothing to read, go on.
-                    if (index > 0 && ActionChains.isSpareAdvance(action, outcome.error, host.observe { memory -> game.state(memory) })) {
-                        details += "${action.key}: skipped, no dialogue left"
-                        continue
-                    }
-                    failed = action to outcome.error
-                    skipped = actions.drop(index + 1)
-                    break
-                }
-            }
-        }
+        val chain = ChainRunner(
+            observe = { host.observe { memory -> game.state(memory) } },
+            execute = { action, index -> execute(action, if (index == 0) expectedVersion else null) },
+            limits = limits,
+            idle = { recorder.progress.idle },
+            onStep = { index, total, action ->
+                // Starting a step is progress too (the agent's call is alive), and says which one.
+                recorder.progress.progressed(if (total > 1) "step ${index + 1}/$total: ${action.key}" else action.key)
+                onStep(index, total, action)
+            },
+        ).run(requested)
         val (afterState, legacy) = host.observe { memory -> game.state(memory) to game.observe(memory).state }
         val after = describe(afterState, legacy, full = false, compact = compact)
         return buildJsonObject {
-            put("ok", failed == null)
-            putJsonArray("performed") { performed.forEach { add(JsonPrimitive(it)) } }
-            if (details.isNotEmpty()) put("detail", details.joinToString("; "))
-            failed?.let { (action, error) ->
+            put("ok", chain.failed == null)
+            putJsonArray("performed") { chain.performed.forEach { add(JsonPrimitive(it)) } }
+            if (chain.details.isNotEmpty()) put("detail", chain.details.joinToString("; "))
+            chain.failed?.let { (action, error) ->
                 put("action", action.key)
                 put("error", buildJsonObject {
                     put("code", error.code)
                     put("message", error.message)
                 })
             }
-            if (skipped.isNotEmpty()) {
-                put("not_done", JsonArray(skipped.map { JsonPrimitive(it.key) }))
-                if (failed == null) put("not_done_reason", "the call had already run ${(System.currentTimeMillis() - started) / 1000} s: check the state, then go on")
+            if (chain.skipped.isNotEmpty()) {
+                put("not_done", JsonArray(chain.skipped.map { JsonPrimitive(it.key) }))
+                chain.stop?.let { stop ->
+                    put("not_done_code", stop.code)
+                    put("not_done_reason", stop.message)
+                }
             }
             after.forEach { (k, v) -> put(k, v) }
         }
@@ -262,6 +258,12 @@ class GameSession(
             if (matchups.isNotEmpty()) {
                 put("effectiveness", JsonArray(matchups.map { JsonPrimitive("${it.move} → ${it.target.wire}: ${it.label}") }))
             }
+            // Whom to switch to: in the full state, and in compact answers where a switch is chosen (party screen,
+            // "change Pokémon?" after a K.O.).
+            if (!compact || choosingSwitch(state.screen)) {
+                val party = Matchups.party(battle, state.party, data, battleKnowledge)
+                if (party.isNotEmpty()) put("party_effectiveness", JsonArray(party.map { JsonPrimitive(it.line(battle.isDouble)) }))
+            }
             battleKnowledge.describe(battle, data).takeIf { it.isNotEmpty() }?.let { put("opponents_known", JsonArray(it.map(::JsonPrimitive))) }
             val balls = state.bag.orEmpty().firstOrNull { it.name == "balls" }?.items.orEmpty()
             dev.kotlinds.pokemonclient.data.CatchChance.estimate(battle, balls, data)?.let { estimate ->
@@ -312,6 +314,10 @@ class GameSession(
         put("version", version.also { lastServedVersion = it })
     }
 
+    /** Screens of a battle where the player picks the Pokémon to send in. */
+    private fun choosingSwitch(screen: Screen) =
+        screen is Screen.PartyGrid || (screen as? Screen.ListMenu)?.kind == dev.kotlinds.pokemonclient.state.MenuKind.BATTLE_SWITCH_OR_KEEP
+
     private fun describeEvent(event: GameEvent): String? = when (event) {
         is GameEvent.PokemonObtained -> "obtained ${event.species} (${event.mon})"
         is GameEvent.Evolved -> "${event.from} evolved into ${event.to}"
@@ -319,6 +325,8 @@ class GameSession(
         is GameEvent.ItemReceived -> "received ${event.item} x${event.quantity}"
         is GameEvent.ShopBonus -> "the clerk added ${event.item} x${event.quantity} as a bonus"
         is GameEvent.BadgeReceived -> "received the ${event.badge} badge"
+        is GameEvent.PokegearUpgraded -> "Pokégear upgraded: ${event.card.name.lowercase()} card" +
+            if (event.card == dev.kotlinds.pokemonclient.state.PokegearCard.EXPANSION) " (Kanto's radio stations, among them the Poké Flute)" else ""
         is GameEvent.HumanInput -> "the human pressed buttons"
         is GameEvent.Caught -> "caught ${event.name}" + (if (event.name != event.species) " (${event.species})" else "") +
             (event.level?.let { " Lv$it" } ?: "") + " (${event.mon})" + (event.boxName?.let { ", sent to $it (party full)" } ?: ", in the party")

@@ -33,9 +33,10 @@ class HgssBlockersTest {
 
     @Test
     fun aCuratedPersonOfAnotherZoneIsMatchedByItsOwnZone() {
-        // The Route 36 Sudowoodo seen from the neighbouring zone: matched with its own zone, not the player's.
+        // The Route 36 Sudowoodo seen from the neighbouring zone: matched with its own zone, not the player's; its id
+        // is qualified with that zone, like the field object's (HgssObjectIds).
         val blockers = HgssBlockers.of(state(39, listOf(person(4, 415, 246, mapId = 40, eventFlag = 0x1C2))))
-        assertEquals(listOf("person:4"), blockers.map { it.target })
+        assertEquals(listOf("person:4@40"), blockers.map { it.target })
     }
 
     @Test
@@ -145,5 +146,23 @@ class HgssBlockersTest {
         val electrode = person(10, 21, 14, mapId = 248)
         assertEquals(BlockerCause.WildPokemon(101), HgssBlockers.of(state(248, listOf(electrode))).single().cause)
         assertTrue(HgssBlockers.of(state(248, listOf(electrode), story = StoryInfo(flags = setOf(0xCC)))).isEmpty())
+    }
+
+    @Test
+    fun theSsAquaSleepingSailorAndTheB1fGuardSayWhatWakesThem() {
+        // S.S. Aqua (NOTES.md, Kanto): Sailor Stanly (1F south-east cabins, map 309, obj 0) sleeps until the B1F guard
+        // (map 329, obj 1, trigger 0 at 38,17..19) was met; beating Stanly sets VAR_UNK_40CB to 3 and opens B1F.
+        val searching = StoryInfo(vars = mapOf(HgssStoryTable.Vars.SS_AQUA to 2))
+        val stanly = HgssBlockers.of(state(309, listOf(person(0, 7, 10, mapId = 309, eventFlag = 0x21A)), story = searching)).single()
+        assertEquals("person:0", stanly.target)
+        assertTrue("asleep" in stanly.reason && "B1F" in stanly.reason, stanly.reason)
+        val guardTrigger = TriggerInfo(index = 0, x = 38, z = 17, width = 1, height = 3, scriptId = 2, active = true, variable = HgssStoryTable.Vars.SS_AQUA, value = 2)
+        val b1f = HgssBlockers.of(state(329, listOf(person(1, 38, 18, mapId = 329, eventFlag = 0x22A)), listOf(guardTrigger), story = searching))
+        assertEquals(listOf("person:1", "trigger:0"), b1f.map { it.target })
+        assertTrue(b1f.all { "Stanly" in it.reason && "every time" in it.reason }, b1f.toString())
+        // Stanly beaten: neither blocks any more.
+        val beaten = StoryInfo(vars = mapOf(HgssStoryTable.Vars.SS_AQUA to 3))
+        assertTrue(HgssBlockers.of(state(309, listOf(person(0, 7, 10, mapId = 309, eventFlag = 0x21A)), story = beaten)).isEmpty())
+        assertTrue(HgssBlockers.of(state(329, listOf(person(1, 38, 18, mapId = 329, eventFlag = 0x22A)), listOf(guardTrigger), story = beaten)).isEmpty())
     }
 }

@@ -6,6 +6,8 @@ import dev.kotlinds.pokemonclient.data.LookupKind
 import dev.kotlinds.pokemonclient.actions.ActionException
 import dev.kotlinds.pokemonclient.actions.ActionMode
 import dev.kotlinds.pokemonclient.actions.GameAction
+import dev.kotlinds.pokemonclient.actions.ChainLimits
+import kotlin.time.Duration.Companion.seconds
 import dev.kotlinds.pokemonclient.console.Frame
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
@@ -62,6 +64,9 @@ class GameMcpServer(
     private val knowledge: () -> KnowledgeLevel,
 ) {
     private val mutex = Mutex()
+
+    /** Runs the calls that read or change the game: delivery of their answers, progress notifications ([ToolCalls]). */
+    private val calls = ToolCalls(session.progress, DeliveryTracker(confirm = session::confirmDelivered))
     private var engine: EmbeddedServer<*, *>? = null
 
     private val _activity = MutableStateFlow(AgentActivity())
@@ -108,10 +113,10 @@ class GameMcpServer(
                 },
             ),
         ) { request ->
+            val arrival = System.currentTimeMillis()
             val full = request.arguments?.get("detail")?.jsonPrimitive?.contentOrNull == "full"
             mutex.withLock {
-                val started = System.currentTimeMillis()
-                text(session.describe(full).encode()).also { deliver(started) }
+                calls.run(this, request, arrival) { text(session.describe(full).encode()) }
             }
         }
         addTool(
@@ -124,7 +129,7 @@ class GameMcpServer(
                     put("action", session.registry.jsonSchema(mode()))
                     putJsonObject("then") {
                         put("type", "array")
-                        put("description", "Optional further actions done right after, only when sure (max 8); stops at the first problem (or after ~35 s: `not_done` lists what was left). The answer covers every step: `performed` and all the messages.")
+                        put("description", "Optional further actions done right after, only when sure (max 8); stops at the first problem, when the battle changes under it (the foe switched or fainted, one of yours fainted), or when nothing has happened for a while: `not_done` lists what was left and `not_done_code` why. The answer covers every step: `performed` and all the messages.")
                     }
                     putJsonObject("note") {
                         put("type", "string")
@@ -143,6 +148,7 @@ class GameMcpServer(
                 required = listOf("action"),
             ),
         ) { request ->
+            val arrival = System.currentTimeMillis()
             val arguments = request.arguments ?: JsonObject(emptyMap())
             val reasoning = arguments["reasoning"]?.jsonPrimitive?.contentOrNull
             mutex.withLock {
@@ -158,11 +164,9 @@ class GameMcpServer(
                 val label = actions.joinToString(" → ") { it.key }
                 // Shown as in progress right away: the comment appears while the action happens.
                 _activity.update { it.started(label, reasoning) }
-                val started = System.currentTimeMillis()
                 // One response for the whole chain: every step's messages, every step performed.
                 val compact = arguments["detail"]?.jsonPrimitive?.contentOrNull != "full"
-                val result = running { session.act(actions, budgetMillis = THEN_BUDGET_MILLIS, compact = compact) }
-                deliver(started)
+                val result = calls.run(this, request, arrival) { running { session.act(actions, limits = CHAIN_LIMITS, compact = compact) } }
                 val ok = result["ok"]?.jsonPrimitive?.contentOrNull == "true"
                 _activity.update { it.finished(ok, if (ok) null else result["error"]?.let { e -> (e as? JsonObject)?.get("code")?.jsonPrimitive?.contentOrNull ?: e.toString() }) }
                 text(result.encode())
@@ -199,19 +203,15 @@ class GameMcpServer(
             description = "A picture of both screens (top, then the bottom touch screen), for anything the state doesn't describe. " +
                 "It is 256x384: to touch something seen at (x, y) on the bottom half, touch (x, y - 192).",
         ) {
+            val arrival = System.currentTimeMillis()
             val frame = host.frames.value ?: return@addTool error("No frame yet")
-            mutex.withLock { session.countScreenshot() }
+            mutex.withLock {
+                // A call: the previous answer reached the agent (or not).
+                calls.delivery.arrived(arrival)
+                session.countScreenshot()
+            }
             CallToolResult(content = listOf(ImageContent(data = png(frame), mimeType = "image/png")))
         }
-    }
-
-    /**
-     * The response of a call that started at [started] is about to be sent: unless it took so long that the client
-     * has probably given up on it (its request timeout), what it tells is forgotten; otherwise it is repeated with
-     * the next response (see [GameSession.confirmDelivered]).
-     */
-    private fun deliver(started: Long) {
-        if (System.currentTimeMillis() - started < DELIVERY_TIMEOUT_MILLIS) session.confirmDelivered()
     }
 
     /** Runs [block] with the free run allowed, then freezes the game again while the agent thinks (if enabled). */
@@ -239,11 +239,12 @@ class GameMcpServer(
         val json = Json { prettyPrint = false }
         const val MAX_THEN = 8
 
-        /** MCP clients give up on a request after 60 s by default: a response slower than this may be lost. */
-        const val DELIVERY_TIMEOUT_MILLIS = 50_000L
-
-        /** A `then` chain starts no further step after this long, so the whole call stays under the client's timeout. */
-        const val THEN_BUDGET_MILLIS = 35_000L
+        /**
+         * A `then` chain starts no further step once nothing has happened in the game for 20 s (it is stuck), or after
+         * 90 s in all whatever the progress (a safety cap). Progress notifications keep the call alive meanwhile for
+         * clients that restart their timeout on them; for the others, an answer lost to their timeout is given again.
+         */
+        val CHAIN_LIMITS = ChainLimits(idle = 20.seconds, total = 90.seconds)
 
         const val INSTRUCTIONS =
             "You are playing a Pokémon game on a Nintendo DS through this server. Call get_state to see the screen (decoded from " +

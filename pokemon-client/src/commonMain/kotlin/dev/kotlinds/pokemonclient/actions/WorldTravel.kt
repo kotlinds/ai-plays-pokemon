@@ -42,7 +42,26 @@ internal object WorldTravel {
             is Resolved.Failed -> return resolved.outcome
         }
         val trip = travel(context, world, goal, action.options)
-        return finish(context, trip, goal).withNotes(trip.notes)
+        return finish(context, trip, goal).withNotes(trip.notes).withMovement(context, field, trip.taken)
+    }
+
+    /**
+     * A failure after the player already moved (walked towards a link, took a warp, then found no way on) says so:
+     * where they started, where they are now and the warps taken, so the answer never looks like nothing happened.
+     * Interruptions already tell their steps.
+     */
+    private fun ActionOutcome.withMovement(context: PlanContext, start: FieldState, taken: List<ZoneLink>): ActionOutcome {
+        if (this !is ActionOutcome.Failed || error is ActionError.Interrupted) return this
+        val now = context.state().field ?: return this
+        if (now.mapId == start.mapId && now.x == start.x && now.y == start.y) return this
+        val where = if (now.mapId == start.mapId) "" else " on ${now.mapName}"
+        val moved = "you moved before this was found: from ${start.x},${start.y}" + (if (now.mapId == start.mapId) "" else " on ${start.mapName}") +
+            " to ${now.x},${now.y}$where" + (if (taken.isEmpty()) "" else " (${describe(taken)})")
+        return when (val e = error) {
+            is ActionError.Unavailable -> ActionOutcome.Failed(e.copy(detail = "${e.detail} ($moved)"))
+            is ActionError.Timeout -> ActionOutcome.Failed(e.copy(detail = "${e.detail} ($moved)"))
+            else -> this
+        }
     }
 
     /**
@@ -71,9 +90,11 @@ internal object WorldTravel {
     private fun resolve(context: PlanContext, field: FieldState, world: WorldSource, action: GameAction.GoTo): Resolved {
         val area = world.areaOf(field.mapId) ?: return Resolved.Failed(noMap(field))
         val target = action.target
+        val near = nearZones(world, area, field)
         if (action.map != null) {
-            val zones = zonesNamed(context, world, action.map)
+            val zones = zonesNamed(context, world, action.map, near)
             if (zones.isEmpty()) return Resolved.Failed(ActionOutcome.Failed(ActionError.InvalidParameter("map", action.map, knownMaps(context, world, area, field))))
+            ambiguous(context, world, area, "map", action.map, zones)?.let { return it }
             // Prefer the zone of that name closest to here: the current area, then a map linked to it.
             val zone = zones.firstOrNull { world.areaOf(it) === area } ?: zones.first()
             if (action.x == null || action.y == null) return Resolved.Found(Goal(zone, zoneTarget("map:$zone", world, zone)))
@@ -88,14 +109,17 @@ internal object WorldTravel {
         if (target == FRONTIER) return frontier(world, area, field)
         if (target.startsWith("exit:")) return exit(context, area, field, target)
         MovePlans.resolve(context, target, null, null)?.let { return Resolved.Found(Goal(field.mapId, it)) }
-        val zones = zonesNamed(context, world, target)
+        val zones = zonesNamed(context, world, target, near)
         if (zones.isNotEmpty()) {
+            ambiguous(context, world, area, "target", target, zones)?.let { return it }
             val zone = zones.firstOrNull { world.areaOf(it) === area } ?: zones.first()
             if (zone == field.mapId) return Resolved.Failed(ActionOutcome.Failed(ActionError.Unavailable(UnavailableReason.NO_PATH, "You are already on ${field.mapName}")))
             return Resolved.Found(Goal(zone, zoneTarget(target, world, zone)))
         }
         val exits = WorldLinks.connections(area, field.mapId).map { it.id }.distinct() + FRONTIER
-        return Resolved.Failed(MovePlans.unknownTarget(context, target, exits))
+        // A name that matched no map: the maps around here are what it most likely meant.
+        val maps = if (':' in target) emptyList() else knownMaps(context, world, area, field)
+        return Resolved.Failed(MovePlans.unknownTarget(context, target, exits + maps))
     }
 
     /** Entering zone [zone]: any tile of it (its area is shared with other zones on the overworld). */
@@ -131,12 +155,47 @@ internal object WorldTravel {
         return Resolved.Found(Goal(zone, MovePlans.Target(FRONTIER, null, null, isGoal = { node -> (node.x to node.y) in candidates })))
     }
 
-    /** Zones named [name] (our map names, case and punctuation ignored) or `map:<id>`. */
-    private fun zonesNamed(context: PlanContext, world: WorldSource, name: String): List<Int> {
+    /**
+     * Zones named [name] or `map:<id>`. Our map names, case and punctuation ignored (apostrophes too: "Elm's" =
+     * "Elms"); when none has exactly that name, the looser variants an agent writes ([looseMatch]): without the town
+     * ("Elm's Lab" for "New Bark Elms Lab 1F") or without the floor of a ground floor ("1F"). Among several loose
+     * matches, those around the player (this area, the maps its exits lead to) win; still several: all of them,
+     * which [resolve] reports as ambiguous.
+     */
+    private fun zonesNamed(context: PlanContext, world: WorldSource, name: String, near: Set<Int> = emptySet()): List<Int> {
         name.removePrefix("map:").toIntOrNull()?.takeIf { name.startsWith("map:") }?.let { id -> return listOfNotNull(id.takeIf { world.areaOf(it) != null }) }
         if (normalize(name).isEmpty()) return emptyList()
-        return (0 until world.zoneCount).filter { id -> context.game.zoneName(id)?.let { sameMapName(it, name) } == true }
+        val names = (0 until world.zoneCount).mapNotNull { id -> context.game.zoneName(id)?.let { id to it } }
+        // A possessive is written either way: "Elm's Lab" is "Elms Lab", "Diglett's Cave" is "Diglett Cave".
+        val queries = listOf(name, POSSESSIVE.replace(name, "")).distinct()
+        val exact = names.filter { (_, n) -> queries.any { sameMapName(n, it) } }.map { it.first }
+        if (exact.isNotEmpty()) return exact
+        val loose = names.filter { (_, n) -> queries.any { looseMatch(n, it) } }.map { it.first }
+        val nearby = loose.filter { it in near }
+        return nearby.ifEmpty { loose }
     }
+
+    /**
+     * True when [query] names map [name] loosely: [name] (or [name] without its ground-floor "1F") ends with [query],
+     * a whole word or more of it ("Elms Lab" → "New Bark Elms Lab 1F", "Dept Store" → "Goldenrod Dept Store 1F").
+     */
+    internal fun looseMatch(name: String, query: String): Boolean {
+        val q = mapKey(query)
+        if (q.length < MIN_LOOSE_NAME) return false
+        val words = name.split(' ', '-', '.').filter { it.isNotBlank() }
+        val variants = listOfNotNull(words, words.takeIf { it.lastOrNull()?.equals(GROUND_FLOOR, ignoreCase = true) == true }?.dropLast(1))
+        // A suffix made of whole words of the name: "Lab" matches "Elms Lab", "ab" doesn't.
+        return variants.any { w -> w.indices.any { start -> mapKey(w.drop(start).joinToString(" ")) == q } }
+    }
+
+    /** "'s" / "’s" ending a word. */
+    private val POSSESSIVE = Regex("['’]s\\b", RegexOption.IGNORE_CASE)
+
+    /** Ground floors: "Elm's Lab" means its 1F. */
+    private const val GROUND_FLOOR = "1F"
+
+    /** Loose names shorter than this (normalized) are too vague to guess from. */
+    private const val MIN_LOOSE_NAME = 3
 
     /**
      * True when [a] and [b] name the same map, ignoring case, spaces and punctuation, and a "Town" / "City" one of
@@ -145,6 +204,22 @@ internal object WorldTravel {
     internal fun sameMapName(a: String, b: String): Boolean = mapKey(a) == mapKey(b)
 
     private fun mapKey(value: String) = normalize(value).removeSuffix("town").removeSuffix("city")
+
+    /**
+     * The INVALID_PARAM for a name several maps of different names answer to loosely ("Pokecenter 1F" in every town),
+     * listing them; null when they all share one name (the floors of a map spread over areas) or one is on this area.
+     */
+    private fun ambiguous(context: PlanContext, world: WorldSource, area: Area, parameter: String, value: String, zones: List<Int>): Resolved? {
+        if (zones.any { world.areaOf(it) === area }) return null
+        val names = zones.mapNotNull { context.game.zoneName(it) }.distinct()
+        if (names.size <= 1) return null
+        return Resolved.Failed(ActionOutcome.Failed(ActionError.InvalidParameter(parameter, value, names.take(MAX_SUGGESTED_NAMES))))
+    }
+
+    /** The zones of [area] and those this map's exits lead to: where a loose name most likely points. */
+    private fun nearZones(world: WorldSource, area: Area, field: FieldState): Set<Int> =
+        (area.zoneBounds.keys + field.mapId + WorldLinks.connections(area, field.mapId).map { it.toZone } +
+            WorldLinks.links(world, area, field.mapId).map { it.targetZone }).toSet()
 
     /** Maps worth suggesting: the neighbours and the destinations of this map's warps and holes. */
     private fun knownMaps(context: PlanContext, world: WorldSource, area: Area, field: FieldState): List<String> =
@@ -196,12 +271,25 @@ internal object WorldTravel {
                 )
             val walked = MovePlans.walkTo(context, MovePlans.Target(link.id, link.x, link.y, warp = true, exit = link.exitDirection), options)
             if (walked !is MovePlans.Walk.Arrived) return Trip(walked, taken, triggers)
-            if (walked.field.mapId == field.mapId) return Trip(MovePlans.Walk.Stuck("${link.id} at ${link.x},${link.y} didn't take the player anywhere"), taken, triggers)
+            // A warp leads to another area (a building, a floor); a warp to this same map (a gym's pad) leaves the map
+            // unchanged: it worked when the player was moved off it. Walking into the next zone of the overworld is no warp.
+            if (world.areaOf(walked.field.mapId) === area && !teleported(link, walked.field)) {
+                return Trip(MovePlans.Walk.Stuck("${link.id} at ${link.x},${link.y} didn't take the player anywhere"), taken, triggers)
+            }
             taken += link
+            // What the walk to the link did besides walking (a tree cut on the way): told with the final answer.
+            walked.notes.forEach { if (it !in notes) notes += it }
             localFailure = null
         }
         return Trip(MovePlans.Walk.Stuck("still not there after ${taken.size} warps: ${describe(taken)}"), taken, emptySet())
     }
+
+    /**
+     * True when [link], a warp to the map it is on, moved the player: they stand on its arrival tile, or anywhere but
+     * on the warp itself (the same-map jump is the only sign it fired).
+     */
+    internal fun teleported(link: ZoneLink, field: FieldState): Boolean =
+        link.targetZone == field.mapId && ((link.toX == field.x && link.toY == field.y) || (field.x != link.x || field.y != link.y))
 
     /** The first link of the cheapest route from the player to [goal] across zones, or null when there is none. */
     private fun nextLink(context: PlanContext, world: WorldSource, field: FieldState, area: Area, goalArea: Area, goal: Goal, options: MoveOptions): ZoneLink? =
@@ -227,10 +315,18 @@ internal object WorldTravel {
         val goalTiles = MovePlans.goalTiles(goalArea, goal.target)
         val enterable = if (goal.target.adjacent) emptySet() else goalTiles
         return router.route(
-            field.mapId, start, MovePlans.routeOptions(field, options),
+            field.mapId, start, worldRouteOptions(context, field, options),
             goalTiles = { a -> if (a === goalArea) enterable else emptySet() }, relaxed = relaxed, ignorePeople = relaxed,
         ) { place -> place.area === goalArea && (goal.target.isGoal?.invoke(place.node) ?: ((place.node.x to place.node.y) in goalTiles)) }
     }
+
+    /**
+     * The route options across zones: the same field moves as a walk on one map ([FieldMoveWalk.usable]: Cut, Surf...
+     * the party can use by itself), so a Cut tree in front of another map's door is cut like one on the way inside a
+     * gym (NOTES: "needs Cut" in front of the Vermilion Gym while the walk out cut it).
+     */
+    internal fun worldRouteOptions(context: PlanContext, field: FieldState, options: MoveOptions) =
+        MovePlans.routeOptions(field, options, FieldMoveWalk.usable(FieldMoveWalk.access(context, context.state())))
 
     /**
      * Why there is no route across zones either: the first obstacle (field move, person) of the route that crosses
@@ -243,7 +339,7 @@ internal object WorldTravel {
         // Scene triggers don't block the way (a scene starts, then the walk goes on): crossing them keeps the search
         // from inventing a detour over water around a trigger (NOTES-run P6: "needs Surf" next to Violet's bridge).
         val route = worldRoute(context, world, field, area, goalArea, goal, options, relaxed = true, crossScenes = true) ?: return null
-        val routeOptions = MovePlans.routeOptions(field, options)
+        val routeOptions = worldRouteOptions(context, field, options)
         val overlay = MovePlans.overlay(context, field, emptySet())
         for (place in route.places) {
             val pathfinder = if (place.area === area) Pathfinder(area, overlay) else Pathfinder(place.area, WorldRouter.staticOverlay(place.area))
@@ -273,7 +369,9 @@ internal object WorldTravel {
                 if (at != null && at in triggers && walked.state.battle == null) {
                     val onGoal = goal.target.x == at.first && goal.target.y == at.second
                     if (onGoal) ActionOutcome.Done("arrived at ${at.first},${at.second}: this started a scene (now: ${walked.state.screen.kind})$via")
-                    else ActionOutcome.Failed(ActionError.Interrupted(InterruptionCause.SCRIPT, "${walked.steps} step(s)$via; the only way crosses a scene trigger at ${at.first},${at.second}, which started"))
+                    else ActionOutcome.Failed(ActionError.Interrupted(InterruptionCause.SCRIPT,
+                        "${walked.steps} step(s)$via; ${at.first},${at.second} wasn't the destination but the only way to ${goal.target.id} crosses it: " +
+                            (MovePlans.sceneNote(context, walked.state.field?.mapId ?: context.state().field?.mapId, at) ?: "a scene trigger there started a scene")))
                 } else with(MovePlans) { walked.toOutcome(context) { "" } }.let { outcome ->
                     if (taken.isNotEmpty() && outcome is ActionOutcome.Failed && outcome.error is ActionError.Interrupted) {
                         ActionOutcome.Failed(outcome.error.copy(performed = outcome.error.performed + via))
@@ -310,6 +408,9 @@ internal object WorldTravel {
 
     private const val RODE = BikeRide.RODE
     private const val NO_CYCLING = BikeRide.NO_CYCLING
+
+    /** An ambiguous name lists at most this many maps. */
+    private const val MAX_SUGGESTED_NAMES = 12
 
     /** At most this many warps / falls per `go_to`. */
     private const val MAX_HOPS = 12

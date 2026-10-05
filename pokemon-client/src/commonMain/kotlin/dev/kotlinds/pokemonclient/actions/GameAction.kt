@@ -119,9 +119,12 @@ sealed interface GameAction {
         override val key get() = "teach(${item.raw}→$mon)"
     }
 
-    /** Moves [mon] to [position] (1 = lead) in the party. */
-    data class ReorderParty(val mon: MonId, val position: Int) : GameAction {
-        override val key get() = "reorder_party($mon→$position)"
+    /**
+     * Moves [mon] to [position] (1 = lead) in the party; or, when [order] is given, puts the party in that order (the
+     * first Pokémon listed leads; those left out keep the places left, in their order).
+     */
+    data class ReorderParty(val mon: MonId, val position: Int, val order: List<MonId> = emptyList()) : GameAction {
+        override val key get() = if (order.isEmpty()) "reorder_party($mon→$position)" else "reorder_party(${order.joinToString(", ")})"
     }
 
     data class GiveItem(val mon: MonId, val item: ItemRef) : GameAction {

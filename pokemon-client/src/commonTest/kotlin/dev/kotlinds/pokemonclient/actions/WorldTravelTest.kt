@@ -48,9 +48,15 @@ private class FloorsGame(
     var y: Int,
     val transitionFrames: Int = 60,
     val people: Map<Int, List<FieldObject>> = emptyMap(),
+    /** A scene that pushes the player back one tile west (no message), like the S.S. Aqua's B1F guard. */
+    val pushBack: Boolean = false,
 ) : PokemonGame {
     var facing = Direction.SOUTH
     var scene = false
+
+    /** Frames left of the push-back scene (the player can't move meanwhile); how many times it ran. */
+    private var busy = 0
+    var pushes = 0
     private var heldFor = 0
     private var held: Set<Button> = emptySet()
     private var pending: Triple<Int, Int, Int>? = null
@@ -68,7 +74,8 @@ private class FloorsGame(
     override fun observe(memory: Memory) = Observation(GameMode.UNKNOWN, null, "", JsonObject(emptyMap()))
     override fun state(memory: Memory): GameState {
         val field = FieldState(zone, "Floor $zone", x, y, 0, facing, MovementMode.WALK, moving = false, objects = people[zone].orEmpty())
-        val screen = if (scene) Screen.Dialogue(TextSource.FIELD, null, "A scene!", Awaiting.INPUT) else Screen.Overworld(null, Awaiting.INPUT)
+        val screen = if (scene) Screen.Dialogue(TextSource.FIELD, null, "A scene!", Awaiting.INPUT)
+        else Screen.Overworld(null, if (busy > 0) Awaiting.ANIMATION else Awaiting.INPUT)
         return GameState(0, screen, null, emptyList(), null, null, field)
     }
 
@@ -98,6 +105,10 @@ private class FloorsGame(
                 }
                 return@repeat
             }
+            if (busy > 0) {
+                if (--busy == 0) x -= 1
+                return@repeat
+            }
             val direction = DIRECTIONS.entries.firstOrNull { it.key in input.buttons }?.value
             if (direction == null || scene) {
                 heldFor = 0
@@ -121,7 +132,9 @@ private class FloorsGame(
             y = ny
             here.warps.firstOrNull { it.zone == zone && it.x == x && it.y == y && it.exitDirection == null }?.let { arrive(it.targetZone, it.targetWarp) }
             here.triggerWarps.firstOrNull { it.zone == zone && it.x == x && it.y == y }?.let { schedule(it.targetZone, it.toX, it.toY) }
-            if (here.triggers.any { it.zone == zone && it.x == x && it.y == y } && here.triggerWarps.none { it.x == x && it.y == y }) scene = true
+            if (here.triggers.any { it.zone == zone && it.x == x && it.y == y } && here.triggerWarps.none { it.x == x && it.y == y }) {
+                if (pushBack) { busy = PUSH_FRAMES; pushes++ } else scene = true
+            }
             here.zoneAt(x, y)?.let { if (it != zone) { zone = it; zonesVisited += it } }
         }
         override fun memorySize(region: MemoryRegion) = 16
@@ -135,6 +148,7 @@ private class FloorsGame(
 
     companion object {
         const val STEP_FRAMES = 4
+        const val PUSH_FRAMES = 40
         val DIRECTIONS = mapOf(Button.UP to Direction.NORTH, Button.DOWN to Direction.SOUTH, Button.LEFT to Direction.WEST, Button.RIGHT to Direction.EAST)
     }
 }
@@ -251,6 +265,21 @@ class WorldTravelTest {
         val failed = assertIs<ActionOutcome.Failed>(MovePlans.goTo.run(GameAction.GoTo(4, 0, null), game.context()))
         val error = assertIs<ActionError.Interrupted>(failed.error)
         assertTrue("scene trigger at 2,0" in error.performed, error.performed)
+    }
+
+    /**
+     * NOTES.md (Kanto, S.S. Aqua): the B1F guard's trigger pushes the player back on each attempt; go_to went on
+     * re-crossing it without saying so. The walk stops at the first crossing and names the trigger.
+     */
+    @Test
+    fun aSceneThatPushesBackStopsTheWalkOnceAndSaysItWasTheOnlyWay() {
+        val corridor = floor(1, listOf("....."), triggers = listOf(Trigger(1, 0, 2, 0, 1, 1, 7, 0x4000, 0)))
+        val game = FloorsGame(mapOf(1 to corridor), zone = 1, x = 0, y = 0, pushBack = true)
+        val failed = assertIs<ActionOutcome.Failed>(MovePlans.goTo.run(GameAction.GoTo(4, 0, null), game.context()))
+        val error = assertIs<ActionError.Interrupted>(failed.error)
+        assertTrue("wasn't the destination" in error.performed && "trigger:0" in error.performed && "starts again" in error.performed, error.performed)
+        assertEquals(1, game.pushes)
+        assertEquals(1 to 0, game.x to game.y)
     }
 
     @Test

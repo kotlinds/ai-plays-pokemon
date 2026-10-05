@@ -25,7 +25,7 @@ internal object FlyHints {
         val overlay = MovePlans.overlay(context, field, emptySet())
         val router = WorldRouter(world) { _, a -> if (a === area) overlay else WorldRouter.staticOverlay(a) }
         val start = Node(field.x, field.y, Pathfinder(area).levelAt(field.x, field.y, field.height * MovePlans.HEIGHT_UNITS))
-        val route = router.route(field.mapId, start, MovePlans.routeOptions(field, MoveOptions(acceptOneWay = true))) { place ->
+        val route = router.route(field.mapId, start, WorldTravel.worldRouteOptions(context, field, MoveOptions(acceptOneWay = true))) { place ->
             place.zone?.let { world.flyAllowed(it) } == true
         } ?: return null
         val zone = route.end.zone ?: return null
@@ -54,7 +54,9 @@ internal object FlyHints {
     fun regionError(town: String, here: String, there: String): ActionError = ActionError.Unavailable(
         UnavailableReason.OTHER_REGION,
         "$town is in $there and you are in $here: Fly only reaches towns of the region you are in",
-        "travel to $there on foot, by boat or by train first (then Fly works there)",
+        // The game's own rule (src/application/pokegear/map/overlay_101_021E9270.c ov101_021EA7E4): from Indigo
+        // Plateau every visited town of both regions can be chosen, and Indigo Plateau / Route 26 always can.
+        "fly to Indigo Plateau first (it links both regions: from there Fly reaches $there), or travel on foot, by boat or by train",
     )
 
     /**

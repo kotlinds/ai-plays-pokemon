@@ -164,14 +164,20 @@ object CommonActions {
 
     val reorderParty = ActionDefinition(GameAction.ReorderParty::class, spec(
         name = "reorder_party",
-        description = "Move a Pokémon of your party to a position (1 = the lead, sent out first in battles): it swaps places with the Pokémon there.",
+        description = "Move a Pokémon of your party to a position (1 = the lead, sent out first in battles): it swaps places with the Pokémon there. " +
+            "Or give `order`, the whole new order at once.",
         parameters = listOf(
-            Parameter("pokemon", ParameterType.STRING, "The Pokémon's id (mon:…)."),
-            Parameter("position", ParameterType.INTEGER, "New position, 1 to 6."),
+            Parameter("pokemon", ParameterType.STRING, "The Pokémon's id (mon:…).", required = false),
+            Parameter("position", ParameterType.INTEGER, "New position, 1 to 6.", required = false),
+            Parameter(
+                "order", ParameterType.ARRAY,
+                "Instead of pokemon / position: the new order, [\"mon:…\", \"mon:…\", …] (the first one leads; Pokémon left out keep the remaining places).",
+                required = false,
+            ),
         ),
         modes = assisted,
         availability = { state -> if (PartyBagPlans.inField(state) && state.party.size > 1) Availability.Available(mapOf("pokemon" to monChoices(state))) else Availability.Hidden },
-        parse = { json -> GameAction.ReorderParty(mon(json, "pokemon"), int(json, "position", 1..6)) },
+        parse = { json -> parseReorderParty(json) },
     ), PartyBagPlans.reorderParty)
 
     val takeItem = ActionDefinition(GameAction.TakeItem::class, spec(
@@ -336,7 +342,7 @@ object CommonActions {
     val interact = ActionDefinition(GameAction.Interact::class, spec(
         name = "interact",
         description = "Walk next to a person, sign or item of this map, face it and press A (talk, read, pick up).",
-        parameters = listOf(Parameter("target", ParameterType.STRING, "person:N, item:N (item ball), sign:N or hidden_item:N.")),
+        parameters = listOf(Parameter("target", ParameterType.STRING, "person:N, item:N (item ball), sign:N, hidden_item:N or examine:N (something invisible to examine).")),
         modes = assisted,
         availability = { state -> if (MovePlans.canWalk(state, hasWorld = true)) Availability.Available(mapOf("target" to targetChoices(state))) else Availability.Hidden },
         parse = { json -> GameAction.Interact(string(json, "target")) },
@@ -649,7 +655,7 @@ object CommonActions {
     /** Every common action, in the order they are listed to agents. */
     val definitions: List<ActionDefinition<*>> get() =
         listOf(advanceDialogue, choose, enterText, attack, switch, throwBall, learnMove, run, keepBattling, goTo, interact, step, findEncounter, heal, fly, fish, buy, setQuantity, deposit, withdraw, pc, reorderParty, useItem, giveItem, takeItem, teach, useKeyItem, registerItem, saveGame, softReset, setOptions, chooseStarter, press, touch, wait) +
-            MoreActions.definitions + PuzzleActions.definitions
+            MoreActions.definitions + PuzzleActions.definitions + PokegearActions.definitions
 
     // region Helpers
 
@@ -739,6 +745,23 @@ object CommonActions {
                 else -> throw ActionException(ActionError.InvalidParameter("op", op ?: "missing", listOf("deposit", "withdraw", "move", "swap")))
             }
         }
+    }
+
+    /** `reorder_party` from JSON: one Pokémon and its position, or the whole `order` (a JSON array, or a string of one). */
+    private fun parseReorderParty(json: JsonObject): GameAction.ReorderParty {
+        val order = when (val raw = json["order"]) {
+            null, is kotlinx.serialization.json.JsonNull -> null
+            is kotlinx.serialization.json.JsonArray -> raw
+            is kotlinx.serialization.json.JsonPrimitive -> runCatching { kotlinx.serialization.json.Json.parseToJsonElement(raw.content) as kotlinx.serialization.json.JsonArray }
+                .getOrElse { throw ActionException(ActionError.InvalidParameter("order", raw.content, listOf("[\"mon:…\", \"mon:…\", …]"))) }
+            else -> throw ActionException(ActionError.InvalidParameter("order", raw.toString()))
+        } ?: return GameAction.ReorderParty(mon(json, "pokemon"), int(json, "position", 1..6))
+        val ids = order.map { element ->
+            val raw = (element as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: throw ActionException(ActionError.InvalidParameter("order", element.toString()))
+            MonId.parse(raw) ?: throw ActionException(ActionError.InvalidParameter("order", raw))
+        }
+        if (ids.isEmpty() || ids.size > 6 || ids.toSet().size != ids.size) throw ActionException(ActionError.InvalidParameter("order", order.toString(), listOf("1 to 6 different mon:… ids")))
+        return GameAction.ReorderParty(ids.first(), 1, ids)
     }
 
     private fun monChoices(state: GameState) = state.party.map { Choice(it.id.toString(), "${it.displayName} Lv${it.level}") }

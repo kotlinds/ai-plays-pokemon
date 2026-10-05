@@ -208,8 +208,10 @@ internal object HgssScriptScreens {
         val trainer = trainerOfScript(script)
             ?: mem.s32(obj + A.MO_MAP_ID).takeIf { it >= 0 }?.let { zone -> HgssTrainers.trainerOf(zone, mem.u16(obj + A.MO_ID), script) }
         trainer?.let { HgssData.gameData?.trainerLabel(it)?.let { label -> return label } }
-        val sprite = mem.s32(obj + A.MO_SPRITE_ID)
-        return HgssLabels.person(HgssData.spriteName(sprite))
+        val sprite = HgssData.spriteName(mem.s32(obj + A.MO_SPRITE_ID))
+        // An invisible object (the Cerulean Gym's Machine Part) speaks for no one: its text is narration.
+        if (sprite == HgssExaminables.STOP_SPRITE) return null
+        return HgssLabels.person(sprite)
     }
 
     /**
@@ -380,11 +382,11 @@ internal object HgssPhoneScreens {
         )
     }
 
-    private data class BarButton(val appId: Int, val left: Int?, val right: Int?, val entry: Entry)
-    private data class AppBar(val buttons: List<BarButton>, val cursor: Int)
+    internal data class BarButton(val appId: Int, val left: Int?, val right: Int?, val entry: Entry)
+    internal data class AppBar(val buttons: List<BarButton>, val cursor: Int)
 
     /** The app bar cursor (`PokegearCursorManager.lastCursor`, include/application/pokegear/pokegear_internal.h:77). */
-    private fun appBar(mem: HgssMemory, gearData: Long): AppBar? {
+    internal fun appBar(mem: HgssMemory, gearData: Long): AppBar? {
         val cursor = mem.ptr(gearData + T.GEAR_CURSOR_MANAGER)?.let { mem.ptr(it + T.CM_LAST_CURSOR) } ?: return null
         val grid = mem.ptr(cursor + T.CURSOR_GRID) ?: return null
         val count = mem.u8(cursor + T.CURSOR_COUNT).takeIf { it in 1..8 } ?: return null

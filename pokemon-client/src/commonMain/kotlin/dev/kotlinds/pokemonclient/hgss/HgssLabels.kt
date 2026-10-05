@@ -12,8 +12,9 @@ object HgssLabels {
         "DOCTOR" to "Prof. Elm",
         "OOKIDO" to "Prof. Oak",
         "GSRIVEL" to "red-haired boy",
-        "ASSISTANTM" to "Elm's aide",
-        "GSASSISTANTM" to "Elm's aide",
+        // Lab-coat sprites: Elm's aide wears ASSISTANTM, but so do the Rocket hideout's and Power Plant's scientists.
+        "ASSISTANTM" to "scientist",
+        "GSASSISTANTM" to "scientist",
         "ASSISTANTW" to "aide",
         "PCWOMAN1" to "nurse",
         "PCWOMAN2" to "receptionist",
@@ -56,12 +57,14 @@ object HgssLabels {
         "GSBIGFOUR2" to "Koga (Elite Four)",
         "GSBIGFOUR3" to "Bruno (Elite Four)",
         "GSBIGFOUR4" to "Karen (Elite Four)",
-        "GSLEADER9" to "Brock (gym leader)",
-        "GSLEADER10" to "Misty (gym leader)",
-        "GSLEADER11" to "Lt. Surge (gym leader)",
+        // The Kanto leaders aren't in gym order: each gym's leader object (zone events T06/T11/T04/T07/T08/T03GYM0101)
+        // tells who wears which sprite (Misty on Route 25 wears GSLEADER11, like in her gym).
+        "GSLEADER9" to "Lt. Surge (gym leader)",
+        "GSLEADER10" to "Sabrina (gym leader)",
+        "GSLEADER11" to "Misty (gym leader)",
         "GSLEADER12" to "Erika (gym leader)",
         "GSLEADER13" to "Janine (gym leader)",
-        "GSLEADER14" to "Sabrina (gym leader)",
+        "GSLEADER14" to "Brock (gym leader)",
         "GSLEADER15" to "Blaine (gym leader)",
         "GSLEADER16" to "Blue (gym leader)",
         "RED" to "Red",
@@ -85,7 +88,8 @@ object HgssLabels {
         "GORGGEOUSW" to "beauty",
         "USOKKY" to "odd tree (Sudowoodo)",
         "KABIGON" to "Snorlax",
-        "STOP" to "sign",
+        // Draws nothing (an invisible wall, or a spot that answers A: see HgssExaminables).
+        "STOP" to "invisible object",
         "SIGNSHOES" to "sign",
         "SIGNCLOTHES" to "sign",
         "SIGNFLAG" to "sign",
@@ -152,6 +156,26 @@ object HgssLabels {
         val base = spriteName.removePrefix("GS").trimEnd { it.isDigit() || it == '_' }
         return genericWords.firstOrNull { (key, _) -> base == key || base.startsWith(key) }?.second ?: "person"
     }
+
+    /**
+     * [objects] with the extra tiles of a big sprite labelled like the object they belong to. A sprite wider than a
+     * tile (Snorlax, 2×2) is one object plus placeholders on its other tiles (obj_R11_gsbabyboy1.. with a little boy's
+     * sprite, never drawn): same script as the big one, next to it, and movement type [BIG_SPRITE_PART_MOVEMENT].
+     */
+    fun bigSpriteParts(objects: List<MapObjectInfo>): List<MapObjectInfo> = objects.map { o ->
+        if (o.movement != BIG_SPRITE_PART_MOVEMENT || o.scriptId == 0) return@map o
+        val owner = objects.firstOrNull { b ->
+            b !== o && b.movement != BIG_SPRITE_PART_MOVEMENT && b.scriptId == o.scriptId && b.mapId == o.mapId &&
+                kotlin.math.abs(b.x - o.x) <= 1 && kotlin.math.abs(b.z - o.z) <= 1
+        } ?: return@map o
+        o.copy(label = owner.label)
+    }
+
+    /**
+     * The movement type of the placeholders filling a big sprite's other tiles: in the ROM's zone events, only the
+     * Snorlax tiles of Routes 11 and 12 use it (files/fielddata/eventdata/zone_event 016_R11, 017_R12).
+     */
+    const val BIG_SPRITE_PART_MOVEMENT = 53
 
     /** How an exit is used, from the behavior of its tile. */
     data class ExitKind(val name: String, val pressDirection: String? = null)

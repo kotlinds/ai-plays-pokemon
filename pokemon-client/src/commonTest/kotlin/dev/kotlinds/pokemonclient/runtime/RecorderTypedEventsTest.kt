@@ -110,8 +110,22 @@ class RecorderTypedEventsTest {
     fun aLearnedMoveNamesTheOneForgotten() {
         val before = mon(ampharos, "AMPHAROS", listOf(move(84, "ThunderShock"), move(86, "Thunder Wave"), move(9, "ThunderPunch"), move(33, "Tackle")))
         val after = before.copy(moves = listOf(move(84, "ThunderShock"), move(86, "Thunder Wave"), move(9, "ThunderPunch"), move(435, "Discharge")))
-        val events = record(state(listOf(before), storage()), state(listOf(after), storage()))
+        val events = record(state(listOf(before), storage()), state(listOf(after), storage()), state(listOf(after), storage()))
         val learned = events.single() as GameEvent.LearnedMove
         assertEquals("Discharge" to "Tackle", learned.move to learned.forgot)
+    }
+
+    @Test
+    fun ssAMovesetReadOnceWhileTheGameRewritesThePokemonIsNoMoveLearned() {
+        // The nurse restores PP: one reading caught mid-rewrite passed the checks with garbage moves, then the real ones.
+        val piloswine = mon(ampharos, "PILOSWINE", listOf(move(70, "Strength"), move(420, "Ice Shard"), move(196, "Icy Wind"), move(426, "Mud Bomb")))
+        val torn = piloswine.copy(moves = listOf(move(57918, "MOVE_57918"), move(19110, "MOVE_19110"), move(196, "Icy Wind"), move(426, "Mud Bomb")))
+        val events = record(
+            state(listOf(piloswine), storage()),
+            state(listOf(torn), storage()),
+            state(listOf(piloswine), storage()),
+            state(listOf(piloswine), storage()),
+        )
+        assertEquals(emptyList(), events)
     }
 }
