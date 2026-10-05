@@ -85,6 +85,20 @@ class GameMcpServer(
         engine = embeddedServer(CIO, port = port, host = "127.0.0.1") {
             mcpStreamableHttp(path = "/mcp") { createServer() }
         }.start(wait = false)
+        // No pause here: the game runs at launch, until an agent shows up (see [agentArrived]).
+    }
+
+    /** Set once an agent called a tool: from then on the game is frozen while it thinks (if enabled). */
+    @Volatile
+    private var agentSeen = false
+
+    /**
+     * The first call of an agent: freezes the game for its thinking (when [pauseWhileThinking]), so what it reads
+     * stays true until it acts. Before that, the game simply runs (the app doesn't start paused).
+     */
+    private fun agentArrived() {
+        if (agentSeen) return
+        agentSeen = true
         if (pauseWhileThinking()) host.pause()
     }
 
@@ -115,6 +129,7 @@ class GameMcpServer(
         ) { request ->
             val arrival = System.currentTimeMillis()
             val full = request.arguments?.get("detail")?.jsonPrimitive?.contentOrNull == "full"
+            agentArrived()
             mutex.withLock {
                 calls.run(this, request, arrival) { text(session.describe(full).encode()) }
             }
@@ -204,6 +219,7 @@ class GameMcpServer(
                 "It is 256x384: to touch something seen at (x, y) on the bottom half, touch (x, y - 192).",
         ) {
             val arrival = System.currentTimeMillis()
+            agentArrived()
             val frame = host.frames.value ?: return@addTool error("No frame yet")
             mutex.withLock {
                 // A call: the previous answer reached the agent (or not).
@@ -216,6 +232,7 @@ class GameMcpServer(
 
     /** Runs [block] with the free run allowed, then freezes the game again while the agent thinks (if enabled). */
     private suspend fun <T> running(block: suspend () -> T): T {
+        agentSeen = true
         host.resume()
         try {
             return block()
