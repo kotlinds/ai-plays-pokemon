@@ -133,13 +133,13 @@ class PokemonPlayer(
             note = result.note,
             byPlanner = byPlanner,
             problem = report.problem,
+            stop = report.stop,
         )
         val presses = session.actionsDone
         _state.update {
             val inputTokens = it.inputTokens + result.inputTokens
             val cost = it.costUsd + (result.costUsd ?: 0.0)
             it.copy(
-                lastRequestState = it.lastRequestState,
                 lastDecision = decision,
                 history = (listOf(decision) + it.history).take(HISTORY_SIZE),
                 decisions = it.decisions + 1,
@@ -235,6 +235,8 @@ data class Decision(
     val note: String? = null,
     /** Hybrid mode: true when the planner made this decision. */
     val byPlanner: Boolean = false,
-    /** Why the action stopped early, if it did. */
+    /** Why a step failed, if one did. */
     val problem: String? = null,
+    /** Why the sequence ended early by one of its rules, nothing failing (a step not offered, nothing happening...). */
+    val stop: String? = null,
 )

@@ -1,5 +1,7 @@
 package me.nathanfallet.aiplayspokemon.agent
 
+import dev.kotlinds.pokemonclient.actions.ChainLimits
+import dev.kotlinds.pokemonclient.actions.ChainRunner
 import dev.kotlinds.pokemonclient.data.KnowledgeLevel
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -13,10 +15,6 @@ import me.nathanfallet.aiplayspokemon.decision.ChoiceRequest
  * option is right: with the story goal assist off, the AI has to work out where to go by itself.
  */
 object DecisionPrompt {
-
-    const val DEFAULT_OBJECTIVE =
-        "Play Pokémon HeartGold like a good player: follow the story, talk to people to learn where to go, " +
-            "explore new places, win battles, catch Pokémon and keep the team healthy."
 
     /** The default objective for the game named [gameName] (the detected ROM's name, e.g. "Pokémon Platinum (USA)"). */
     fun defaultObjective(gameName: String): String =
@@ -32,7 +30,20 @@ object DecisionPrompt {
             "of a room, stand on them and press towards the edge. People walk around and block the way. " +
             "PCs, TVs and bookshelves are optional; the story moves forward by talking to people and going to new places."
 
-    private fun instructions(settings: PlayerSettings, planner: Boolean, gameName: String): String = buildString {
+    /**
+     * How a sequence (the options after the choice: `then`) runs: the same chain as the MCP agents' (`ChainRunner.forAgent`,
+     * its stop rules and [ChainLimits.AGENT]), told so the model knows why its sequence may end early and where to read
+     * why (`not_done_code`, `dropped_code` in the next state).
+     */
+    private val SEQUENCE_RULES =
+        "Options you add after your choice run one after the other, each on the screen the previous one led to (at most " +
+            "${ChainRunner.MAX_THEN}). The sequence stops early, the options left not done (the next state says which and why: " +
+            "`not_done`, `not_done_code`), when: an opponent is replaced or faints, or one of your battling Pokémon faints; an " +
+            "escape fails; an option isn't offered on the screen reached; nothing happened in the game for " +
+            "${ChainLimits.AGENT.idle.inWholeSeconds} s, or after ${ChainLimits.AGENT.total.inWholeSeconds} s in all. When the battle " +
+            "ends, its battle options left are dropped (`dropped`, `dropped_code`) and the others go on."
+
+    private fun instructions(settings: PlayerSettings, planner: Boolean, gameName: String, sequences: Boolean): String = buildString {
         append("You are playing ${gameName.substringBefore(" (")} on a Nintendo DS. ")
         append(
             when (settings.mode) {
@@ -49,6 +60,7 @@ object DecisionPrompt {
         append(" Choose the next option that makes the most progress towards `objective`")
         if (settings.knowledge.allows(KnowledgeLevel.POKEDEX_PLUS_WALKTHROUGH)) append(" and `game.story_goals` (when there are several open goals, any of them)")
         append(". If your recent actions changed nothing, do something different.")
+        if (sequences) append(" ").append(SEQUENCE_RULES)
         if (planner) append(" You are the planner: also write in `note` the goal and plan the fast decision model should follow next.")
     }
 
@@ -60,8 +72,8 @@ object DecisionPrompt {
         generative: Boolean,
         plannerGoal: String? = null,
         planner: Boolean = false,
-        /** The game being played (the detected ROM's name): the prompt names it instead of assuming HeartGold. */
-        gameName: String = "Pokémon HeartGold",
+        /** The game being played (the detected ROM's name): the prompt names it, whatever the game. */
+        gameName: String,
     ) = ChoiceRequest(
         state = buildJsonObject {
             put("objective", objective)
@@ -69,7 +81,7 @@ object DecisionPrompt {
             put("game", turn.state)
             put("memory", memory.describe(settings.exploredMap, turn.gameState.field))
         },
-        instructions = instructions(settings, planner, gameName),
+        instructions = instructions(settings, planner, gameName, sequences = generative && settings.allowSequences),
         options = turn.options.associate { it.key to it.description },
         allowSequence = generative && settings.allowSequences,
         reasoning = settings.reasoning,

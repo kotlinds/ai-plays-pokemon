@@ -3,11 +3,10 @@ package me.nathanfallet.aiplayspokemon.emulator.audio
 import me.nathanfallet.aiplayspokemon.emulator.toKotlinxPath
 import dev.kotlinds.pokemonclient.libretro.LibretroCoreSpec
 import dev.kotlinds.pokemonclient.libretro.sound.ResyncResult
+import dev.kotlinds.pokemonclient.libretro.sound.Wav
 import kotlinx.coroutines.runBlocking
 import me.nathanfallet.aiplayspokemon.emulator.ConsoleHost
 import java.io.ByteArrayOutputStream
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -145,17 +144,8 @@ class RapidPausesCheckTest {
         println("timeline: " + marks.joinToString(" | "))
         System.getenv("PAUSE_MUSIC_OUT")?.let { out ->
             val name = System.getenv("PAUSE_MUSIC_NAME") ?: "rapid"
-            writeWav(Path.of(out).resolve("$name.wav"), device.played.toByteArray(), device.rate)
+            Files.write(Path.of(out).resolve("$name.wav"), Wav.encode(device.played.toByteArray(), device.rate))
         }
         assertTrue(results.none { it is ResyncResult.Aborted })
-    }
-
-    private fun writeWav(file: Path, pcm: ByteArray, rate: Int) {
-        val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN).apply {
-            put("RIFF".toByteArray()); putInt(36 + pcm.size); put("WAVEfmt ".toByteArray()); putInt(16); putShort(1); putShort(2)
-            putInt(rate); putInt(rate * 4); putShort(4); putShort(16); put("data".toByteArray()); putInt(pcm.size)
-        }.array()
-        Files.write(file, header + pcm)
-        println("wrote $file")
     }
 }

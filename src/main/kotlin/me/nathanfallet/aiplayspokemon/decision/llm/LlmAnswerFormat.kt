@@ -13,7 +13,9 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
+import dev.kotlinds.pokemonclient.actions.ChainRunner
 import me.nathanfallet.aiplayspokemon.decision.ChoiceRequest
+import me.nathanfallet.aiplayspokemon.decision.ChoiceResult
 
 /**
  * How a generative model (LLM) answers a [ChoiceRequest], shared by every LLM backend.
@@ -29,9 +31,6 @@ import me.nathanfallet.aiplayspokemon.decision.ChoiceRequest
  */
 object LlmAnswerFormat {
 
-    /** Max further options in `then`. */
-    const val MAX_SEQUENCE = 8
-
     /** Text appended to the system prompt: the options and the expected answer. */
     fun instructions(request: ChoiceRequest): String = buildString {
         appendLine(request.instructions)
@@ -46,7 +45,7 @@ object LlmAnswerFormat {
             else add("\"reasoning\": \"<one short sentence>\"")
             if (request.allowNote) add("\"note\": \"<your updated note to yourself: current goal and plan, max 3 sentences>\"")
             add("\"choice\": \"<option id>\"")
-            if (request.allowSequence) add("\"then\": [<up to $MAX_SEQUENCE more option ids to do right after, only if you are sure; [] otherwise>]")
+            if (request.allowSequence) add("\"then\": [<up to ${ChainRunner.MAX_THEN} more option ids to do right after, only if you are sure; [] otherwise>]")
         }
         append(fields.joinToString(", "))
         append("}")
@@ -69,7 +68,7 @@ object LlmAnswerFormat {
                     put("type", "string")
                     put("enum", ids)
                 }
-                put("maxItems", MAX_SEQUENCE)
+                put("maxItems", ChainRunner.MAX_THEN)
             }
         }
         putJsonArray("required") {
@@ -78,7 +77,24 @@ object LlmAnswerFormat {
         }
     }
 
-    data class Answer(val choice: String, val reasoning: String?, val note: String?, val then: List<String>)
+    data class Answer(val choice: String, val reasoning: String?, val note: String?, val then: List<String>) {
+        /**
+         * The decision this answer makes for [request], as every LLM backend reports it: all the probability on the
+         * choice (a generative model gives no distribution), no confidence, and what the backend measured ([model]
+         * that answered, [inputTokens], [costUsd]).
+         */
+        fun toChoiceResult(request: ChoiceRequest, model: String, inputTokens: Int, costUsd: Double? = null) = ChoiceResult(
+            choice = choice,
+            probabilities = request.options.keys.associateWith { if (it == choice) 1.0 else 0.0 },
+            confidence = null,
+            model = model,
+            inputTokens = inputTokens,
+            thought = reasoning,
+            then = then,
+            note = note,
+            costUsd = costUsd,
+        )
+    }
 
     /** Parses an answer, or throws [InvalidAnswer] with a message meant for the model. */
     fun parse(text: String, request: ChoiceRequest): Answer {
@@ -93,7 +109,7 @@ object LlmAnswerFormat {
             ?: throw InvalidAnswer("`$rawChoice` is not one of the option ids: ${options.joinToString(", ")}.")
         val then = (obj["then"] as? JsonArray).orEmpty()
             .mapNotNull { it.jsonPrimitive.contentOrNull?.let { id -> normalize(id, options) } }
-            .take(MAX_SEQUENCE)
+            .take(ChainRunner.MAX_THEN)
         return Answer(
             choice = choice,
             reasoning = obj["reasoning"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },

@@ -54,16 +54,7 @@ class LlmDecisionModel(
             val text = response.textContent()
             try {
                 val answer = LlmAnswerFormat.parse(text, request)
-                return ChoiceResult(
-                    choice = answer.choice,
-                    probabilities = request.options.keys.associateWith { if (it == answer.choice) 1.0 else 0.0 },
-                    confidence = null,
-                    model = meta?.modelId ?: modelId,
-                    inputTokens = inputTokens,
-                    thought = answer.reasoning,
-                    then = answer.then,
-                    note = answer.note,
-                )
+                return answer.toChoiceResult(request, model = meta?.modelId ?: modelId, inputTokens = inputTokens)
             } catch (invalid: LlmAnswerFormat.InvalidAnswer) {
                 previous = text to (invalid.message ?: "invalid answer")
             }

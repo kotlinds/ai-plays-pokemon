@@ -23,7 +23,6 @@ import me.nathanfallet.aiplayspokemon.agent.PokemonPlayer
 import me.nathanfallet.aiplayspokemon.config.AppConfig
 import dev.kotlinds.pokemonclient.console.Button
 import me.nathanfallet.aiplayspokemon.emulator.ConsoleHost
-import me.nathanfallet.aiplayspokemon.emulator.InputSource
 import dev.kotlinds.pokemonclient.PokemonGame
 import dev.kotlinds.pokemonclient.runtime.Recorder
 import dev.kotlinds.pokemonclient.view.StateView
@@ -34,12 +33,10 @@ import me.nathanfallet.aiplayspokemon.decision.DecisionBackend
 import me.nathanfallet.aiplayspokemon.decision.DecisionModel
 import me.nathanfallet.aiplayspokemon.decision.jev.JevClient
 import me.nathanfallet.aiplayspokemon.decision.jev.JevDecisionModel
-import me.nathanfallet.aiplayspokemon.agent.AgentSession
 import me.nathanfallet.aiplayspokemon.agent.ControlMode
 import me.nathanfallet.aiplayspokemon.agent.PlayerSettings
 import me.nathanfallet.aiplayspokemon.mcp.GameMcpServer
 import me.nathanfallet.aiplayspokemon.agent.GameSession
-import me.nathanfallet.aiplayspokemon.agent.actionMode
 import me.nathanfallet.aiplayspokemon.decision.claudecode.ClaudeCodeDecisionModel
 import me.nathanfallet.aiplayspokemon.decision.llm.LlmDecisionModel
 import me.nathanfallet.aiplayspokemon.decision.llm.LlmProvider
@@ -105,14 +102,13 @@ class AppController(
         return withContext(Dispatchers.Default) { panelLock.withLock { block(session) } }
     }
 
-    private val _panel = MutableStateFlow<AgentView?>(null)
+    private val _panel = MutableStateFlow<PanelView?>(null)
 
     /** What an agent would get from the game right now ([GameSession.describe]), refreshed a few times per second. */
-    val panel: StateFlow<AgentView?> = _panel.asStateFlow()
+    val panel: StateFlow<PanelView?> = _panel.asStateFlow()
 
     init {
-        emulator.setMusicDuringPauses(_settings.value.musicDuringPauses)
-        emulator.setWaitForSongChange(_settings.value.waitForSongChange)
+        emulator.musicDuringPauses = _settings.value.musicDuringPausesSettings
         recorder?.let { r ->
             emulator.frameListener = r::onFrame
             emulator.humanInputListener = { r.humanInput(emulator.status.value.frameCount) }
@@ -126,8 +122,7 @@ class AppController(
         val updated = transform(_settings.value)
         _settings.value = updated
         config.playerSettings = updated
-        emulator.setMusicDuringPauses(updated.musicDuringPauses)
-        emulator.setWaitForSongChange(updated.waitForSongChange)
+        emulator.musicDuringPauses = updated.musicDuringPausesSettings
     }
 
     /** Runs the MCP server only while the MCP tab is selected (one player at a time). */
@@ -136,7 +131,7 @@ class AppController(
         val running = _mcp.value
         if (wanted && running == null) {
             val session = session(game, confirmDelivery = true)
-            val server = GameMcpServer(session, emulator, config.mcpPort, mode = { _settings.value.mode.actionMode }, pauseWhileThinking = { _settings.value.pauseWhileThinking }, knowledge = { _settings.value.knowledge })
+            val server = GameMcpServer(session, emulator, config.mcpPort, pauseWhileThinking = { _settings.value.pauseWhileThinking })
             server.start()
             _mcp.value = server
         } else if (!wanted && running != null) {
@@ -146,14 +141,8 @@ class AppController(
     }
 
     /** A session of [game] with the app's current options (read at each call, so changes apply at once). */
-    private fun session(game: PokemonGame, confirmDelivery: Boolean) = GameSession(
-        emulator, game, recorder!!,
-        mode = { _settings.value.mode.actionMode },
-        knowledge = { _settings.value.knowledge },
-        confirmDelivery = confirmDelivery,
-        solvePuzzles = { _settings.value.solvePuzzles },
-        hideDestinations = { _settings.value.hideDestinations },
-    )
+    private fun session(game: PokemonGame, confirmDelivery: Boolean) =
+        GameSession(emulator, game, recorder!!, options = { _settings.value.agentOptions }, confirmDelivery = confirmDelivery)
 
     /** Switches the decision model: the current player is stopped and replaced. */
     fun selectBackend(backend: DecisionBackend) {
@@ -188,7 +177,6 @@ class AppController(
         createPlayer()
     }
 
-    /** Stores the API key of the current model (Jev or LLM provider) in the config file. */
     /** Port of the MCP server: one app per agent, each on its own port, to compare agents side by side. */
     val mcpPort: Int get() = config.mcpPort
 
@@ -201,6 +189,7 @@ class AppController(
         updateMcpServer()
     }
 
+    /** Stores the API key of the current model (Jev or LLM provider) in the config file. */
     fun setApiKey(apiKey: String) {
         if (apiKey.isBlank()) return
         when (_backend.value) {
@@ -259,7 +248,7 @@ class AppController(
     private suspend fun refreshPanel() {
         if (panelSession == null) return
         while (scope.isActive) {
-            _panel.value = runCatching { withPanelSession { it.describeWithState() } }.getOrNull()?.let { (state, view) -> AgentView(StateView.summary(state), view) }
+            _panel.value = runCatching { withPanelSession { it.describeWithState() } }.getOrNull()?.let { (state, view) -> PanelView(StateView.summary(state), view) }
             delay(250)
         }
     }
@@ -285,7 +274,7 @@ class AppController(
         val down = event.type == KeyEventType.KeyDown
         KeyboardMapping.buttons[event.key]?.let { button ->
             if (down) humanButtons += button else humanButtons -= button
-            emulator.setButtons(InputSource.HUMAN, humanButtons.toSet())
+            emulator.setButtons(humanButtons.toSet())
             return true
         }
         if (!down) return false
@@ -307,10 +296,14 @@ class AppController(
     fun togglePause() = emulator.setUserPaused(emulator.status.value.running)
 }
 
-/** What an agent gets from the game at one moment ([GameSession.describe]), and a one-line [summary] of it. */
-data class AgentView(val summary: String, val view: JsonObject)
+/**
+ * What the control panel shows of the game at one moment: what an agent gets ([GameSession.describe], the library's
+ * [dev.kotlinds.pokemonclient.view.AgentView]) and a one-line [summary] of it.
+ */
+data class PanelView(val summary: String, val view: JsonObject)
 
 /** Which LLM to use: a provider, one of its model ids, and whether it thinks before answering. */
 data class LlmSettings(val provider: LlmProvider, val model: String, val thinking: Boolean)
 
-private val prettyJson = Json { prettyPrint = true }
+/** JSON printed for people (the panel, the snapshots): indented. */
+internal val prettyJson = Json { prettyPrint = true }

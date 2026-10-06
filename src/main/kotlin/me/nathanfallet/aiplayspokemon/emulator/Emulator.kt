@@ -2,6 +2,7 @@ package me.nathanfallet.aiplayspokemon.emulator
 
 import dev.kotlinds.pokemonclient.console.Button
 import dev.kotlinds.pokemonclient.console.Frame
+import dev.kotlinds.pokemonclient.console.Platform
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -38,19 +39,16 @@ interface Emulator : AutoCloseable {
     fun setMuted(muted: Boolean)
 
     /**
-     * Sets the buttons currently held by one input [source].
-     * The console sees the union of all sources, so a human can always help (or fight) the agent.
+     * Sets the buttons the human currently holds (agents never hold buttons: they act through the host's lease, and a
+     * human input interrupts them).
      */
-    fun setButtons(source: InputSource, buttons: Set<Button>)
+    fun setButtons(buttons: Set<Button>)
 
     /**
      * Touches the touch screen at a position expressed as a fraction (0..1) of the whole frame,
      * or releases it when [position] is null. Emulators without a touch screen ignore it.
      */
     fun touch(position: Pair<Float, Float>?)
-
-    /** Suspends until [count] more frames have been emulated (time passes only while running). */
-    suspend fun awaitFrames(count: Int)
 
     /** Copy of the console's main RAM, taken between two frames so it is consistent. */
     suspend fun readMainRam(): ByteArray
@@ -62,15 +60,14 @@ interface Emulator : AutoCloseable {
     suspend fun reset()
 }
 
-/** Who is pressing buttons. */
-enum class InputSource { HUMAN, AGENT }
-
 
 data class EmulatorInfo(
     /** Emulator name and version, e.g. "melonDS 0.9.3". */
     val name: String,
     /** Frames per second of the emulated console (~59.83 for the DS). */
     val fps: Double,
+    /** The kind of console emulated: its screens (size, touch screen). */
+    val platform: Platform,
 )
 
 data class EmulatorStatus(

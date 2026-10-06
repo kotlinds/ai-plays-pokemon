@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import me.nathanfallet.aiplayspokemon.emulator.audio.AudioDevice
 import me.nathanfallet.aiplayspokemon.emulator.audio.AudioPlayer
+import me.nathanfallet.aiplayspokemon.emulator.audio.MusicDuringPausesSettings
 import me.nathanfallet.aiplayspokemon.emulator.audio.ShadowAudio
 import dev.kotlinds.pokemonclient.console.ConsolePort
 import dev.kotlinds.pokemonclient.libretro.LibretroConsole
@@ -106,11 +107,13 @@ class ConsoleHost(
     private lateinit var pacer: FramePacer
     private lateinit var shadowAudio: ShadowAudio
 
-    /** The "Music during pauses" setting, until [shadowAudio] exists (it is created on the console thread). */
-    @Volatile private var musicDuringPauses = true
-
-    /** The "Wait for the song change" setting, until [shadowAudio] exists. */
-    @Volatile private var waitForSongChange = true
+    /**
+     * "Music during pauses" (on by default): while the game is paused, its music goes on, and the game resumes with
+     * the music where it got to (only when the sound is on); with its "Wait for the song change". [shadowAudio] reads
+     * it at every pause: this is the only copy (set from the player's settings by the app).
+     */
+    @Volatile
+    var musicDuringPauses = MusicDuringPausesSettings()
 
     private val ready = CountDownLatch(1)
     private var startupError: Throwable? = null
@@ -119,11 +122,9 @@ class ConsoleHost(
         val console = try {
             LibretroConsole(spec, romPath.toKotlinxPath(), dataDirectory.toKotlinxPath(), onVideo = { _frames.value = it }, onAudio = { s, n -> audio.play(s, n) }).also {
                 audio = AudioPlayer(it.sampleRate, audioDevice(it.sampleRate))
-                info = EmulatorInfo(name = it.coreName, fps = it.fps)
+                info = EmulatorInfo(name = it.coreName, fps = it.fps, platform = it.platform)
                 pacer = FramePacer(it.fps)
-                shadowAudio = ShadowAudio(spec, romPath, dataDirectory, audio, it.fps).apply {
-                    enabled = musicDuringPauses
-                    waitForSongChange = this@ConsoleHost.waitForSongChange
+                shadowAudio = ShadowAudio(spec, romPath, dataDirectory, audio, it.fps, settings = { musicDuringPauses }).apply {
                     onResume = { result -> musicDuringPausesListener?.invoke(result) }
                     soundOn = !status.value.muted && !status.value.fastForward
                     unsupportedReason?.let { why -> println("[music during pauses] unavailable: $why") }
@@ -290,30 +291,10 @@ class ConsoleHost(
         shadowAudio.soundOn = !audio.muted
     }
 
-    /**
-     * "Music during pauses" (on by default): while the game is paused, its music goes on, and the game resumes with the
-     * music where it got to. Only when the sound is on.
-     */
-    fun setMusicDuringPauses(enabled: Boolean) {
-        musicDuringPauses = enabled
-        shadowAudio.enabled = enabled
-    }
-
-    /**
-     * "Wait for the song change" (on by default, with music during pauses): a pause asked while the game is changing
-     * its song starts once the new song plays (see [ShadowAudio.waitForSongChange]).
-     */
-    fun setWaitForSongChange(enabled: Boolean) {
-        waitForSongChange = enabled
-        shadowAudio.waitForSongChange = enabled
-    }
-
     /** Why music during pauses can't work here (ROM, core, platform), or null when it can. */
     val musicDuringPausesUnavailable: String? get() = shadowAudio.unsupportedReason
 
-    override fun setButtons(source: InputSource, buttons: Set<Button>) {
-        // Agents don't hold buttons anymore: they act through a lease. Only the human's keys are tracked here.
-        if (source != InputSource.HUMAN) return
+    override fun setButtons(buttons: Set<Button>) {
         if (humanButtons.value.isEmpty() && buttons.isNotEmpty()) humanInputListener?.invoke()
         humanButtons.value = buttons
         humanActivity.keys(held = buttons.isNotEmpty())
@@ -321,16 +302,13 @@ class ConsoleHost(
 
     override fun touch(position: Pair<Float, Float>?) {
         // The UI gives a position as a fraction of the whole frame (both screens); only the bottom one is touchable.
+        val width = info.platform.screenWidth
+        val height = info.platform.screenHeight
         humanTouch = position?.let { (fx, fy) ->
-            val y = (fy * 2 - 1) * SCREEN_HEIGHT
-            if (y < 0) null else TouchPoint((fx * SCREEN_WIDTH).toInt().coerceIn(0, SCREEN_WIDTH - 1), y.toInt().coerceIn(0, SCREEN_HEIGHT - 1))
+            val y = (fy * 2 - 1) * height
+            if (y < 0) null else TouchPoint((fx * width).toInt().coerceIn(0, width - 1), y.toInt().coerceIn(0, height - 1))
         }
         humanActivity.touch(touching = humanTouch != null)
-    }
-
-    override suspend fun awaitFrames(count: Int) {
-        val target = status.value.frameCount + count
-        status.first { it.frameCount >= target }
     }
 
     override suspend fun readMainRam(): ByteArray = onConsoleThread { console ->
@@ -372,11 +350,6 @@ class ConsoleHost(
     // endregion
 
     private fun stateFile(slot: Int) = saveStateDirectory.resolve("${romPath.fileName}.state$slot")
-
-    private companion object {
-        const val SCREEN_WIDTH = 256
-        const val SCREEN_HEIGHT = 192
-    }
 }
 
 /**

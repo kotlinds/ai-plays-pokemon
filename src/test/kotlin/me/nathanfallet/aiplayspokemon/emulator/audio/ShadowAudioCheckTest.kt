@@ -5,10 +5,9 @@ import dev.kotlinds.pokemonclient.console.MemoryRegion
 import dev.kotlinds.pokemonclient.libretro.LibretroConsole
 import dev.kotlinds.pokemonclient.libretro.LibretroCoreSpec
 import dev.kotlinds.pokemonclient.libretro.sound.ResyncResult
+import dev.kotlinds.pokemonclient.libretro.sound.Wav
 import me.nathanfallet.aiplayspokemon.emulator.FramePacer
 import java.io.ByteArrayOutputStream
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.math.roundToInt
@@ -46,7 +45,7 @@ class ShadowAudioCheckTest {
         lateinit var audio: AudioPlayer
         val main = LibretroConsole(spec, rom.toKotlinxPath(), data.toKotlinxPath(), onVideo = {}, onAudio = { s, n -> audio.play(s, n) })
         audio = AudioPlayer(main.sampleRate, device)
-        val shadowAudio = ShadowAudio(spec, rom, data, audio, main.fps)
+        val shadowAudio = ShadowAudio(spec, rom, data, audio, main.fps, settings = { MusicDuringPausesSettings() })
         try {
             check(main.loadState(Files.readAllBytes(stateFile)))
             main.step(1)
@@ -72,7 +71,7 @@ class ShadowAudioCheckTest {
             assertContentEquals(ramAtPause, ram(main), "the main RAM is the paused one")
             play(10.0)
             System.getenv("PAUSE_MUSIC_OUT")?.let { out ->
-                writeWav(Path.of(out).resolve("pause_music_${spec.name.lowercase()}.wav"), device.bytes.toByteArray(), main.sampleRate.roundToInt())
+                Files.write(Path.of(out).resolve("pause_music_${spec.name.lowercase()}.wav"), Wav.encode(device.bytes.toByteArray(), main.sampleRate.roundToInt()))
             }
             assertIs<ResyncResult.Resynced>(shadowAudio.lastResult)
         } finally {
@@ -83,13 +82,4 @@ class ShadowAudioCheckTest {
 
     private fun ram(console: LibretroConsole) =
         ByteArray(console.memorySize(MemoryRegion.MAIN_RAM)).also { console.read(MemoryRegion.MAIN_RAM, 0, it.size, it) }
-
-    private fun writeWav(file: Path, pcm: ByteArray, rate: Int) {
-        val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN).apply {
-            put("RIFF".toByteArray()); putInt(36 + pcm.size); put("WAVEfmt ".toByteArray()); putInt(16); putShort(1); putShort(2)
-            putInt(rate); putInt(rate * 4); putShort(4); putShort(16); put("data".toByteArray()); putInt(pcm.size)
-        }.array()
-        Files.write(file, header + pcm)
-        println("wrote $file")
-    }
 }

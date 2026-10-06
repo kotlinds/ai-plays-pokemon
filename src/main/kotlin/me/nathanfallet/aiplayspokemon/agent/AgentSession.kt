@@ -1,22 +1,27 @@
 package me.nathanfallet.aiplayspokemon.agent
 
 import dev.kotlinds.pokemonclient.PokemonGame
+import dev.kotlinds.pokemonclient.actions.ActionOutcome
+import dev.kotlinds.pokemonclient.actions.ChainRunner
+import dev.kotlinds.pokemonclient.actions.ChainStep
 import dev.kotlinds.pokemonclient.actions.GameAction
 import dev.kotlinds.pokemonclient.runtime.Recorder
 import dev.kotlinds.pokemonclient.state.GameState
+import dev.kotlinds.pokemonclient.state.Screen
+import dev.kotlinds.pokemonclient.view.AgentView
 import dev.kotlinds.pokemonclient.world.Area
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import me.nathanfallet.aiplayspokemon.decision.ChoiceRequest
 import me.nathanfallet.aiplayspokemon.emulator.ConsoleHost
 
 /**
  * The game as seen by our own AI player (LLM through Koog, Claude Code, Jev), on top of the [GameSession] shared
- * with MCP agents: the same typed actions, the same state, the same verification. A turn is: [prepare] (observe,
- * list the possible actions as options with stable keys, build the request), then [act] (carry the chosen action
- * out, remember what changed).
+ * with MCP agents: the same typed actions, the same state, the same verification, the same chains. A turn is:
+ * [prepare] (the state, the possible actions as options with stable keys, the request), then [act] (the chosen
+ * action and its sequence carried out as one chain, what changed remembered). The next turn's state is read anew and
+ * carries what the act's answer told (its outcome, everything the game said during those actions: [UnreadAnswer]).
  */
 class AgentSession(
     private val host: ConsoleHost,
@@ -24,13 +29,7 @@ class AgentSession(
     recorder: Recorder,
     val settings: () -> PlayerSettings,
 ) {
-    val gameSession = GameSession(
-        host, game, recorder, mode = { settings().mode.actionMode },
-        // The knowledge level chosen in the app, like the MCP agents get (walkthrough: hidden items, puzzle plans...).
-        knowledge = { settings().knowledge },
-        solvePuzzles = { settings().solvePuzzles },
-        hideDestinations = { settings().hideDestinations },
-    )
+    val gameSession = GameSession(host, game, recorder, options = { settings().agentOptions })
     val memory = AgentMemory()
 
     /** Number of actions carried out. */
@@ -45,6 +44,9 @@ class AgentSession(
     @Volatile
     var plannerGoal: String? = null
 
+    /** The last [act]'s answer, until the next turn's state carries it to the model ([UnreadAnswer]). */
+    private val unread = UnreadAnswer()
+
     /** One possible action, as offered to models: a stable key and a description. */
     data class Option(val key: String, val description: String, val action: GameAction)
 
@@ -57,13 +59,21 @@ class AgentSession(
         fun resolve(key: String): Option? = options.firstOrNull { it.key == key }
     }
 
-    /** Observes the game (the agent's view and the typed state it comes from) and lists the options. */
+    /**
+     * The state of this turn, always read from the game now (the game may have moved on since the last act: the free
+     * run, a human), with what the last act's answer told that the model hasn't read yet (its outcome, the messages
+     * and events of its actions: [UnreadAnswer]), once. Its options.
+     */
     suspend fun prepare(): Turn {
-        val (gameState, state) = gameSession.describeWithState()
+        val (gameState, fresh) = gameSession.describeWithState()
+        val state = unread.into(fresh)
         memory.observeMap(gameState.field, area(gameState))
-        val options = gameSession.registry.enumerate(gameState, settings().mode.actionMode).values.map { Option(it.key, describe(it, state), it) }
+        val options = options(gameState).values.map { Option(it.key, describe(it, gameState.screen), it) }
         return Turn(gameState, state, options)
     }
+
+    /** The options of [state] by key, as models pick them (the session's mode). */
+    private fun options(state: GameState): Map<String, GameAction> = gameSession.registry.enumerate(state, gameSession.options().mode)
 
     fun request(turn: Turn, generative: Boolean, planner: Boolean = false): ChoiceRequest = DecisionPrompt.build(
         objective = objective,
@@ -76,33 +86,35 @@ class AgentSession(
         gameName = game.name,
     )
 
-    /** What happened when carrying out a choice (and its sequence). */
-    data class Report(val after: GameState, val performed: List<String>, val problem: String?, val skipped: Int)
+    /**
+     * What happened when carrying out a choice (and its sequence): the [problem] when a step failed; [stop] when the
+     * sequence ended early by one of its rules without anything failing (a step not offered on the screen reached,
+     * the battle changed, nothing happening for a while: [dev.kotlinds.pokemonclient.actions.ChainStop]), with the
+     * [skipped] steps.
+     */
+    data class Report(val after: GameState, val performed: List<String>, val problem: String?, val stop: String?, val skipped: Int)
 
     /**
-     * Carries out [choice], then the options of [then] one by one (each resolved against the situation at that
-     * moment), stopping at the first failure or screen change: the model chose them for the screen it saw.
+     * Carries out [choice], then the options of [then] (each resolved on the screen reached when its turn comes), as one
+     * chain run like the MCP agents' ([GameSession.act]: the same stop rules and limits, at most
+     * [ChainRunner.MAX_THEN] further steps). Every step is remembered with what it changed.
      */
     suspend fun act(turn: Turn, choice: Option, then: List<String> = emptyList(), thought: String? = null, note: String? = null): Report {
         memory.updateNote(note)
-        val performed = mutableListOf<String>()
-        var current = turn
-        var option = choice
-        var remaining = then
-        while (true) {
-            val result = gameSession.act(option.action)
+        val steps = listOf<ChainStep>(ChainStep.Planned(choice.action)) +
+            then.take(ChainRunner.MAX_THEN).map { key -> ChainStep.ByKey(key) { state -> options(state)[key] } }
+        var before = turn.gameState
+        var first = true
+        val answer = gameSession.act(steps, detail = AgentView.Detail.STANDARD) { action, outcome, after ->
             actionsDone++
-            val after = gameSession.state()
-            val problem = result["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull
-            memory.record(option.key, current.gameState, after, area(after), thought.takeIf { performed.isEmpty() }, problem)
-            performed += option.key
-            val before = current.gameState
-            val changed = after.screen::class != before.screen::class || after.field?.mapId != before.field?.mapId
-            if (remaining.isEmpty() || problem != null || changed) return Report(after, performed, problem, remaining.size)
-            current = prepare()
-            option = current.resolve(remaining.first()) ?: return Report(current.gameState, performed, null, remaining.size)
-            remaining = remaining.drop(1)
+            val problem = (outcome as? ActionOutcome.Failed)?.error?.message
+            memory.record(action.key, before, after, area(after), thought.takeIf { first }, problem)
+            first = false
+            before = after
         }
+        unread.keep(answer.outcome, answer.view)
+        val chain = answer.chain
+        return Report(answer.state, chain.performed, chain.failed?.second?.message, chain.stop?.message, chain.skipped.size)
     }
 
     /**
@@ -122,19 +134,60 @@ class AgentSession(
     /** The ROM's map of where the player is in [state], when the game has one (for the explored map). */
     private fun area(state: GameState): Area? = state.field?.let { game.world?.areaOf(it.mapId) }
 
-    /** A one-line description of an action for models that read option lists. */
-    private fun describe(action: GameAction, state: JsonObject): String = when (action) {
+    /** A one-line description of an action for models that read option lists ([screen]: the typed screen it is on). */
+    private fun describe(action: GameAction, screen: Screen): String = when (action) {
         is GameAction.Press -> "Press ${action.button.name}."
         is GameAction.Wait -> "Wait until the game needs you again."
         is GameAction.AdvanceDialogue -> "Read the messages to the end (stops at a choice)."
-        is GameAction.Choose -> "Choose “${entryLabel(state, action.entry) ?: action.entry}”."
+        is GameAction.Choose -> "Choose “${(screen as? Screen.Selectable)?.entries?.firstOrNull { it.id == action.entry }?.label ?: action.entry}”."
         is GameAction.Attack -> "Attack with ${action.move.raw}${action.target?.let { " on ${it.wire}" } ?: ""}."
         is GameAction.Run -> "Run away from the battle."
         is GameAction.KeepBattling -> "Keep your Pokémon in."
         else -> action.key
     }
-
-    private fun entryLabel(state: JsonObject, id: String): String? =
-        (state["screen"] as? JsonObject)?.get("entries")?.let { it as? kotlinx.serialization.json.JsonArray }
-            ?.map { it.jsonObject }?.firstOrNull { it["id"]?.jsonPrimitive?.contentOrNull == id }?.get("label")?.jsonPrimitive?.contentOrNull
 }
+
+/**
+ * The answer of an [AgentSession.act] the model hasn't read yet: the next turn's state is always a new reading of the
+ * game ([AgentSession.prepare]), which must not lose what that answer told. It is carried into the next reading once
+ * ([into]), then forgotten: nothing piles up from turn to turn.
+ */
+internal class UnreadAnswer {
+    private var outcome: JsonObject? = null
+    private var view: JsonObject? = null
+
+    /** The answer of an act: the chain's [outcome] and the [view] after it ([GameSession.Answer]). */
+    fun keep(outcome: JsonObject, view: JsonObject) {
+        this.outcome = outcome
+        this.view = view
+    }
+
+    /**
+     * [fresh], a new reading, with what the unread answer told: its outcome first (ok, performed, error, not_done...,
+     * unless the reading says the same key), and its messages and events before the new ones. Once: the answer is
+     * forgotten afterwards ([fresh] alone the next time).
+     */
+    fun into(fresh: JsonObject): JsonObject {
+        val outcome = outcome ?: return fresh
+        val view = view.orEmptyObject()
+        this.outcome = null
+        this.view = null
+        return buildJsonObject {
+            outcome.forEach { (k, v) -> if (k !in fresh) put(k, v) }
+            fresh.forEach { (k, v) ->
+                if (k in CARRIED_LISTS) put(k, JsonArray(((view[k] as? JsonArray).orEmpty()) + ((v as? JsonArray).orEmpty())))
+                else put(k, v)
+            }
+            CARRIED_LISTS.filter { it !in fresh && it in view }.forEach { put(it, view[it]!!) }
+        }
+    }
+
+    private companion object {
+        /** What the game said, which a new reading must not lose. */
+        val CARRIED_LISTS = listOf(AgentView.MESSAGES, AgentView.EVENTS)
+    }
+}
+
+private fun JsonObject?.orEmptyObject(): JsonObject = this ?: JsonObject(emptyMap())
+
+private fun JsonArray?.orEmpty(): List<kotlinx.serialization.json.JsonElement> = this?.toList() ?: emptyList()

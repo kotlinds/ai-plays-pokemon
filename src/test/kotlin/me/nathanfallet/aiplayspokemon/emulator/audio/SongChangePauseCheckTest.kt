@@ -3,11 +3,10 @@ package me.nathanfallet.aiplayspokemon.emulator.audio
 import dev.kotlinds.pokemonclient.libretro.LibretroCoreSpec
 import dev.kotlinds.pokemonclient.libretro.sound.ResyncRefusal
 import dev.kotlinds.pokemonclient.libretro.sound.ResyncResult
+import dev.kotlinds.pokemonclient.libretro.sound.Wav
 import kotlinx.coroutines.runBlocking
 import me.nathanfallet.aiplayspokemon.emulator.ConsoleHost
 import me.nathanfallet.aiplayspokemon.emulator.toKotlinxPath
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -20,7 +19,7 @@ import kotlin.test.assertIs
  * End to end check of a pause asked while the game changes its song (the user's Route 22 case: just walked from
  * Viridian City onto Route 22, the game fading Viridian's music out to start Route 22's), through the app's
  * [ConsoleHost] in real time: the game runs a few frames, pauses for 4 s, resumes and plays 3 s, with
- * [ShadowAudio.waitForSongChange] on (the pause starts once Route 22's music plays, and is resynced) or, with
+ * [MusicDuringPausesSettings.waitForSongChange] on (the pause starts once Route 22's music plays, and is resynced) or, with
  * `PAUSE_MUSIC_SONG_CHANGE_WAIT=off`, off (the pause starts at once: the shadow's game starts Route 22's music, the
  * resume is refused and the music jumps back to Viridian's fade). One per run: a core can't be started twice in a
  * process. What the sound card played is written as a WAV.
@@ -44,7 +43,7 @@ class SongChangePauseCheckTest {
         fun pauseOnce(wait: Boolean): ResyncResult {
             lateinit var device: RapidPausesCheckTest.RealtimeDevice
             val host = ConsoleHost(spec, rom, data) { rate -> RapidPausesCheckTest.RealtimeDevice(rate).also { device = it } }
-            host.setWaitForSongChange(wait)
+            host.musicDuringPauses = MusicDuringPausesSettings(waitForSongChange = wait)
             val results = Collections.synchronizedList(mutableListOf<ResyncResult>())
             host.musicDuringPausesListener = { results += it }
             try {
@@ -60,7 +59,7 @@ class SongChangePauseCheckTest {
             }
             device.finish()
             System.getenv("PAUSE_MUSIC_OUT")?.let { out ->
-                writeWav(Path.of(out).resolve("song_change_wait_${if (wait) "on" else "off"}.wav"), device.played.toByteArray(), device.rate)
+                Files.write(Path.of(out).resolve("song_change_wait_${if (wait) "on" else "off"}.wav"), Wav.encode(device.played.toByteArray(), device.rate))
             }
             println("wait for the song change $wait: ${results.joinToString()}")
             return results.single()
@@ -71,14 +70,5 @@ class SongChangePauseCheckTest {
         } else {
             assertIs<ResyncResult.Resynced>(pauseOnce(wait = true))
         }
-    }
-
-    private fun writeWav(file: Path, pcm: ByteArray, rate: Int) {
-        val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN).apply {
-            put("RIFF".toByteArray()); putInt(36 + pcm.size); put("WAVEfmt ".toByteArray()); putInt(16); putShort(1); putShort(2)
-            putInt(rate); putInt(rate * 4); putShort(4); putShort(16); put("data".toByteArray()); putInt(pcm.size)
-        }.array()
-        Files.write(file, header + pcm)
-        println("wrote $file")
     }
 }

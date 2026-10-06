@@ -1,13 +1,11 @@
 package me.nathanfallet.aiplayspokemon.mcp
 
-import dev.kotlinds.pokemonclient.data.KnowledgeLevel
 import dev.kotlinds.pokemonclient.data.Lookup
 import dev.kotlinds.pokemonclient.data.LookupKind
 import dev.kotlinds.pokemonclient.actions.ActionException
-import dev.kotlinds.pokemonclient.actions.ActionMode
-import dev.kotlinds.pokemonclient.actions.GameAction
-import dev.kotlinds.pokemonclient.actions.ChainLimits
-import kotlin.time.Duration.Companion.seconds
+import dev.kotlinds.pokemonclient.actions.ChainRunner
+import dev.kotlinds.pokemonclient.actions.ChainStep
+import dev.kotlinds.pokemonclient.view.AgentView
 import dev.kotlinds.pokemonclient.console.Frame
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
@@ -59,9 +57,7 @@ class GameMcpServer(
     private val session: GameSession,
     private val host: ConsoleHost,
     private val port: Int,
-    private val mode: () -> ActionMode,
     private val pauseWhileThinking: () -> Boolean,
-    private val knowledge: () -> KnowledgeLevel,
 ) {
     private val mutex = Mutex()
 
@@ -128,10 +124,10 @@ class GameMcpServer(
             ),
         ) { request ->
             val arrival = System.currentTimeMillis()
-            val full = request.arguments?.get("detail")?.jsonPrimitive?.contentOrNull == "full"
+            val detail = if (request.arguments?.get("detail")?.jsonPrimitive?.contentOrNull == "full") AgentView.Detail.FULL else AgentView.Detail.STANDARD
             agentArrived()
             mutex.withLock {
-                calls.run(this, request, arrival) { text(session.describe(full).encode()) }
+                calls.run(this, request, arrival) { text(session.describe(detail).encode()) }
             }
         }
         addTool(
@@ -141,10 +137,10 @@ class GameMcpServer(
                 "checked for you; an error says exactly why an action didn't happen. Always give a short first-person `reasoning`.",
             inputSchema = ToolSchema(
                 properties = buildJsonObject {
-                    put("action", session.registry.jsonSchema(mode()))
+                    put("action", session.registry.jsonSchema(session.options().mode))
                     putJsonObject("then") {
                         put("type", "array")
-                        put("description", "Optional further actions done right after, only when sure (max 8). Stops at the first problem, when the battle changes under it " +
+                        put("description", "Optional further actions done right after, only when sure (max ${ChainRunner.MAX_THEN}). Stops at the first problem, when the battle changes under it " +
                             "(FOE_CHANGED: the foe switched or a new one was sent, even of the same species; FOE_FAINTED; OWN_FAINTED), after a `run` that couldn't escape " +
                             "(ESCAPE_FAILED), or when nothing has happened for a while (IDLE / TIME_CAP): `not_done` lists the steps left and `not_done_code` why. " +
                             "Once the battle is over, only its battle steps are dropped (attack, switch, keep_battling, run, throw_ball, use_item of a battle-only " +
@@ -172,11 +168,11 @@ class GameMcpServer(
             val arguments = request.arguments ?: JsonObject(emptyMap())
             val reasoning = arguments["reasoning"]?.jsonPrimitive?.contentOrNull
             mutex.withLock {
-                val json = listOfNotNull(arguments["action"] as? JsonObject) + (arguments["then"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>().take(MAX_THEN)
+                val json = listOfNotNull(arguments["action"] as? JsonObject) + (arguments["then"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>().take(ChainRunner.MAX_THEN)
                 if (json.isEmpty()) return@withLock error("`action` must be an object like {\"type\": \"press\", \"button\": \"a\"}")
                 arguments["note"]?.jsonPrimitive?.contentOrNull?.let { session.addNote(it) }
                 val actions = json.map { step ->
-                    session.registry.parse(step, mode()).getOrElse { error ->
+                    session.registry.parse(step, session.options().mode).getOrElse { error ->
                         val message = (error as? ActionException)?.error?.message ?: error.message ?: "invalid action"
                         return@withLock error("$message. Call get_state for the valid actions.")
                     }
@@ -185,8 +181,8 @@ class GameMcpServer(
                 // Shown as in progress right away: the comment appears while the action happens.
                 _activity.update { it.started(label, reasoning) }
                 // One response for the whole chain: every step's messages, every step performed.
-                val compact = arguments["detail"]?.jsonPrimitive?.contentOrNull != "full"
-                val result = calls.run(this, request, arrival) { running { session.act(actions, limits = CHAIN_LIMITS, compact = compact) } }
+                val detail = if (arguments["detail"]?.jsonPrimitive?.contentOrNull == "full") AgentView.Detail.STANDARD else AgentView.Detail.COMPACT
+                val result = calls.run(this, request, arrival) { running { session.act(actions.map { ChainStep.Planned(it) }, detail = detail).json } }
                 val ok = result["ok"]?.jsonPrimitive?.contentOrNull == "true"
                 _activity.update { it.finished(ok, if (ok) null else result["error"]?.let { e -> (e as? JsonObject)?.get("code")?.jsonPrimitive?.contentOrNull ?: e.toString() }) }
                 text(result.encode())
@@ -216,12 +212,13 @@ class GameMcpServer(
                 ?: return@addTool error("`kind` must be one of ${LookupKind.entries.joinToString { it.name.lowercase() }}")
             val id = arguments["id"]?.jsonPrimitive?.contentOrNull ?: return@addTool error("`id` is missing")
             val data = session.gameData ?: return@addTool error("No game data for this game")
-            Lookup(data, knowledge()).lookup(kind, id).fold({ text(it.encode()) }, { error(it.message ?: "lookup failed") })
+            Lookup(data, session.options().knowledge).lookup(kind, id).fold({ text(it.encode()) }, { error(it.message ?: "lookup failed") })
         }
+        val screens = host.info.platform
         addTool(
             name = "screenshot",
             description = "A picture of both screens (top, then the bottom touch screen), for anything the state doesn't describe. " +
-                "It is 256x384: to touch something seen at (x, y) on the bottom half, touch (x, y - 192).",
+                "It is ${screens.screenWidth}x${screens.screenHeight * 2}: to touch something seen at (x, y) on the bottom half, touch (x, y - ${screens.screenHeight}).",
         ) {
             val arrival = System.currentTimeMillis()
             agentArrived()
@@ -259,16 +256,6 @@ class GameMcpServer(
 
     private companion object {
         val json = Json { prettyPrint = false }
-        const val MAX_THEN = 8
-
-        /**
-         * A `then` chain starts no further step once nothing has happened in the game for 20 s (it is stuck), or after
-         * 90 s in all whatever the progress (a safety cap). Progress notifications keep the call alive meanwhile for
-         * clients that restart their timeout on them; for the others, an answer lost to their timeout is given again.
-         * Only checked between steps: one long step (a go_to surfing for minutes) runs to its end, and its tiles count as
-         * progress for the next check.
-         */
-        val CHAIN_LIMITS = ChainLimits(idle = 20.seconds, total = 90.seconds)
 
         const val INSTRUCTIONS =
             "You are playing a Pokémon game on a Nintendo DS through this server. Call get_state to see the screen (decoded from " +

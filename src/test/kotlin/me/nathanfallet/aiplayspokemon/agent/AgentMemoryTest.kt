@@ -11,6 +11,7 @@ import dev.kotlinds.pokemonclient.world.Area
 import dev.kotlinds.pokemonclient.world.TileInfo
 import dev.kotlinds.pokemonclient.world.TileKind
 import dev.kotlinds.pokemonclient.world.Warp
+import dev.kotlinds.pokemonclient.state.MapName
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -25,7 +26,7 @@ class AgentMemoryTest {
 
     private fun at(x: Int, y: Int, facing: Direction = Direction.SOUTH, screen: Screen = overworld, map: Int = 1) = GameState(
         frame = 0, screen = screen, player = null, party = emptyList(), bag = null, battle = null,
-        field = FieldState(map, "Town $map", x, y, height = 0, facing = facing, movement = MovementMode.WALK, moving = false),
+        field = FieldState(map, MapName(map, map = "Town $map"), x, y, height = 0, facing = facing, movement = MovementMode.WALK, moving = false),
     )
 
     private fun talking(text: String) = Screen.Dialogue(TextSource.FIELD, null, text, Awaiting.INPUT)

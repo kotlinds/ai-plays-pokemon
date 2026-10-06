@@ -3,6 +3,7 @@ package me.nathanfallet.aiplayspokemon.agent
 import dev.kotlinds.pokemonclient.Direction
 import dev.kotlinds.pokemonclient.state.FieldState
 import dev.kotlinds.pokemonclient.state.MovementMode
+import dev.kotlinds.pokemonclient.state.MapName
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -11,7 +12,7 @@ import kotlin.test.assertTrue
 class StateVersionTest {
 
     private fun field(x: Int, y: Int, map: Int = 1, facing: Direction = Direction.NORTH) =
-        FieldState(map, "Route", x, y, 0, facing, MovementMode.WALK, false)
+        FieldState(map, MapName(map, map = "Route"), x, y, 0, facing, MovementMode.WALK, false)
 
     @Test
     fun theVersionChangesWhenThePlayerMovesOnTheSameScreen() {

@@ -1,9 +1,10 @@
 package me.nathanfallet.aiplayspokemon.agent
 
-import dev.kotlinds.pokemonclient.runtime.kind
+import dev.kotlinds.pokemonclient.state.kind
 import dev.kotlinds.pokemonclient.state.Cursor
 import dev.kotlinds.pokemonclient.state.FieldState
 import dev.kotlinds.pokemonclient.state.GameState
+import dev.kotlinds.pokemonclient.state.MapName
 import dev.kotlinds.pokemonclient.state.Screen
 import dev.kotlinds.pokemonclient.view.MapView
 import dev.kotlinds.pokemonclient.world.Area
@@ -44,7 +45,7 @@ class AgentMemory(
     /** Per map id: the symbol of every tile seen ([MapView.terrain]), and the tiles walked on. */
     private val explored = HashMap<Int, MutableMap<Pair<Int, Int>, Char>>()
     private val walked = HashMap<Int, MutableSet<Pair<Int, Int>>>()
-    private val mapNames = HashMap<Int, String>()
+    private val mapNames = HashMap<Int, MapName>()
 
     /** The model's own note (goal/plan), rewritten at will. */
     var note: String? = null
@@ -118,11 +119,6 @@ class AgentMemory(
         if (includeExploredMap) current?.let { field -> exploredMap(field)?.let { put("explored_map", it) } }
     }
 
-    fun clear() {
-        actions.clear(); places.clear(); dialogues.clear(); thoughts.clear(); repeats.clear()
-        explored.clear(); walked.clear(); note = null; decisionsWithoutProgress = 0
-    }
-
     /** Everything seen on a map, centered on the player and bounded, with walked tiles marked. */
     private fun exploredMap(field: FieldState): JsonObject? {
         val mapId = field.mapId
@@ -147,7 +143,7 @@ class AgentMemory(
         }
         val legend = used.mapNotNull { c -> MapView.legend(c)?.let { "$c $it" } }
         return buildJsonObject {
-            put("map", mapNames[mapId] ?: "map $mapId")
+            put("map", (mapNames[mapId] ?: MapName(mapId)).toString())
             put(
                 "how_to_read",
                 "Everything you have seen on this map so far, north up, one character per tile, from x $minX (left) to x $maxX (right). " +
@@ -216,7 +212,7 @@ class AgentMemory(
     }
 
     private fun recordPlace(field: FieldState?) {
-        val name = field?.mapName ?: return
+        val name = field?.mapName?.toString() ?: return
         val last = places.lastOrNull()
         if (last != null && last.name == name) last.decisions++
         else places.addBounded(Place(name), maxPlaces)

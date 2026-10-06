@@ -105,17 +105,7 @@ class ClaudeCodeDecisionModel(
         val usage = result["usage"]?.jsonObject
         val inputTokens = listOf("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
             .sumOf { usage?.get(it)?.jsonPrimitive?.intOrNull ?: 0 }
-        ChoiceResult(
-            choice = answer.choice,
-            probabilities = request.options.keys.associateWith { if (it == answer.choice) 1.0 else 0.0 },
-            confidence = null,
-            model = "claude-code/$model",
-            inputTokens = inputTokens,
-            thought = answer.reasoning,
-            then = answer.then,
-            note = answer.note,
-            costUsd = result["total_cost_usd"]?.jsonPrimitive?.doubleOrNull,
-        )
+        answer.toChoiceResult(request, model = "claude-code/$model", inputTokens = inputTokens, costUsd = result["total_cost_usd"]?.jsonPrimitive?.doubleOrNull)
     }
 
     private companion object {

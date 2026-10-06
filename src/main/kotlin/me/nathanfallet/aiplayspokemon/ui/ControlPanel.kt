@@ -46,7 +46,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import me.nathanfallet.aiplayspokemon.agent.Decision
 import me.nathanfallet.aiplayspokemon.agent.ControlMode
@@ -232,7 +231,6 @@ private fun ExperimentSettings(controller: AppController, backend: DecisionBacke
     val llmInLoop = backend == DecisionBackend.LLM || settings.mode == ControlMode.HYBRID
     val toggles = listOfNotNull(
         Triple("Pause while thinking", settings.pauseWhileThinking) { s: PlayerSettings, v: Boolean -> s.copy(pauseWhileThinking = v) },
-        Triple("Wait for the game to react", settings.waitForReaction) { s: PlayerSettings, v: Boolean -> s.copy(waitForReaction = v) },
         Triple("Sequences (LLM)", settings.allowSequences) { s: PlayerSettings, v: Boolean -> s.copy(allowSequences = v) }.takeIf { llmInLoop },
         Triple("Reasoning (LLM)", settings.reasoning) { s: PlayerSettings, v: Boolean -> s.copy(reasoning = v) }.takeIf { llmInLoop },
         Triple("Notes (LLM)", settings.modelNotes) { s: PlayerSettings, v: Boolean -> s.copy(modelNotes = v) }.takeIf { llmInLoop },
@@ -409,7 +407,9 @@ private fun DecisionCard(decision: Decision) {
                 style = MaterialTheme.typography.bodySmall,
             )
             decision.thought?.let { Text("“$it”", style = MaterialTheme.typography.bodySmall) }
-            decision.problem?.let { Text("Stopped: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+            decision.problem?.let { Text("Failed: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+            // A sequence ending early by its own rules is normal: said, not shown as an error.
+            decision.stop?.let { Text("Sequence ended: $it", style = MaterialTheme.typography.bodySmall) }
             if (decision.confidence != null) decision.probabilities.forEach { (option, probability) ->
                 ProbabilityBar(option, probability)
             }
@@ -450,7 +450,7 @@ private fun DecisionHistory(history: List<Decision>, modifier: Modifier = Modifi
  * exactly what an agent would get now ([AppController.panel]: `GameSession.describe()` with the current options).
  */
 @Composable
-private fun AgentViewSection(panel: AgentView?, lastRequestState: JsonObject?) {
+private fun AgentViewSection(panel: PanelView?, lastRequestState: JsonObject?) {
     var showJson by remember { mutableStateOf(false) }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text("What the AI sees", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
@@ -492,7 +492,6 @@ private fun KeyboardHelp() {
 
 private fun percent(value: Double) = "${(value * 100).toInt()}%"
 
-private val prettyJson = Json { prettyPrint = true }
 
 /** Short names of the knowledge levels, for the chips. */
 private val KNOWLEDGE_LABELS = mapOf(

@@ -1,7 +1,9 @@
 package me.nathanfallet.aiplayspokemon.agent
 
 import dev.kotlinds.pokemonclient.data.KnowledgeLevel
+import dev.kotlinds.pokemonclient.view.AgentOptions
 import kotlinx.serialization.Serializable
+import me.nathanfallet.aiplayspokemon.emulator.audio.MusicDuringPausesSettings
 
 /**
  * The experiment knobs of the player. Every option can be switched in the UI so variants can be
@@ -16,11 +18,6 @@ data class PlayerSettings(
     val mode: ControlMode = ControlMode.ASSISTED,
     /** Freeze the game while the AI thinks, so it decides on the screen it actually sees. */
     val pauseWhileThinking: Boolean = true,
-    /**
-     * Press timing: hold a button until the game reacts and wait until the game expects input again
-     * before the next decision. When off, every press is a fixed 16-frame hold + 8-frame pause.
-     */
-    val waitForReaction: Boolean = true,
     /** Generative models may answer with a short sequence of options instead of one. */
     val allowSequences: Boolean = true,
     /** Generative models reason step by step before answering. */
@@ -64,7 +61,18 @@ data class PlayerSettings(
      * on meanwhile), so the music doesn't jump back to the old song at resume. Off: the pause starts at once (to compare).
      */
     val waitForSongChange: Boolean = true,
-)
+) {
+    /**
+     * What these settings let an agent know and do, as the library reads it: the one options object every session
+     * (the MCP's, our own loop's, the panel's) takes, for its actions and its view alike.
+     */
+    val agentOptions: AgentOptions
+        get() = AgentOptions(mode = mode.actionMode, knowledge = knowledge, solvePuzzles = solvePuzzles, hideDestinations = hideDestinations)
+
+    /** [musicDuringPauses] and [waitForSongChange], as the emulator takes them (kept flat here: the saved settings' format). */
+    val musicDuringPausesSettings: MusicDuringPausesSettings
+        get() = MusicDuringPausesSettings(enabled = musicDuringPauses, waitForSongChange = waitForSongChange)
+}
 
 enum class ControlMode(val label: String, val description: String) {
     PURE(
