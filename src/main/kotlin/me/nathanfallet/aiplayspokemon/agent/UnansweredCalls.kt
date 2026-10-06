@@ -42,7 +42,7 @@ class UnansweredCalls(private val max: Int = MAX) {
     private companion object {
         /** Outcomes kept at most (a client timing out again and again). */
         const val MAX = 5
-        const val NOTE = "the answer of these act calls didn't reach you (your client timed out?), but they ran to their end: " +
-            "`previous_calls` says what each one did (ok, performed, detail, error, not_done)"
+        const val NOTE = "the answer of these act calls didn't reach you, or may not have (they ran longer than a client's usual " +
+            "timeout), but they ran to their end: `previous_calls` says what each one did (ok, performed, detail, error, not_done)"
     }
 }

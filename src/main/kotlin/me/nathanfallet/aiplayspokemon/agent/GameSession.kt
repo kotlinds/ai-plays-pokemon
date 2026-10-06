@@ -9,6 +9,9 @@ import dev.kotlinds.pokemonclient.actions.ChainRunner
 import dev.kotlinds.pokemonclient.actions.ChainStep
 import dev.kotlinds.pokemonclient.actions.GameAction
 import dev.kotlinds.pokemonclient.actions.InterruptionCause
+import dev.kotlinds.pokemonclient.data.EncounterContext
+import dev.kotlinds.pokemonclient.data.Lookup
+import dev.kotlinds.pokemonclient.data.LookupKind
 import dev.kotlinds.pokemonclient.runtime.ActionInterruptedException
 import dev.kotlinds.pokemonclient.runtime.EventFeed
 import dev.kotlinds.pokemonclient.runtime.Recorder
@@ -73,6 +76,20 @@ class GameSession(
     /** The game's data (for `lookup`), when the ROM provides it. */
     val gameData get() = game.data
 
+    /**
+     * Answers `lookup(kind, id)` within the run's knowledge level: the game data, and for `encounters` the world's
+     * tables with where the player stands and what their Pokédex has seen (read now from the game).
+     */
+    suspend fun lookup(kind: LookupKind, id: String): Result<JsonObject> {
+        val data = game.data ?: return Result.failure(IllegalStateException("No game data for this game"))
+        val world = game.world
+        val context = if (kind == LookupKind.ENCOUNTERS && world != null) {
+            val state = state()
+            EncounterContext(world, game::mapName, state.field?.mapId, state.pokedex?.seen)
+        } else null
+        return Lookup(data, options().knowledge, context).lookup(kind, id)
+    }
+
     /** What the agent reads, assembled by the library like for every host (the bench too). */
     private val agentView = AgentView(game, registry)
 
@@ -89,6 +106,15 @@ class GameSession(
     fun confirmDelivered() {
         feed.confirm()
         unanswered.delivered()
+    }
+
+    /**
+     * The last response may not have reached the agent (answered after its client's usual timeout, kept alive by
+     * progress: see `DeliveryTracker`): its messages aren't repeated, but the acts' outcomes are given once more
+     * (`previous_calls`), until a later answer is confirmed.
+     */
+    fun confirmEventsOnly() {
+        feed.confirm()
     }
 
     /** Version of the last state returned to the agent: actions default to it. */

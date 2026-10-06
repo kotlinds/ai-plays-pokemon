@@ -1,6 +1,5 @@
 package me.nathanfallet.aiplayspokemon.mcp
 
-import dev.kotlinds.pokemonclient.data.Lookup
 import dev.kotlinds.pokemonclient.data.LookupKind
 import dev.kotlinds.pokemonclient.actions.ActionException
 import dev.kotlinds.pokemonclient.actions.ChainRunner
@@ -62,7 +61,7 @@ class GameMcpServer(
     private val mutex = Mutex()
 
     /** Runs the calls that read or change the game: delivery of their answers, progress notifications ([ToolCalls]). */
-    private val calls = ToolCalls(session.progress, DeliveryTracker(confirm = session::confirmDelivered))
+    private val calls = ToolCalls(session.progress, DeliveryTracker(confirm = session::confirmDelivered, uncertain = session::confirmEventsOnly))
     private var engine: EmbeddedServer<*, *>? = null
 
     private val _activity = MutableStateFlow(AgentActivity())
@@ -201,18 +200,18 @@ class GameMcpServer(
                     }
                     putJsonObject("id") {
                         put("type", "string")
-                        put("description", "species:25, move:85, item:17, TM01, fire... or a name.")
+                        put("description", "species:25, move:85, item:17, TM01, fire... or a name; for encounters a map's name or map:<id> (omit: the current map).")
                     }
                 },
-                required = listOf("kind", "id"),
+                required = listOf("kind"),
             ),
         ) { request ->
             val arguments = request.arguments ?: JsonObject(emptyMap())
             val kind = arguments["kind"]?.jsonPrimitive?.contentOrNull?.let { k -> LookupKind.entries.firstOrNull { it.name.equals(k, ignoreCase = true) } }
                 ?: return@addTool error("`kind` must be one of ${LookupKind.entries.joinToString { it.name.lowercase() }}")
-            val id = arguments["id"]?.jsonPrimitive?.contentOrNull ?: return@addTool error("`id` is missing")
-            val data = session.gameData ?: return@addTool error("No game data for this game")
-            Lookup(data, session.options().knowledge).lookup(kind, id).fold({ text(it.encode()) }, { error(it.message ?: "lookup failed") })
+            // Only encounters has a default (the current map).
+            val id = arguments["id"]?.jsonPrimitive?.contentOrNull ?: if (kind == LookupKind.ENCOUNTERS) "" else return@addTool error("`id` is missing")
+            session.lookup(kind, id).fold({ text(it.encode()) }, { error(it.message ?: "lookup failed") })
         }
         val screens = host.info.platform
         addTool(

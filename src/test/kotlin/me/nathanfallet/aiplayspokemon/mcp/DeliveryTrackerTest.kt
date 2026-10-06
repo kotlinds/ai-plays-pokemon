@@ -14,7 +14,13 @@ class DeliveryTrackerTest {
     private var clock = 0L
     private val log = EventLog()
     private val feed = EventFeed(log, autoConfirm = false)
-    private val tracker = DeliveryTracker(confirm = feed::confirm, now = { clock })
+    /** The outcomes of the acts whose answer isn't known to have arrived (`previous_calls`), like GameSession's. */
+    private val unanswered = me.nathanfallet.aiplayspokemon.agent.UnansweredCalls()
+    private val tracker = DeliveryTracker(
+        confirm = { feed.confirm(); unanswered.delivered() },
+        uncertain = feed::confirm,
+        now = { clock },
+    )
 
     private fun text(t: String) = log.append { GameEvent.TextShown(it, 0, TextSource.BATTLE, null, t) }
 
@@ -102,6 +108,24 @@ class DeliveryTrackerTest {
         call(20)
         clock += 1_000
         assertFalse(call(1, arrival = start + 200).repeated)
+    }
+
+    @Test
+    fun aLongChainEndedBeforeTheNextCallGivesItsOutcomeAgainButNotItsMessages() {
+        // NOTES (map randomizer run): a flee, Teleport through the menus and three go_to; the client timed out (no
+        // cancellation), the chain ended ~2 min after it started with progress all along, and the agent's next call came
+        // after that: previous_calls was missing. Whether the client got it can't be told: its outcome is given again.
+        text("Got away safely!")
+        call(130, progressEvery = 5)
+        unanswered.answered(listOf("run", "use_field_move(teleport)", "go_to(warp:3)"), kotlinx.serialization.json.buildJsonObject { put("ok", kotlinx.serialization.json.JsonPrimitive(true)) })
+        clock += 20_000
+        val next = call(1)
+        assertFalse(next.repeated, "its messages: most clients got them")
+        assertTrue("previous_calls" in unanswered.describe(), "its outcome: given again")
+        // The answer after that one arrived: nothing is repeated any more.
+        clock += 1_000
+        call(1)
+        assertTrue(unanswered.describe().isEmpty())
     }
 
     @Test
