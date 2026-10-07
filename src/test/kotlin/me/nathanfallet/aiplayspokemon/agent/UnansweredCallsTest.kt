@@ -34,7 +34,7 @@ class UnansweredCallsTest {
     /** One act call lasting [seconds] (cancelled by the client or not): returns what its answer gave back, then records its own outcome. */
     private fun act(seconds: Long, actions: List<String>, outcome: JsonObject, cancelled: Boolean = false): Map<String, kotlinx.serialization.json.JsonElement> {
         tracker.arrived(clock)
-        val call = tracker.started()
+        val call = tracker.started("act")
         clock += seconds * 1000
         feed.take()
         val given = unanswered.describe()

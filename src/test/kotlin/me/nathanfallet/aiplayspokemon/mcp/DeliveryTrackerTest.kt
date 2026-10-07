@@ -16,9 +16,11 @@ class DeliveryTrackerTest {
     private val feed = EventFeed(log, autoConfirm = false)
     /** The outcomes of the acts whose answer isn't known to have arrived (`previous_calls`), like GameSession's. */
     private val unanswered = me.nathanfallet.aiplayspokemon.agent.UnansweredCalls()
+    private val verdicts = mutableListOf<DeliveryVerdict>()
     private val tracker = DeliveryTracker(
         confirm = { feed.confirm(); unanswered.delivered() },
         uncertain = feed::confirm,
+        onVerdict = { verdicts += it },
         now = { clock },
     )
 
@@ -28,7 +30,7 @@ class DeliveryTrackerTest {
     private fun call(seconds: Long, cancelled: Boolean = false, progressEvery: Long? = null, arrival: Long = clock): EventFeed.Batch {
         tracker.arrived(arrival)
         val start = clock
-        val call = tracker.started()
+        val call = tracker.started("act")
         if (progressEvery != null) {
             var t = progressEvery
             while (t < seconds) {
@@ -135,4 +137,79 @@ class DeliveryTrackerTest {
         // No call since: nothing confirmed yet, the feed still holds it.
         assertEquals(1, feed.take().events.size)
     }
+
+    // region The measurement: every verdict "lost" / "uncertain" is logged with the call and its durations
+
+    private fun reasons() = verdicts.map { it.reason }
+
+    @Test
+    fun aCancelledCallIsLoggedAsLostWithItsDurations() {
+        call(70, cancelled = true)
+        clock += 3_000
+        call(1)
+        assertEquals(listOf(DeliveryVerdict.Reason.CANCELLED), reasons())
+        val verdict = verdicts.single()
+        assertEquals("act", verdict.tool)
+        assertEquals(DeliveryVerdict.Verdict.LOST, verdict.verdict)
+        assertEquals(70_000, verdict.ranMillis)
+        assertEquals(73_000, verdict.nextCallAfterMillis)
+        assertEquals(1, verdict.judged)
+    }
+
+    @Test
+    fun eachLostRuleAndTheUncertainOneAreLoggedWithTheirReason() {
+        call(65) // silent past the client's timeout
+        clock += 1_000
+        val start = clock
+        call(45) // the next call arrived 30 s after its start, while it ran
+        clock += 1_000
+        call(80, progressEvery = 5, arrival = start + 30_000) // kept alive by progress past the timeout
+        clock += 1_000
+        call(1)
+        assertEquals(
+            listOf(DeliveryVerdict.Reason.SILENT_PAST_TIMEOUT, DeliveryVerdict.Reason.NEXT_CALL_WHILE_RUNNING, DeliveryVerdict.Reason.KEPT_ALIVE_PAST_TIMEOUT),
+            reasons(),
+        )
+        assertEquals(30_000, verdicts[1].nextCallAfterMillis)
+        assertEquals(DeliveryVerdict.Verdict.UNCERTAIN, verdicts[2].verdict)
+        assertEquals(listOf(1, 2, 3), verdicts.map { it.judged })
+    }
+
+    @Test
+    fun aConfirmedAnswerIsNotLoggedButCounted() {
+        call(2)
+        clock += 1_000
+        call(2)
+        clock += 1_000
+        call(70, cancelled = true)
+        clock += 1_000
+        call(1)
+        // Only the lost one is logged; the two confirmed before it count in `judged`.
+        assertEquals(listOf(3), verdicts.map { it.judged })
+    }
+
+    @Test
+    fun theDeliveryLogWritesOneJsonLinePerVerdict() {
+        val directory = java.nio.file.Files.createTempDirectory("delivery-log")
+        try {
+            val file = directory.resolve("runs").resolve("delivery.jsonl")
+            val log = DeliveryLog(file)
+            call(70, cancelled = true)
+            clock += 1_000
+            call(65)
+            clock += 1_000
+            call(1)
+            verdicts.forEach(log::record)
+            val lines = java.nio.file.Files.readAllLines(file)
+            assertEquals(2, lines.size)
+            val first = kotlinx.serialization.json.Json.decodeFromString(DeliveryVerdict.serializer(), lines[0])
+            assertEquals(verdicts[0], first)
+            assertTrue("\"reason\":\"SILENT_PAST_TIMEOUT\"" in lines[1], lines[1])
+            assertTrue(verdicts[0].summary.startsWith("[delivery] lost (CANCELLED): act ran 70 s"), verdicts[0].summary)
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    // endregion
 }

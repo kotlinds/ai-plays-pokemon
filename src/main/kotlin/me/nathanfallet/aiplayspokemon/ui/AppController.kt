@@ -35,6 +35,7 @@ import me.nathanfallet.aiplayspokemon.decision.jev.JevClient
 import me.nathanfallet.aiplayspokemon.decision.jev.JevDecisionModel
 import me.nathanfallet.aiplayspokemon.agent.ControlMode
 import me.nathanfallet.aiplayspokemon.agent.PlayerSettings
+import me.nathanfallet.aiplayspokemon.mcp.DeliveryLog
 import me.nathanfallet.aiplayspokemon.mcp.GameMcpServer
 import me.nathanfallet.aiplayspokemon.agent.GameSession
 import me.nathanfallet.aiplayspokemon.decision.claudecode.ClaudeCodeDecisionModel
@@ -135,7 +136,8 @@ class AppController(
         if (wanted && running == null) {
             val session = session(game, confirmDelivery = true)
             val server = GameMcpServer(session, emulator, config.mcpPort, pauseWhileThinking = { _settings.value.pauseWhileThinking },
-                reasoningRequired = { _settings.value.reasoning })
+                reasoningRequired = { _settings.value.reasoning },
+                deliveryLog = DeliveryLog.startingNow(config.dataDirectory.resolve("runs")))
             server.start()
             _mcp.value = server
         } else if (!wanted && running != null) {

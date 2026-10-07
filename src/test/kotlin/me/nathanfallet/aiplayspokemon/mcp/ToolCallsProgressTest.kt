@@ -6,6 +6,7 @@ import dev.kotlinds.pokemonclient.runtime.ProgressUnit
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.json.double
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
@@ -62,7 +63,7 @@ class ToolCallsProgressTest {
      * Runs [work] as a tool call with a progress token, over HTTP like a client with its standalone SSE stream, and
      * returns the params of the progress notifications received before the answer (checked: same token, growing).
      */
-    private fun progressOf(clock: ProgressClock, label: String? = null, work: suspend () -> Unit): List<kotlinx.serialization.json.JsonObject> {
+    private fun progressOf(clock: ProgressClock, label: String = "slow", work: suspend () -> Unit): List<kotlinx.serialization.json.JsonObject> {
         val calls = ToolCalls(clock, DeliveryTracker(confirm = {}), period = 100.milliseconds)
         McpTestServer {
             addTool(name = "slow", description = "a long action") { request ->
@@ -90,14 +91,14 @@ class ToolCallsProgressTest {
         val finished = java.util.concurrent.CountDownLatch(1)
         McpTestServer {
             addTool(name = "slow", description = "a long action") { request ->
-                calls.run(this, request, System.currentTimeMillis()) {
+                calls.run(this, request, System.currentTimeMillis(), label = "slow") {
                     delay(800)
                     finished.countDown()
                     CallToolResult(content = listOf(TextContent("done")))
                 }
             }
             addTool(name = "fast", description = "a short call") { request ->
-                calls.run(this, request, System.currentTimeMillis()) { CallToolResult(content = listOf(TextContent("ok"))) }
+                calls.run(this, request, System.currentTimeMillis(), label = "fast") { CallToolResult(content = listOf(TextContent("ok"))) }
             }
         }.use { mcp ->
             mcp.callAsync(2, "slow")
@@ -151,13 +152,13 @@ class ToolCallsProgressTest {
         val calls = ToolCalls(clock, delivery, period = 100.milliseconds)
         McpTestServer {
             addTool(name = "slow", description = "a long action") { request ->
-                calls.run(this, request, System.currentTimeMillis()) {
+                calls.run(this, request, System.currentTimeMillis(), label = "slow") {
                     work()
                     CallToolResult(content = listOf(TextContent("done")))
                 }
             }
             addTool(name = "fast", description = "a short call") { request ->
-                calls.run(this, request, System.currentTimeMillis()) { CallToolResult(content = listOf(TextContent("ok"))) }
+                calls.run(this, request, System.currentTimeMillis(), label = "fast") { CallToolResult(content = listOf(TextContent("ok"))) }
             }
         }.use { mcp ->
             val slow = mcp.call(2, "slow", token = "tok-1")
@@ -165,6 +166,70 @@ class ToolCallsProgressTest {
             val next = mcp.call(3, "fast")
             assertTrue("ok" in next.body(), next.body())
             return Verdicts(confirmed, uncertain)
+        }
+    }
+
+    /**
+     * A `get_state` (or an `act`) queued behind a long act sends heartbeats while it waits for the call lock ("waiting
+     * for the call in progress"), then while it runs, one count for the token that only grows: a client restarting its
+     * timeout on progress doesn't give up on it (only the act sent progress before).
+     */
+    @Test
+    fun aCallQueuedBehindALongActSendsHeartbeatsWhileItWaitsThenWhileItRuns() {
+        for (queued in listOf("get_state", "act")) {
+            val calls = ToolCalls(ProgressClock(), DeliveryTracker(confirm = {}), period = 100.milliseconds)
+            val lock = Mutex()
+            val first = java.util.concurrent.atomic.AtomicBoolean(true)
+            McpTestServer {
+                for (tool in listOf("get_state", "act")) addTool(name = tool, description = tool) { request ->
+                    val arrival = System.currentTimeMillis()
+                    calls.locked(this, request, lock, label = tool) {
+                        // The first call is the long act (an attack's turn); the queued one runs 350 ms.
+                        val long = first.getAndSet(false)
+                        calls.run(this, request, arrival, label = if (long) "attack(move:33)" else tool) {
+                            delay(if (long) 700 else 350)
+                            CallToolResult(content = listOf(TextContent("done")))
+                        }
+                    }
+                }
+            }.use { mcp ->
+                val act = mcp.callAsync(2, "act", token = "tok-act")
+                Thread.sleep(50)
+                val answer = mcp.call(3, queued, token = "tok-queued")
+                assertTrue("done" in answer.body(), answer.body())
+                assertTrue("done" in act.get().body())
+                val beats = mcp.progress("tok-queued").map { it.second }
+                val messages = beats.mapNotNull { it["message"]?.jsonPrimitive?.content }
+                val waiting = messages.takeWhile { it.startsWith("$queued: waiting") }
+                val running = messages.drop(waiting.size)
+                assertTrue(waiting.size >= 3, "heartbeats while it waits: $messages")
+                assertTrue(waiting.all { Regex("$queued: waiting for the call in progress, \\d+ s").matches(it) }, messages.toString())
+                assertTrue(running.size >= 2, "heartbeats while it runs: $messages")
+                assertTrue(running.all { Regex("$queued: still running, \\d+ s").matches(it) }, messages.toString())
+                val values = beats.map { it["progress"]!!.jsonPrimitive.double }
+                assertEquals(values.distinct().sorted(), values, "one count for the token, that only grows")
+                // The act itself: heartbeats of its own run only.
+                assertTrue(mcp.progress("tok-act").mapNotNull { it.second["message"]?.jsonPrimitive?.content }.all { it.startsWith("attack(move:33): still running") })
+            }
+        }
+    }
+
+    /** The other side: a call that finds the lock free and answers quickly sends no notification at all. */
+    @Test
+    fun aShortCallWithTheLockFreeSendsNoNotification() {
+        val calls = ToolCalls(ProgressClock(), DeliveryTracker(confirm = {}), period = 100.milliseconds)
+        val lock = Mutex()
+        McpTestServer {
+            addTool(name = "get_state", description = "the state") { request ->
+                val arrival = System.currentTimeMillis()
+                calls.locked(this, request, lock, label = "get_state") {
+                    calls.run(this, request, arrival, label = "get_state") { CallToolResult(content = listOf(TextContent("state"))) }
+                }
+            }
+        }.use { mcp ->
+            assertTrue("state" in mcp.call(2, "get_state", token = "tok-state").body())
+            Thread.sleep(250)
+            assertTrue(mcp.progress("tok-state").isEmpty())
         }
     }
 }

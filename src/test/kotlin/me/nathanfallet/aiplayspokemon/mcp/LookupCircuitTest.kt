@@ -10,9 +10,7 @@ import dev.kotlinds.pokemonclient.console.Frame
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.serialization.json.JsonObject
@@ -26,90 +24,17 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * `lookup` goes through the server's common circuit ([ToolCalls.aside], under the call lock, like `screenshot`): its
- * arrival gives the verdict on the previous answer, and its own answer, which carries no message, event or act's
- * outcome, never confirms (nor repeats) what an earlier answer carried. Its arguments and answers are unchanged.
+ * `lookup` and `screenshot` are reads outside `get_state` / `act`: no call lock (they answer at once, even while a long
+ * act runs, without waiting behind it), and no part in the delivery tracking (they never give, take or change the
+ * verdict on an act's answer: a lost one is still repeated by the next `get_state` / `act`, a delivered one is not).
+ * Their arguments and answers are unchanged.
+ *
+ * Migrated from the circuit where they went through the lock and judged the previous answer (`ToolCalls.aside`,
+ * removed): "a lookup after a lost answer confirms nothing" and "a lookup queued behind an act leaves its verdict to
+ * the next call" hold more than ever (a lookup now judges nothing); "a lookup arriving confirms the answer before it"
+ * no longer exists by decision (only `get_state` / `act` judge), its other side ("the next call confirms it") is kept.
  */
 class LookupCircuitTest {
-    private var clock = 0L
-    private val log = EventLog()
-    private val feed = EventFeed(log, autoConfirm = false)
-    private val unanswered = UnansweredCalls()
-    private val tracker = DeliveryTracker(confirm = { feed.confirm(); unanswered.delivered() }, uncertain = feed::confirm, now = { clock })
-    private val calls = ToolCalls(ProgressClock(), tracker)
-
-    private fun text(t: String) = log.append { GameEvent.TextShown(it, 0, TextSource.FIELD, null, t) }
-
-    /**
-     * An act arrived at [arrival] answering what the feed holds (its outcome kept until delivered), lasting [seconds];
-     * [cancelled] by the client; [alive]: progress of the game sent to its end (a long go_to).
-     */
-    private fun act(seconds: Long, cancelled: Boolean = false, arrival: Long = clock, alive: Boolean = false): EventFeed.Batch {
-        tracker.arrived(arrival)
-        val call = tracker.started()
-        clock += seconds * 1000
-        if (alive) tracker.alive(call)
-        val batch = feed.take()
-        unanswered.answered(listOf("save_game"), buildJsonObject { put("ok", true) })
-        tracker.answered(call, cancelled)
-        return batch
-    }
-
-    private fun lookup(arrival: Long = clock): String = runBlocking { calls.aside(arrival) { "species 25" } }.also { clock += 100 }
-
-    @Test
-    fun aLookupAfterALostAnswerConfirmsNothing() {
-        text("Saving... Don't turn off the power.")
-        act(70, cancelled = true) // the client's timeout: the answer never arrived
-        clock += 2_000
-        assertEquals("species 25", lookup())
-        clock += 2_000
-        // The next answer gives the save's messages and outcome again: the lookup between carried neither.
-        val next = act(1)
-        assertTrue(next.repeated)
-        assertEquals(1, next.events.size)
-    }
-
-    @Test
-    fun aLookupArrivingConfirmsTheAnswerBeforeIt() {
-        text("a")
-        act(2)
-        clock += 1_000
-        lookup()
-        // The act's answer arrived (the client called again): nothing repeated, no previous_calls.
-        assertTrue(unanswered.describe().isEmpty())
-        clock += 1_000
-        assertFalse(act(1).repeated)
-    }
-
-    /**
-     * The review's case: a lookup made in parallel with a 90 s act (kept alive by progress) waits behind it; the client
-     * gives up on the act at 60 s without cancelling and acts again at 65 s. The lookup, arrived before the act's
-     * answer, says nothing about it: the next act, arrived during it, takes it as lost and its messages come again.
-     */
-    @Test
-    fun aLookupQueuedBehindAnActLeavesItsVerdictToTheNextCall() {
-        text("Saving... Don't turn off the power.")
-        val started = clock
-        act(90, alive = true) // the lookup (at 1 s) and the next act (at 65 s) wait for the lock meanwhile
-        assertEquals("species 25", lookup(arrival = started + 1_000))
-        val next = act(1, arrival = started + 65_000)
-        assertTrue(next.repeated)
-        assertEquals(1, next.events.size)
-    }
-
-    /** The other side: the same lookup during an act whose next call came only after it ended: confirmed by that call. */
-    @Test
-    fun aLookupQueuedBehindAnActLetsTheNextCallConfirmIt() {
-        text("a")
-        val started = clock
-        act(2)
-        lookup(arrival = started + 500)
-        assertTrue(unanswered.describe().isNotEmpty(), "the act's outcome is still waiting for a verdict")
-        clock += 1_000
-        assertFalse(act(1).repeated)
-    }
-
     @Test
     fun theLookupArgumentsAreReadAsBefore() {
         fun request(vararg pairs: Pair<String, String>) = GameMcpServer.lookupRequest(JsonObject(pairs.associate { (k, v) -> k to JsonPrimitive(v) }))
@@ -122,106 +47,143 @@ class LookupCircuitTest {
 
     // region The tools themselves, over HTTP (GameMcpServer.lookupCall / screenshotCall, what its handlers run)
 
-    /** Verdicts given by a real-time tracker (client timeout 300 ms, no client times out before 100 ms). */
-    private class Verdicts {
+    /**
+     * What the acts of the test server carried: the game's messages ([log], read through an [EventFeed] kept until
+     * delivered, like GameSession's), the acts' outcomes kept until delivered ([unanswered]), and the delivery verdicts.
+     */
+    private class Game {
+        val log = EventLog()
+        val feed = EventFeed(log, autoConfirm = false)
+        val unanswered = UnansweredCalls()
+        val verdicts = java.util.concurrent.CopyOnWriteArrayList<DeliveryVerdict>()
         @Volatile var confirmed = 0
-        @Volatile var uncertain = 0
+        val counted = java.util.concurrent.atomic.AtomicInteger()
+        val frame = java.util.concurrent.atomic.AtomicReference<Frame?>(null)
+        val acts = java.util.concurrent.atomic.AtomicInteger()
     }
 
     /**
-     * An MCP server with the server's lock and circuit: `act` (an action of [actMillis], its game moving to its end:
-     * a long go_to; it shows [shown] once done), `lookup` and `screenshot` (the frame it reads, counted when there is
-     * one) through the server's own tool functions.
+     * An MCP server with the server's circuit (client timeout 300 ms, no client times out before 100 ms): `act` under
+     * the call lock ([ToolCalls.locked] then [ToolCalls.run]), its first call lasting [firstActMillis] (the game moving
+     * to its end: a long go_to), the next ones 50 ms; each shows a message and then a frame of its number's width, and
+     * answers whether its messages were repeated and whether earlier outcomes came back (`previous_calls`). `lookup`
+     * and `screenshot` through the server's own tool functions.
      */
-    private fun server(verdicts: Verdicts, actMillis: Long, counted: MutableList<Int> = java.util.concurrent.CopyOnWriteArrayList(), shown: (Long) -> Frame? = { null }): McpTestServer {
+    private fun server(game: Game, firstActMillis: Long): McpTestServer {
         val clock = ProgressClock()
-        val calls = ToolCalls(clock, DeliveryTracker(confirm = { verdicts.confirmed++ }, uncertain = { verdicts.uncertain++ }, clientTimeoutMillis = 300, minClientTimeoutMillis = 100), period = 100.milliseconds)
+        val tracker = DeliveryTracker(
+            confirm = { game.feed.confirm(); game.unanswered.delivered(); game.confirmed++ },
+            uncertain = game.feed::confirm,
+            onVerdict = { game.verdicts += it },
+            clientTimeoutMillis = 300, minClientTimeoutMillis = 100,
+        )
+        val calls = ToolCalls(clock, tracker, period = 100.milliseconds)
         val lock = Mutex()
-        val frame = java.util.concurrent.atomic.AtomicReference<Frame?>(null)
-        val acts = java.util.concurrent.atomic.AtomicLong()
         return McpTestServer {
             addTool(name = "act", description = "an action") { request ->
                 val arrival = System.currentTimeMillis()
-                lock.withLock {
+                calls.locked(this, request, lock, label = "act") {
                     calls.run(this, request, arrival, label = "go_to") {
-                        repeat((actMillis / 50).toInt()) { delay(50); clock.progressed("step $it") }
-                        frame.set(shown(acts.incrementAndGet()))
-                        CallToolResult(content = listOf(TextContent("done")))
+                        val number = game.acts.incrementAndGet()
+                        repeat(((if (number == 1) firstActMillis else 50L) / 50).toInt()) { delay(50); clock.progressed("step $it") }
+                        game.log.append { GameEvent.TextShown(it, 0, TextSource.FIELD, null, "act $number") }
+                        game.frame.set(Frame(number, 1, IntArray(number)))
+                        val batch = game.feed.take()
+                        val previous = game.unanswered.describe().isNotEmpty()
+                        game.unanswered.answered(listOf("go_to"), buildJsonObject { put("ok", true) })
+                        CallToolResult(content = listOf(TextContent("done repeated=${batch.repeated} previous_calls=$previous messages=${batch.events.size}")))
                     }
                 }
             }
             addTool(name = "lookup", description = "game knowledge") { request ->
-                GameMcpServer.lookupCall(calls, lock, this, request, System.currentTimeMillis()) { kind, id -> Result.success(buildJsonObject { put("kind", kind.name); put("id", id) }) }
+                GameMcpServer.lookupCall(request) { kind, id -> Result.success(buildJsonObject { put("kind", kind.name); put("id", id) }) }
             }
             addTool(name = "screenshot", description = "the screens") { request ->
-                GameMcpServer.screenshotCall(calls, lock, this, request, System.currentTimeMillis(), count = { counted += 1 }, frame = { frame.get() }) { "png:${it.width}" }
+                GameMcpServer.screenshotCall(count = { game.counted.incrementAndGet() }, frame = { game.frame.get() }) { "png:${it.width}" }
             }
         }
     }
 
+    /** Calls `lookup` and `screenshot` (as request [id] and [id] + 1): their answers, and how long each took. */
+    private fun reads(mcp: McpTestServer, id: Int): List<Pair<String, Long>> = listOf(
+        id to """{"kind":"species","id":"species:25"}""",
+        id + 1 to null,
+    ).map { (requestId, arguments) ->
+        val asked = System.currentTimeMillis()
+        val answer = if (arguments != null) mcp.call(requestId, "lookup", token = "tok-$requestId", arguments = arguments) else mcp.call(requestId, "screenshot", token = "tok-$requestId")
+        answer.body() to System.currentTimeMillis() - asked
+    }
+
     /**
-     * The review's case through the real `lookup` tool: made in parallel with a long act (alive to its end), it waits
-     * behind it, sending heartbeats meanwhile so its client doesn't time out; the client gives up on the act and acts
-     * again: that next act takes it as lost (no verdict from the lookup, arrived before the act's answer).
+     * Made while a long act runs, `lookup` and `screenshot` answer at once (no wait behind the act, no heartbeat
+     * needed), the screenshot showing the screen of now (the frame before the act's); the client then gives up on
+     * the act (no cancel) and acts again: that act's answer is lost, and the next act gives its messages and outcome
+     * again, the reads in between having judged nothing.
      */
     @Test
-    fun theLookupToolWaitsBehindALongActWithHeartbeatsAndJudgesNothingItArrivedBefore() {
-        val verdicts = Verdicts()
-        server(verdicts, actMillis = 700).use { mcp ->
+    fun readsDuringALongActAnswerAtOnceAndALostActAnswerIsStillRepeated() {
+        val game = Game()
+        game.frame.set(Frame(9, 1, IntArray(9)))
+        server(game, firstActMillis = 700).use { mcp ->
             val first = mcp.callAsync(2, "act", token = "tok-act")
-            Thread.sleep(30)
-            val lookup = mcp.callAsync(3, "lookup", token = "tok-lookup", arguments = """{"kind":"species","id":"species:25"}""")
-            Thread.sleep(300)
-            // The client gave up on the first act (no cancel) and acts again, while it still runs.
-            val again = mcp.callAsync(4, "act")
-            assertTrue("done" in first.get().body())
-            val answer = lookup.get().body()
-            assertTrue("species:25" in answer, answer)
-            assertTrue("done" in again.get().body())
-            val beats = mcp.progress("tok-lookup").mapNotNull { it.second["message"]?.jsonPrimitive?.content }
-            assertTrue(beats.size >= 3, "heartbeats while waiting: $beats")
-            assertTrue(beats.all { Regex("lookup: waiting for the call in progress, \\d+ s").matches(it) }, beats.toString())
-            // The first act's answer: lost (taken so by the second act), neither confirmed nor uncertain.
-            assertEquals(0, verdicts.confirmed)
-            assertEquals(0, verdicts.uncertain)
-        }
-    }
-
-    /** A lookup arriving after the act's answer: the client is there, the act's answer is confirmed (no heartbeat needed). */
-    @Test
-    fun theLookupToolAfterAnActConfirmsIt() {
-        val verdicts = Verdicts()
-        server(verdicts, actMillis = 100).use { mcp ->
-            assertTrue("done" in mcp.call(2, "act").body())
-            assertTrue("species:25" in mcp.call(3, "lookup", token = "tok-lookup", arguments = """{"kind":"species","id":"species:25"}""").body())
-            assertEquals(1, verdicts.confirmed)
-            assertTrue(mcp.progress("tok-lookup").isEmpty())
-        }
-    }
-
-    /**
-     * `screenshot` queued behind an act shows the screen the act led to (the frame is read once the lock is held), and
-     * without any frame yet it still gives the verdict on the previous answer.
-     */
-    @Test
-    fun theScreenshotToolReadsTheFrameAfterTheActQueuedBeforeItAndAlwaysGivesTheVerdict() {
-        val counted = java.util.concurrent.CopyOnWriteArrayList<Int>()
-        val verdicts = Verdicts()
-        server(verdicts, actMillis = 150, counted) { act -> if (act == 1L) null else Frame(act.toInt(), 1, IntArray(act.toInt())) }.use { mcp ->
-            // No frame yet: the error, and the act's answer confirmed all the same.
-            assertTrue("done" in mcp.call(2, "act").body())
-            val none = mcp.call(3, "screenshot").body()
-            assertTrue("No frame yet" in none, none)
-            assertEquals(1, verdicts.confirmed)
-            assertTrue(counted.isEmpty())
-            // Queued behind the second act: the frame it shows is the one that act left (width 2), not the one before.
-            val act = mcp.callAsync(4, "act")
             Thread.sleep(50)
-            val shot = mcp.call(5, "screenshot").body()
-            val acted = act.get().body()
-            assertTrue("done" in acted, acted)
-            assertTrue("png:2" in shot, shot)
-            assertEquals(listOf(1), counted)
+            val (lookup, screenshot) = reads(mcp, 3)
+            assertFalse(first.isDone, "the act still runs")
+            assertTrue("species:25" in lookup.first, lookup.first)
+            assertTrue(lookup.second < 250, "lookup answered after ${lookup.second} ms")
+            assertTrue("png:9" in screenshot.first, screenshot.first)
+            assertTrue(screenshot.second < 250, "screenshot answered after ${screenshot.second} ms")
+            assertEquals(1, game.counted.get())
+            assertTrue(mcp.progress("tok-3").isEmpty() && mcp.progress("tok-4").isEmpty(), "no wait, no heartbeat")
+            Thread.sleep(250)
+            // The client gave up on the first act (no cancel) and acts again, while it still runs.
+            val again = mcp.call(5, "act").body()
+            assertTrue("done" in first.get().body())
+            assertTrue("repeated=true previous_calls=true messages=2" in again, again)
+            assertEquals(0, game.confirmed)
+            assertEquals(listOf(DeliveryVerdict.Reason.NEXT_CALL_WHILE_RUNNING), game.verdicts.map { it.reason })
+        }
+    }
+
+    /** The other side: reads during and after an act whose answer was delivered: the next act confirms it, nothing repeated. */
+    @Test
+    fun readsAroundADeliveredActDoNotMakeItRepeated() {
+        val game = Game()
+        server(game, firstActMillis = 200).use { mcp ->
+            val first = mcp.callAsync(2, "act")
+            Thread.sleep(50)
+            val (lookup, screenshot) = reads(mcp, 3)
+            assertTrue("species:25" in lookup.first, lookup.first)
+            // No frame yet: the error, nothing counted.
+            assertTrue("No frame yet" in screenshot.first, screenshot.first)
+            assertEquals(0, game.counted.get())
+            assertTrue("repeated=false previous_calls=false" in first.get().body())
+            reads(mcp, 5)
+            // The reads after the act's answer confirmed nothing: only the next act does.
+            assertEquals(0, game.confirmed)
+            assertEquals(1, game.counted.get())
+            val next = mcp.call(7, "act").body()
+            assertTrue("repeated=false previous_calls=false messages=1" in next, next)
+            assertEquals(1, game.confirmed)
+            assertTrue(game.verdicts.isEmpty())
+        }
+    }
+
+    /** A lost answer (the client cancelled the act) is not confirmed by reads after it: the next act repeats it. */
+    @Test
+    fun readsAfterALostAnswerConfirmNothing() {
+        val game = Game()
+        server(game, firstActMillis = 400).use { mcp ->
+            val first = mcp.callAsync(2, "act")
+            Thread.sleep(100)
+            mcp.post("""{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2,"reason":"timeout"}}""")
+            Thread.sleep(500) // the act runs to its end all the same
+            reads(mcp, 3)
+            val next = mcp.call(5, "act").body()
+            assertTrue("repeated=true previous_calls=true messages=2" in next, next)
+            assertEquals(0, game.confirmed)
+            assertEquals(listOf(DeliveryVerdict.Reason.CANCELLED), game.verdicts.map { it.reason })
+            first.cancel(true)
         }
     }
 

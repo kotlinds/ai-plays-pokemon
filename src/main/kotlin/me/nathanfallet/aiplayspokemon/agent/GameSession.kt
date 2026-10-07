@@ -20,6 +20,7 @@ import dev.kotlinds.pokemonclient.state.GameState
 import dev.kotlinds.pokemonclient.state.Screen
 import dev.kotlinds.pokemonclient.view.AgentOptions
 import dev.kotlinds.pokemonclient.view.AgentView
+import kotlinx.coroutines.flow.update
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -62,11 +63,14 @@ class GameSession(
      */
     val blindUses: kotlinx.coroutines.flow.StateFlow<Map<String, Int>> = _blindUses
 
-    /** Counts one blind use when [screen] isn't decoded. */
+    /**
+     * Counts one blind use when [screen] isn't decoded. Atomic: a `screenshot` counts from the MCP's thread while an
+     * act's presses count from the console thread.
+     */
     fun countBlind(screen: Screen) {
         val unknown = screen as? Screen.Unknown ?: return
         val key = unknown.hint ?: "unknown"
-        _blindUses.value = _blindUses.value + (key to (_blindUses.value[key] ?: 0) + 1)
+        _blindUses.update { it + (key to (it[key] ?: 0) + 1) }
     }
 
     /** Counts a screenshot when the current screen isn't decoded. */
@@ -82,6 +86,10 @@ class GameSession(
      * Answers `lookup(kind, id)` within the run's knowledge level: the game data, the party (its `mon:<id>` ids, who
      * can learn a TM), and for `encounters` the world's tables with where the player stands and what their Pokédex
      * has seen (read now from the game).
+     *
+     * Safe while an [act] runs: it touches nothing of the act's (no event, no version, no delivery), the game data is
+     * the ROM's, and the game is read between two frames ([ConsoleHost.observe]): a consistent party, as it is at
+     * that frame, even in the middle of the action.
      */
     suspend fun lookup(kind: LookupKind, id: String): Result<JsonObject> {
         val data = game.data ?: return Result.failure(IllegalStateException("No game data for this game"))

@@ -3,8 +3,8 @@
 The game logic (reading the game, the typed state, the actions, the world and pathfinding) lives in the library
 [pokemon-client](https://github.com/kotlinds/pokemon-client). **Its
 [CONTRIBUTING.md](https://github.com/kotlinds/pokemon-client/blob/main/CONTRIBUTING.md) applies here too**: same
-contract for every game, explore before implementing, one source and no legacy, typed and explained code, ids never
-from displayed text, actions that never press blindly, the playing agent decides, knowledge levels, no RAM writes,
+contract for every game, explore before implementing, one source and no legacy, typed and explained code, safety by
+construction first, ids never from displayed text, actions that never press blindly, the playing agent decides, knowledge levels, no RAM writes,
 tests that lock both sides of a change. This file only adds what is specific to the app.
 
 ## 1. Where code goes

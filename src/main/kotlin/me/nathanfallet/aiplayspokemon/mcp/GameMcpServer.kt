@@ -12,7 +12,6 @@ import dev.kotlinds.pokemonclient.console.Frame
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
-import io.modelcontextprotocol.kotlin.sdk.server.ClientConnection
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.server.mcpStreamableHttp
@@ -28,7 +27,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -55,10 +53,15 @@ import javax.imageio.ImageIO
  * - `lookup`: game knowledge (species, moves, items, types, encounters...) within the run's knowledge level;
  * - `screenshot`: the console's screens as a picture, for what isn't decoded yet.
  *
- * Every call goes through one circuit: the call lock (one call at a time on the game, in arrival order) and
- * [ToolCalls]: the verdict on the previous answer's delivery when it arrives, then the work (get_state and act with
- * progress notifications and their own delivery tracked, [ToolCalls.run]; lookup and screenshot, whose answers carry
- * no message, event or outcome, [ToolCalls.aside], with heartbeats while they wait for the lock, [ToolCalls.locked]).
+ * Two kinds of calls:
+ * - `get_state` and `act` observe or change the game and carry what happened (messages, events, outcomes): one at a
+ *   time, in arrival order, under the call lock, with heartbeats while they wait for it ([ToolCalls.locked]); then
+ *   the verdict on the previous answer's delivery, and the work with heartbeats and progress to its end
+ *   ([ToolCalls.run]). They are the "last call" whose answer's delivery is tracked ([DeliveryTracker]).
+ * - `lookup` and `screenshot` are reads outside them, fully independent: no lock (they answer at once, even while a
+ *   long act runs), and no part in the delivery tracking (their answers carry nothing to deliver; they never give,
+ *   take or change a verdict). Their reads are safe during an act: the game data is the ROM's, the game's RAM is
+ *   read between two frames ([ConsoleHost.observe]), and the picture is the last frame published.
  *
  * The mode (Pure / Assisted, [GameSession.options]) is read at every call: `get_state`'s actions and `act`'s
  * validation ([actSteps]) follow a change at once, within a session too. `act`'s JSON schema lists the actions of
@@ -67,7 +70,9 @@ import javax.imageio.ImageIO
  * `tools/list_changed`, see [reasoningRequired]), and an action of the other mode is refused by the validation with
  * the actions of the current one.
  *
- * The game is frozen between calls when "pause while thinking" is on: nothing changes while the agent thinks.
+ * The game is frozen between calls when "pause while thinking" is on: nothing changes while the agent thinks. Every
+ * tool's first call counts as the agent's arrival (it freezes the game, [agentArrived]), lookup and screenshot too,
+ * as before: that needs no lock.
  */
 class GameMcpServer(
     private val session: GameSession,
@@ -86,11 +91,16 @@ class GameMcpServer(
      * - The reminder reads it at every call: switched within a session, it is what follows the option at once.
      */
     private val reasoningRequired: () -> Boolean = { true },
+    /** Where the delivery verdicts "lost" / "uncertain" are logged ([DeliveryLog]). */
+    deliveryLog: DeliveryLog = DeliveryLog(null),
 ) {
     private val mutex = Mutex()
 
-    /** Runs the calls that read or change the game: delivery of their answers, progress notifications ([ToolCalls]). */
-    private val calls = ToolCalls(session.progress, DeliveryTracker(confirm = session::confirmDelivered, uncertain = session::confirmEventsOnly))
+    /** Runs `get_state` and `act`: the call lock, delivery of their answers, progress notifications ([ToolCalls]). */
+    private val calls = ToolCalls(
+        session.progress,
+        DeliveryTracker(confirm = session::confirmDelivered, uncertain = session::confirmEventsOnly, onVerdict = deliveryLog::record),
+    )
     private var engine: EmbeddedServer<*, *>? = null
 
     private val _activity = MutableStateFlow(AgentActivity())
@@ -154,7 +164,7 @@ class GameMcpServer(
             val arrival = System.currentTimeMillis()
             val detail = if (request.arguments?.get("detail")?.jsonPrimitive?.contentOrNull == "full") AgentView.Detail.FULL else AgentView.Detail.STANDARD
             agentArrived()
-            mutex.withLock {
+            calls.locked(this, request, mutex, label = "get_state") {
                 calls.run(this, request, arrival, label = "get_state") { text(session.describe(detail).encode()) }
             }
         }
@@ -198,9 +208,10 @@ class GameMcpServer(
             val arrival = System.currentTimeMillis()
             val arguments = request.arguments ?: JsonObject(emptyMap())
             val reasoning = arguments["reasoning"]?.jsonPrimitive?.contentOrNull
-            mutex.withLock {
+            // Its actions are only read once the lock is held (the mode then): the wait is labelled "act".
+            calls.locked(this, request, mutex, label = "act") {
                 arguments["note"]?.jsonPrimitive?.contentOrNull?.let { session.addNote(it) }
-                val actions = actSteps(session.registry, arguments, session.options().mode).getOrElse { return@withLock error(it.message ?: "invalid action") }
+                val actions = actSteps(session.registry, arguments, session.options().mode).getOrElse { return@locked error(it.message ?: "invalid action") }
                 val label = actions.joinToString(" → ") { it.key }
                 // Shown as in progress right away: the comment appears while the action happens.
                 _activity.update { it.started(label, reasoning) }
@@ -233,9 +244,8 @@ class GameMcpServer(
                 required = listOf("kind"),
             ),
         ) { request ->
-            val arrival = System.currentTimeMillis()
             agentArrived()
-            lookupCall(calls, mutex, this, request, arrival) { kind, id -> session.lookup(kind, id) }
+            lookupCall(request) { kind, id -> session.lookup(kind, id) }
         }
         val screens = host.info.platform
         addTool(
@@ -243,9 +253,8 @@ class GameMcpServer(
             description = "A picture of both screens (top, then the bottom touch screen), for anything the state doesn't describe. " +
                 "It is ${screens.screenWidth}x${screens.screenHeight * 2}: to touch something seen at (x, y) on the bottom half, touch (x, y - ${screens.screenHeight}).",
         ) { request ->
-            val arrival = System.currentTimeMillis()
             agentArrived()
-            screenshotCall(calls, mutex, this, request, arrival, count = session::countScreenshot, frame = { host.frames.value }) { png(it) }
+            screenshotCall(count = session::countScreenshot, frame = { host.frames.value }) { png(it) }
         }
     }
 
@@ -290,34 +299,24 @@ class GameMcpServer(
         }
 
         /**
-         * The `lookup` tool: its arguments read ([lookupRequest]), then the common circuit of a call without anything to
-         * deliver: the call lock, with heartbeats while it waits ([ToolCalls.locked]), and the verdict on the previous
-         * answer ([ToolCalls.aside]); [lookup] answers (it reads the game: the party, where the player stands).
+         * The `lookup` tool: its arguments read ([lookupRequest]), then [lookup] answers at once (game data, and the
+         * game read between two frames: the party, where the player stands), without the call lock and outside the
+         * delivery tracking (see the class).
          */
-        suspend fun lookupCall(
-            calls: ToolCalls, lock: Mutex, connection: ClientConnection, request: CallToolRequest, arrival: Long,
-            lookup: suspend (LookupKind, String) -> Result<JsonObject>,
-        ): CallToolResult {
+        suspend fun lookupCall(request: CallToolRequest, lookup: suspend (LookupKind, String) -> Result<JsonObject>): CallToolResult {
             val (kind, id) = lookupRequest(request.arguments ?: JsonObject(emptyMap())).getOrElse { return error(it.message ?: "invalid lookup") }
-            return calls.locked(connection, request, lock, label = "lookup") {
-                calls.aside(arrival) { lookup(kind, id).fold({ text(json.encodeToString(JsonObject.serializer(), it)) }, { error(it.message ?: "lookup failed") }) }
-            }
+            return lookup(kind, id).fold({ text(json.encodeToString(JsonObject.serializer(), it)) }, { error(it.message ?: "lookup failed") })
         }
 
         /**
-         * The `screenshot` tool: the same circuit as [lookupCall]; the [frame] is read once the lock is held (after an
-         * act queued before it: the picture shows the screen it led to), the screenshot [count]ed for the blind uses,
-         * and the verdict on the previous answer given even when there is no frame yet. [png] encodes the frame.
+         * The `screenshot` tool: the last [frame] published when the call arrives (what is on screen now, an act
+         * running or not), the screenshot [count]ed for the blind uses, [png] encoding it. Like [lookupCall]: no lock,
+         * no delivery tracking.
          */
-        suspend fun screenshotCall(
-            calls: ToolCalls, lock: Mutex, connection: ClientConnection, request: CallToolRequest, arrival: Long,
-            count: suspend () -> Unit, frame: () -> Frame?, png: (Frame) -> String,
-        ): CallToolResult = calls.locked(connection, request, lock, label = "screenshot") {
-            calls.aside(arrival) {
-                val shown = frame() ?: return@aside error("No frame yet")
-                count()
-                CallToolResult(content = listOf(ImageContent(data = png(shown), mimeType = "image/png")))
-            }
+        suspend fun screenshotCall(count: suspend () -> Unit, frame: () -> Frame?, png: (Frame) -> String): CallToolResult {
+            val shown = frame() ?: return error("No frame yet")
+            count()
+            return CallToolResult(content = listOf(ImageContent(data = png(shown), mimeType = "image/png")))
         }
 
         /** A tool's text answer. */

@@ -68,6 +68,9 @@ class ConsoleHost(
     }
 
     private val tasks = ConcurrentLinkedQueue<(LibretroConsole) -> Unit>()
+
+    /** The readings of the game ([observe]), served between two frames, also during an agent's action. */
+    private val reads = FrameReads()
     private val humanButtons = MutableStateFlow<Set<Button>>(emptySet())
 
     @Volatile private var humanTouch: TouchPoint? = null
@@ -171,6 +174,7 @@ class ConsoleHost(
     private fun loop(console: LibretroConsole) {
         while (!closed) {
             while (true) tasks.poll()?.invoke(console) ?: break
+            reads.serve { mainRam(console) }
             if (!status.value.running) {
                 if (steppedSinceIdle && shadowAudio.delaysPause(console)) {
                     // The pause starts a frame later, at a frame its music can be resynced from (see ShadowAudio).
@@ -196,6 +200,8 @@ class ConsoleHost(
     private fun afterFrame(console: LibretroConsole) {
         steppedSinceIdle = true
         frameListener?.let { listener -> runCatching { listener(console.frame) { mainRam(console) } } }
+        // Between two frames, the RAM is consistent: the readings waiting are served now, even mid-action ([observe]).
+        reads.serve { mainRam(console) }
         val measured = pacer.frameDone(fastForward = status.value.fastForward)
         _status.update { it.copy(frameCount = it.frameCount + 1, measuredFps = measured ?: it.measuredFps) }
     }
@@ -249,9 +255,12 @@ class ConsoleHost(
 
     /**
      * Reads the game (the main RAM of the current frame) on the console thread, without running any frame: unlike
-     * [lease], it doesn't wait while the user has paused the game, so the state can always be looked at.
+     * [lease], it doesn't wait while the user has paused the game, so the state can always be looked at. It doesn't
+     * wait for the end of an agent's action either: it is served at the end of the frame being emulated ([FrameReads]),
+     * a consistent RAM, so a `lookup` or a `screenshot` made while a long `act` runs answers at once (a caller that
+     * wants the state after an action reads it once the action returned, as every caller does).
      */
-    suspend fun <T> observe(block: (Memory) -> T): T = onConsoleThread { console -> block(mainRam(console)) }
+    suspend fun <T> observe(block: (Memory) -> T): T = reads.read(block)
 
     /** True while the person watching has paused the game (agent actions are refused, see [lease]). */
     val isUserPaused: Boolean get() = userPaused.value
