@@ -45,13 +45,15 @@ class GameSession(
      * change of the app's settings applies at once: the actions and the view follow the same options.
      */
     val options: () -> AgentOptions,
-    val registry: ActionRegistry = ActionRegistry.of(),
     /**
      * When true, what a response told the agent is only forgotten once [confirmDelivered] is called: a response lost
      * on the way (client timeout) is given again with the next one. Our own loop can't lose responses (false).
      */
     private val confirmDelivery: Boolean = false,
 ) {
+    /** The actions of this game: the common ones with the game's own recipes ([ActionRegistry.of]). */
+    val registry: ActionRegistry = ActionRegistry.of(game)
+
     private val _blindUses = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
 
     /**

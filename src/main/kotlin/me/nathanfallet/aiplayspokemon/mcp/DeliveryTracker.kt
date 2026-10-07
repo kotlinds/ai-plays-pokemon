@@ -25,6 +25,8 @@ package me.nathanfallet.aiplayspokemon.mcp
  * then three go_to, ended before the agent's next call, `previous_calls` was missing and the agent never learned
  * which steps ran).
  *
+ * A call whose answer carries nothing to deliver (`lookup`, `screenshot`) judges through [asideArrived] instead.
+ *
  * Every method runs under the server's call lock, except [alive] (progress, from the call's own ticker).
  */
 class DeliveryTracker(
@@ -47,11 +49,27 @@ class DeliveryTracker(
 
     /** A new call arrived at [at] (taken before waiting for the call lock): gives the verdict on the previous one. */
     @Synchronized
-    fun arrived(at: Long = now()) {
+    fun arrived(at: Long = now()) = judge(at, aside = false)
+
+    /**
+     * A call whose own answer is never judged (`lookup`, `screenshot`: [ToolCalls.aside]) arrived at [at] (taken before
+     * waiting for the call lock). The "lost" rule applies the same: arriving at least [minClientTimeoutMillis] after
+     * the previous call started while it still ran, it tells the client gave up on that one. But when that answer was
+     * produced after this arrival (this call waited behind it for the lock), it gives no other verdict and leaves it
+     * pending for the next call: made in parallel, this call says nothing about whether that answer was received,
+     * and judging it here (uncertain or confirmed) would forget messages a later call shows were lost (a lookup made
+     * during a 90 s act, the client giving up on the act at 60 s and acting again at 65 s).
+     */
+    @Synchronized
+    fun asideArrived(at: Long = now()) = judge(at, aside = true)
+
+    /** The verdict on the pending call for a call arriving at [at]; an [aside] call leaves an answer given after [at] pending. */
+    private fun judge(at: Long, aside: Boolean) {
         val previous = pending ?: return
         val answered = previous.answeredAt
         if (answered != null && answered > at && at - previous.started >= minClientTimeoutMillis) previous.lost = true
         if (answered == null) return // still running (only possible without the lock): judged when it ends
+        if (aside && answered > at) return // answered after this call arrived: the next call judges it
         when {
             previous.lost -> Unit
             answered - previous.started > clientTimeoutMillis -> uncertain()

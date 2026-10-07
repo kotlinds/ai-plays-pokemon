@@ -2,6 +2,9 @@ package me.nathanfallet.aiplayspokemon.mcp
 
 import dev.kotlinds.pokemonclient.data.LookupKind
 import dev.kotlinds.pokemonclient.actions.ActionException
+import dev.kotlinds.pokemonclient.actions.ActionMode
+import dev.kotlinds.pokemonclient.actions.ActionRegistry
+import dev.kotlinds.pokemonclient.actions.GameAction
 import dev.kotlinds.pokemonclient.actions.ChainRunner
 import dev.kotlinds.pokemonclient.actions.ChainStep
 import dev.kotlinds.pokemonclient.view.AgentView
@@ -9,9 +12,11 @@ import dev.kotlinds.pokemonclient.console.Frame
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
+import io.modelcontextprotocol.kotlin.sdk.server.ClientConnection
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.server.mcpStreamableHttp
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequest
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
@@ -47,8 +52,20 @@ import javax.imageio.ImageIO
  *   now with their valid values, and the version of the state;
  * - `act`: carries out one typed action (`{"type": "attack", "move": "move:33"}`...), optionally followed by a short
  *   list of further actions, and returns what happened and the new state;
- * - `screenshot`: the console's screens as a picture, for what isn't decoded yet;
- * - (game knowledge lookups come with phase 4).
+ * - `lookup`: game knowledge (species, moves, items, types, encounters...) within the run's knowledge level;
+ * - `screenshot`: the console's screens as a picture, for what isn't decoded yet.
+ *
+ * Every call goes through one circuit: the call lock (one call at a time on the game, in arrival order) and
+ * [ToolCalls]: the verdict on the previous answer's delivery when it arrives, then the work (get_state and act with
+ * progress notifications and their own delivery tracked, [ToolCalls.run]; lookup and screenshot, whose answers carry
+ * no message, event or outcome, [ToolCalls.aside], with heartbeats while they wait for the lock, [ToolCalls.locked]).
+ *
+ * The mode (Pure / Assisted, [GameSession.options]) is read at every call: `get_state`'s actions and `act`'s
+ * validation ([actSteps]) follow a change at once, within a session too. `act`'s JSON schema lists the actions of
+ * the mode of the moment the client connected ([createServer], one server per MCP session: like
+ * [reasoningRequired]); a client connected before a change keeps the schema it listed (the server never sends
+ * `tools/list_changed`, see [reasoningRequired]), and an action of the other mode is refused by the validation with
+ * the actions of the current one.
  *
  * The game is frozen between calls when "pause while thinking" is on: nothing changes while the agent thinks.
  */
@@ -148,6 +165,7 @@ class GameMcpServer(
                 "checked for you; an error says exactly why an action didn't happen. Always give a short first-person `reasoning`.",
             inputSchema = ToolSchema(
                 properties = buildJsonObject {
+                    // The mode when this client connects (one server per session): validation follows later changes.
                     put("action", session.registry.jsonSchema(session.options().mode))
                     putJsonObject("then") {
                         put("type", "array")
@@ -181,15 +199,8 @@ class GameMcpServer(
             val arguments = request.arguments ?: JsonObject(emptyMap())
             val reasoning = arguments["reasoning"]?.jsonPrimitive?.contentOrNull
             mutex.withLock {
-                val json = listOfNotNull(arguments["action"] as? JsonObject) + (arguments["then"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>().take(ChainRunner.MAX_THEN)
-                if (json.isEmpty()) return@withLock error("`action` must be an object like {\"type\": \"press\", \"button\": \"a\"}")
                 arguments["note"]?.jsonPrimitive?.contentOrNull?.let { session.addNote(it) }
-                val actions = json.map { step ->
-                    session.registry.parse(step, session.options().mode).getOrElse { error ->
-                        val message = (error as? ActionException)?.error?.message ?: error.message ?: "invalid action"
-                        return@withLock error("$message. Call get_state for the valid actions.")
-                    }
-                }
+                val actions = actSteps(session.registry, arguments, session.options().mode).getOrElse { return@withLock error(it.message ?: "invalid action") }
                 val label = actions.joinToString(" → ") { it.key }
                 // Shown as in progress right away: the comment appears while the action happens.
                 _activity.update { it.started(label, reasoning) }
@@ -222,28 +233,19 @@ class GameMcpServer(
                 required = listOf("kind"),
             ),
         ) { request ->
-            val arguments = request.arguments ?: JsonObject(emptyMap())
-            val kind = arguments["kind"]?.jsonPrimitive?.contentOrNull?.let { k -> LookupKind.entries.firstOrNull { it.name.equals(k, ignoreCase = true) } }
-                ?: return@addTool error("`kind` must be one of ${LookupKind.entries.joinToString { it.name.lowercase() }}")
-            // Only encounters has a default (the current map).
-            val id = arguments["id"]?.jsonPrimitive?.contentOrNull ?: if (kind == LookupKind.ENCOUNTERS) "" else return@addTool error("`id` is missing")
-            session.lookup(kind, id).fold({ text(it.encode()) }, { error(it.message ?: "lookup failed") })
+            val arrival = System.currentTimeMillis()
+            agentArrived()
+            lookupCall(calls, mutex, this, request, arrival) { kind, id -> session.lookup(kind, id) }
         }
         val screens = host.info.platform
         addTool(
             name = "screenshot",
             description = "A picture of both screens (top, then the bottom touch screen), for anything the state doesn't describe. " +
                 "It is ${screens.screenWidth}x${screens.screenHeight * 2}: to touch something seen at (x, y) on the bottom half, touch (x, y - ${screens.screenHeight}).",
-        ) {
+        ) { request ->
             val arrival = System.currentTimeMillis()
             agentArrived()
-            val frame = host.frames.value ?: return@addTool error("No frame yet")
-            mutex.withLock {
-                // A call: the previous answer reached the agent (or not).
-                calls.delivery.arrived(arrival)
-                session.countScreenshot()
-            }
-            CallToolResult(content = listOf(ImageContent(data = png(frame), mimeType = "image/png")))
+            screenshotCall(calls, mutex, this, request, arrival, count = session::countScreenshot, frame = { host.frames.value }) { png(it) }
         }
     }
 
@@ -259,8 +261,6 @@ class GameMcpServer(
     }
 
     private fun JsonObject.encode() = json.encodeToString(JsonObject.serializer(), this)
-    private fun text(value: String) = CallToolResult(content = listOf(TextContent(value)))
-    private fun error(message: String) = CallToolResult(content = listOf(TextContent(message)), isError = true)
 
     private fun png(frame: Frame): String {
         val image = BufferedImage(frame.width, frame.height, BufferedImage.TYPE_INT_RGB)
@@ -271,6 +271,68 @@ class GameMcpServer(
 
     internal companion object {
         val json = Json { prettyPrint = false }
+
+        /**
+         * The actions of one `act` call, read from its [arguments] (`action`, then at most [ChainRunner.MAX_THEN] of
+         * `then`) and validated against [mode], the mode at the time of the call (not the one `act`'s schema was listed
+         * with): an action of another mode is refused with the actions of this one. What the `act` tool runs; the
+         * failure's message is the one sent to the agent.
+         */
+        fun actSteps(registry: ActionRegistry, arguments: JsonObject, mode: ActionMode): Result<List<GameAction>> = runCatching {
+            val steps = listOfNotNull(arguments["action"] as? JsonObject) + (arguments["then"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>().take(ChainRunner.MAX_THEN)
+            require(steps.isNotEmpty()) { "`action` must be an object like {\"type\": \"press\", \"button\": \"a\"}" }
+            steps.map { step ->
+                registry.parse(step, mode).getOrElse { error ->
+                    val message = (error as? ActionException)?.error?.message ?: error.message ?: "invalid action"
+                    throw IllegalArgumentException("$message. Call get_state for the valid actions.")
+                }
+            }
+        }
+
+        /**
+         * The `lookup` tool: its arguments read ([lookupRequest]), then the common circuit of a call without anything to
+         * deliver: the call lock, with heartbeats while it waits ([ToolCalls.locked]), and the verdict on the previous
+         * answer ([ToolCalls.aside]); [lookup] answers (it reads the game: the party, where the player stands).
+         */
+        suspend fun lookupCall(
+            calls: ToolCalls, lock: Mutex, connection: ClientConnection, request: CallToolRequest, arrival: Long,
+            lookup: suspend (LookupKind, String) -> Result<JsonObject>,
+        ): CallToolResult {
+            val (kind, id) = lookupRequest(request.arguments ?: JsonObject(emptyMap())).getOrElse { return error(it.message ?: "invalid lookup") }
+            return calls.locked(connection, request, lock, label = "lookup") {
+                calls.aside(arrival) { lookup(kind, id).fold({ text(json.encodeToString(JsonObject.serializer(), it)) }, { error(it.message ?: "lookup failed") }) }
+            }
+        }
+
+        /**
+         * The `screenshot` tool: the same circuit as [lookupCall]; the [frame] is read once the lock is held (after an
+         * act queued before it: the picture shows the screen it led to), the screenshot [count]ed for the blind uses,
+         * and the verdict on the previous answer given even when there is no frame yet. [png] encodes the frame.
+         */
+        suspend fun screenshotCall(
+            calls: ToolCalls, lock: Mutex, connection: ClientConnection, request: CallToolRequest, arrival: Long,
+            count: suspend () -> Unit, frame: () -> Frame?, png: (Frame) -> String,
+        ): CallToolResult = calls.locked(connection, request, lock, label = "screenshot") {
+            calls.aside(arrival) {
+                val shown = frame() ?: return@aside error("No frame yet")
+                count()
+                CallToolResult(content = listOf(ImageContent(data = png(shown), mimeType = "image/png")))
+            }
+        }
+
+        /** A tool's text answer. */
+        fun text(value: String) = CallToolResult(content = listOf(TextContent(value)))
+
+        /** A tool's error answer, [message] sent to the agent. */
+        fun error(message: String) = CallToolResult(content = listOf(TextContent(message)), isError = true)
+
+        /** The `kind` and `id` of a `lookup` call, or the error sent to the agent (`id` defaults to the current map for encounters only). */
+        fun lookupRequest(arguments: JsonObject): Result<Pair<LookupKind, String>> {
+            val kind = arguments["kind"]?.jsonPrimitive?.contentOrNull?.let { k -> LookupKind.entries.firstOrNull { it.name.equals(k, ignoreCase = true) } }
+                ?: return Result.failure(IllegalArgumentException("`kind` must be one of ${LookupKind.entries.joinToString { it.name.lowercase() }}"))
+            val id = arguments["id"]?.jsonPrimitive?.contentOrNull ?: if (kind == LookupKind.ENCOUNTERS) "" else return Result.failure(IllegalArgumentException("`id` is missing"))
+            return Result.success(kind to id)
+        }
 
         /** The required arguments of `act`: its `action`, and its `reasoning` when [reasoningRequired]. */
         fun actRequired(reasoningRequired: Boolean): List<String> = if (reasoningRequired) listOf("action", "reasoning") else listOf("action")
