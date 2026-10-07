@@ -77,17 +77,18 @@ class GameSession(
     val gameData get() = game.data
 
     /**
-     * Answers `lookup(kind, id)` within the run's knowledge level: the game data, and for `encounters` the world's
-     * tables with where the player stands and what their Pokédex has seen (read now from the game).
+     * Answers `lookup(kind, id)` within the run's knowledge level: the game data, the party (its `mon:<id>` ids, who
+     * can learn a TM), and for `encounters` the world's tables with where the player stands and what their Pokédex
+     * has seen (read now from the game).
      */
     suspend fun lookup(kind: LookupKind, id: String): Result<JsonObject> {
         val data = game.data ?: return Result.failure(IllegalStateException("No game data for this game"))
         val world = game.world
+        val state = state()
         val context = if (kind == LookupKind.ENCOUNTERS && world != null) {
-            val state = state()
             EncounterContext(world, game::mapName, state.field?.mapId, state.pokedex?.seen)
         } else null
-        return Lookup(data, options().knowledge, context).lookup(kind, id)
+        return Lookup(data, options().knowledge, context, state.party).lookup(kind, id)
     }
 
     /** What the agent reads, assembled by the library like for every host (the bench too). */

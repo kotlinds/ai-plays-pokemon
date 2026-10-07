@@ -57,6 +57,18 @@ class GameMcpServer(
     private val host: ConsoleHost,
     private val port: Int,
     private val pauseWhileThinking: () -> Boolean,
+    /**
+     * Whether `act` requires its `reasoning` (PlayerSettings.reasoning): required in the tool's schema, and reminded in
+     * the answer of a call without it.
+     * - The schema reads it when a client connects: the SDK builds a [Server] per MCP session ([createServer], called
+     *   by `mcpStreamableHttp` on each `initialize`), so a client connecting after the option changed gets the new
+     *   schema. It can't follow a change within a session: the SDK answers `tools/list` from the tools registered on
+     *   the session's server (no hook to build them on each listing), and changing them mid-session would need a
+     *   `tools/list_changed` that clients caching their tools (the four tools are always the same, see above) may
+     *   ignore.
+     * - The reminder reads it at every call: switched within a session, it is what follows the option at once.
+     */
+    private val reasoningRequired: () -> Boolean = { true },
 ) {
     private val mutex = Mutex()
 
@@ -126,7 +138,7 @@ class GameMcpServer(
             val detail = if (request.arguments?.get("detail")?.jsonPrimitive?.contentOrNull == "full") AgentView.Detail.FULL else AgentView.Detail.STANDARD
             agentArrived()
             mutex.withLock {
-                calls.run(this, request, arrival) { text(session.describe(detail).encode()) }
+                calls.run(this, request, arrival, label = "get_state") { text(session.describe(detail).encode()) }
             }
         }
         addTool(
@@ -141,7 +153,8 @@ class GameMcpServer(
                         put("type", "array")
                         put("description", "Optional further actions done right after, only when sure (max ${ChainRunner.MAX_THEN}). Stops at the first problem, when the battle changes under it " +
                             "(FOE_CHANGED: the foe switched or a new one was sent, even of the same species; FOE_FAINTED; OWN_FAINTED), after a `run` that couldn't escape " +
-                            "(ESCAPE_FAILED), or when nothing has happened for a while (IDLE / TIME_CAP): `not_done` lists the steps left and `not_done_code` why. " +
+                            "(ESCAPE_FAILED), before a step naming an id of the map you started on (person:, warp:, item:, exit:...) once an earlier step took you to another map " +
+                            "(TARGET_ON_OTHER_MAP: ids belong to their map), or when nothing has happened for a while (IDLE / TIME_CAP): `not_done` lists the steps left and `not_done_code` why. " +
                             "Once the battle is over, only its battle steps are dropped (attack, switch, keep_battling, run, throw_ball, use_item of a battle-only " +
                             "item like X Attack): `dropped` lists them and `dropped_code` how it ended (BATTLE_WON / BATTLE_OVER / BATTLE_LOST); every other step " +
                             "(walking, interact, a Potion or Repel, learning a move, reading messages) goes on. The answer covers every step: `performed` and all the messages.")
@@ -160,7 +173,8 @@ class GameMcpServer(
                         put("description", "One short sentence: why you do this (shown to the people watching).")
                     }
                 },
-                required = listOf("action"),
+                // Read now, when this client connects (one server per session): see [reasoningRequired].
+                required = actRequired(reasoningRequired()),
             ),
         ) { request ->
             val arrival = System.currentTimeMillis()
@@ -181,10 +195,12 @@ class GameMcpServer(
                 _activity.update { it.started(label, reasoning) }
                 // One response for the whole chain: every step's messages, every step performed.
                 val detail = if (arguments["detail"]?.jsonPrimitive?.contentOrNull == "full") AgentView.Detail.STANDARD else AgentView.Detail.COMPACT
-                val result = calls.run(this, request, arrival) { running { session.act(actions.map { ChainStep.Planned(it) }, detail = detail).json } }
+                val result = calls.run(this, request, arrival, label = label) { running { session.act(actions.map { ChainStep.Planned(it) }, detail = detail).json } }
                 val ok = result["ok"]?.jsonPrimitive?.contentOrNull == "true"
                 _activity.update { it.finished(ok, if (ok) null else result["error"]?.let { e -> (e as? JsonObject)?.get("code")?.jsonPrimitive?.contentOrNull ?: e.toString() }) }
-                text(result.encode())
+                // The action ran all the same (refusing it would cost a call and the moment): the answer reminds.
+                val reminder = reasoningReminder(reasoning, reasoningRequired())
+                text((if (reminder == null) result else JsonObject(result + ("reminder" to kotlinx.serialization.json.JsonPrimitive(reminder)))).encode())
             }
         }
         addTool(
@@ -253,8 +269,21 @@ class GameMcpServer(
         return Base64.getEncoder().encodeToString(bytes)
     }
 
-    private companion object {
+    internal companion object {
         val json = Json { prettyPrint = false }
+
+        /** The required arguments of `act`: its `action`, and its `reasoning` when [reasoningRequired]. */
+        fun actRequired(reasoningRequired: Boolean): List<String> = if (reasoningRequired) listOf("action", "reasoning") else listOf("action")
+
+        /**
+         * The reminder added to the answer of an `act` without [reasoning] while it is required (null: given, or
+         * optional). The action is carried out anyway.
+         */
+        fun reasoningReminder(reasoning: String?, required: Boolean): String? =
+            if (required && reasoning.isNullOrBlank()) REASONING_REMINDER else null
+
+        const val REASONING_REMINDER = "`reasoning` is missing: give one short first-person sentence with every act " +
+            "(why you do this; it is shown to the people watching). The action was carried out."
 
         const val INSTRUCTIONS =
             "You are playing a Pokémon game on a Nintendo DS through this server. Call get_state to see the screen (decoded from " +

@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 
 /**
  * How the MCP server runs the work of one tool call that reads or changes the game:
@@ -24,10 +25,13 @@ import kotlin.time.Duration.Companion.seconds
  *   leave the console mid-menu, and the console thread finishes what it started anyway. The cancellation only marks
  *   the answer as lost, so what it carried is given again with the next one;
  * - while it runs, when the client gave a `progressToken`, a `notifications/progress` is sent every [period] (about
- *   5 s) as long as the game made progress meanwhile ([ProgressClock]: a new message, a step, a menu moving, a long
- *   action's report): clients that restart their timeout on progress then only time out on a call that is really
- *   stuck. Its message is the clock's latest note: the last text shown, or how far a long action has got ("go_to
- *   Seafoam Islands 1F: 120/480 tiles, Route 20", see `ActionProgress`). Nothing is sent while nothing happens.
+ *   5 s) for the whole call, a heartbeat: clients that restart their timeout on progress then never time out on a
+ *   call that is still running. Its message is the clock's latest note when the game made progress meanwhile
+ *   ([ProgressClock]: the last text shown, or how far a long action has got, "go_to Seafoam Islands 1F: 120/480
+ *   tiles, Route 20", see `ActionProgress`), else that the call is still running and for how long ("attack(move:33):
+ *   still running, 15 s"): an attack's turn, a cutscene or the Hall of Fame change nothing a reading sees for a
+ *   while, and clients timed out on them when only progress was sent (race Claude vs Codex: `attack`, Ho-Oh's
+ *   cutscene, `watch_hall_of_fame`, a 63 s chain).
  *
  * With the SDK's Streamable HTTP endpoint (JSON answers), notifications about a request are sent on the client's
  * standalone SSE stream (the GET it opens after initializing), where clients match them to the call by token.
@@ -39,9 +43,9 @@ class ToolCalls(
 ) {
     /**
      * Runs [block] for [request] (under the server's call lock), arrived at [arrival]. [connection] sends the progress
-     * notifications.
+     * notifications; [label] names the call in the heartbeats (the action's key, "get_state").
      */
-    suspend fun <T> run(connection: ClientConnection, request: CallToolRequest, arrival: Long, block: suspend () -> T): T {
+    suspend fun <T> run(connection: ClientConnection, request: CallToolRequest, arrival: Long, label: String? = null, block: suspend () -> T): T {
         delivery.arrived(arrival)
         val call = delivery.started()
         val job = currentCoroutineContext().job
@@ -51,19 +55,28 @@ class ToolCalls(
             coroutineScope {
                 val ticker = token?.let {
                     launch {
+                        val started = TimeSource.Monotonic.markNow()
                         val first = progress.ticks
                         var sent = first
+                        var beats = 0
                         while (true) {
                             delay(period)
                             val ticks = progress.ticks
-                            if (ticks == sent) continue
+                            val moved = ticks != sent
                             sent = ticks
+                            beats++
                             try {
-                                // Only a note of this call (not the previous call's last message or trip).
-                                val note = progress.note.takeIf { progress.noteTick > first }
-                                val params = ProgressNotificationParams(token, (ticks - first).toDouble(), message = note)
+                                // Only a note of this call (not the previous call's last message or trip), when the
+                                // game moved since the last one; else the heartbeat.
+                                val note = progress.note.takeIf { moved && progress.noteTick > first }
+                                val message = note ?: heartbeat(label, started.elapsedNow())
+                                val params = ProgressNotificationParams(token, beats.toDouble(), message = message)
                                 connection.notification(ProgressNotification(params), requestId)
-                                delivery.alive(call)
+                                // A sign of life only when the game moved: a heartbeat is sent all the same (so a
+                                // client restarting its timeout on progress keeps waiting), but counting it would make
+                                // every call look alive to its end, and an answer arriving after the client gave up
+                                // without cancelling (an HTTP timeout) would never be taken as lost (DeliveryTracker).
+                                if (moved) delivery.alive(call)
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (_: Exception) {
@@ -84,6 +97,10 @@ class ToolCalls(
     }
 
     companion object {
+        /** The message of a heartbeat: the call still runs, nothing new to tell ("attack(move:33): still running, 15 s"). */
+        internal fun heartbeat(label: String?, elapsed: Duration): String =
+            (label?.let { "$it: " } ?: "") + "still running, ${elapsed.inWholeSeconds} s"
+
         /**
          * How often a long call says how it goes: often enough for a client's timeout (60 s by default), rarely enough
          * not to flood the agent's transcript (one line per notification in some clients).

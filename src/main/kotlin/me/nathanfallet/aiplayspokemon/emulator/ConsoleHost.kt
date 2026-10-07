@@ -99,6 +99,16 @@ class ConsoleHost(
     @Volatile
     var humanInputListener: (() -> Unit)? = null
 
+    /**
+     * Called on the console thread after every successful [loadState] (a save state replaced the game: another party,
+     * other boxes than a moment ago), before the next frame. The event recorder forgets what it learned of the game
+     * there ([dev.kotlinds.pokemonclient.runtime.Recorder.saveLoaded]), like after a soft reset; without it, loading a
+     * state from before a move was learned showed a false "learned X, forgot Y". Every load goes through [loadState]
+     * (the F-keys of the UI, the start state of the command line), so this is the one place it is called from.
+     */
+    @Volatile
+    var stateLoadedListener: (() -> Unit)? = null
+
     override lateinit var info: EmulatorInfo
         private set
 
@@ -334,7 +344,7 @@ class ConsoleHost(
     override suspend fun loadState(slot: Int): Boolean = onConsoleThread { console ->
         shadowAudio.discard() // the paused game is replaced: its shadow's music isn't the new one's
         val file = stateFile(slot)
-        Files.exists(file) && console.loadState(Files.readAllBytes(file))
+        afterLoad(Files.exists(file) && console.loadState(Files.readAllBytes(file)), stateLoadedListener)
     }
 
     override suspend fun reset() = onConsoleThread { console ->
@@ -350,6 +360,14 @@ class ConsoleHost(
     // endregion
 
     private fun stateFile(slot: Int) = saveStateDirectory.resolve("${romPath.fileName}.state$slot")
+
+    internal companion object {
+        /** The outcome [loaded] of a [loadState], telling [listener] (see [stateLoadedListener]) only when it succeeded. */
+        internal fun afterLoad(loaded: Boolean, listener: (() -> Unit)?): Boolean {
+            if (loaded) listener?.let { runCatching { it() } }
+            return loaded
+        }
+    }
 }
 
 /**

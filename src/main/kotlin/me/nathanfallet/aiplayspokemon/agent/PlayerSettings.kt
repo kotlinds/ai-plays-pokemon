@@ -20,7 +20,12 @@ data class PlayerSettings(
     val pauseWhileThinking: Boolean = true,
     /** Generative models may answer with a short sequence of options instead of one. */
     val allowSequences: Boolean = true,
-    /** Generative models reason step by step before answering. */
+    /**
+     * The AI says why with each decision, in a `reasoning` field: our generative models reason step by step before
+     * answering, and MCP agents must give `reasoning` with every `act` (required in the tool's schema, and a reminder in
+     * the answer when it is missing: Claude stopped filling it after its third context compaction when it was
+     * optional). Off: optional for MCP agents (to compare).
+     */
     val reasoning: Boolean = true,
     /** Generative models keep a note (goal/plan) they rewrite at will, shown back every time. */
     val modelNotes: Boolean = true,
@@ -28,7 +33,8 @@ data class PlayerSettings(
     val exploredMap: Boolean = true,
     /**
      * What the agent may know beyond the screen: nothing more, the Pokédex (species / move sheets, type chart,
-     * estimated effectiveness), or also a walkthrough (next story goal, why a way is blocked...).
+     * estimated effectiveness), or also a walkthrough (next story goal, why a way is blocked and what lifts it...).
+     * What blocks a way (a person in it, a scene turning the player back) is on screen: told at every level.
      */
     val knowledge: KnowledgeLevel = KnowledgeLevel.POKEDEX,
     /** Pick the action by sampling the model's probabilities (Jev) instead of always the most likely one. */

@@ -232,7 +232,9 @@ private fun ExperimentSettings(controller: AppController, backend: DecisionBacke
     val toggles = listOfNotNull(
         Triple("Pause while thinking", settings.pauseWhileThinking) { s: PlayerSettings, v: Boolean -> s.copy(pauseWhileThinking = v) },
         Triple("Sequences (LLM)", settings.allowSequences) { s: PlayerSettings, v: Boolean -> s.copy(allowSequences = v) }.takeIf { llmInLoop },
-        Triple("Reasoning (LLM)", settings.reasoning) { s: PlayerSettings, v: Boolean -> s.copy(reasoning = v) }.takeIf { llmInLoop },
+        // Our LLM reasons before answering; an MCP agent must give `reasoning` with each act.
+        Triple(if (backend == DecisionBackend.MCP) "Reasoning required (MCP)" else "Reasoning (LLM)", settings.reasoning) { s: PlayerSettings, v: Boolean -> s.copy(reasoning = v) }
+            .takeIf { llmInLoop || backend == DecisionBackend.MCP },
         Triple("Notes (LLM)", settings.modelNotes) { s: PlayerSettings, v: Boolean -> s.copy(modelNotes = v) }.takeIf { llmInLoop },
         Triple("Explored map", settings.exploredMap) { s: PlayerSettings, v: Boolean -> s.copy(exploredMap = v) },
         Triple("Solve movement puzzles", settings.solvePuzzles) { s: PlayerSettings, v: Boolean -> s.copy(solvePuzzles = v) }

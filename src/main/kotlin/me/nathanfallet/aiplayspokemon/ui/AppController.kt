@@ -112,6 +112,9 @@ class AppController(
         recorder?.let { r ->
             emulator.frameListener = r::onFrame
             emulator.humanInputListener = { r.humanInput(emulator.status.value.frameCount) }
+            // A state loaded (F-keys) is another game than a moment ago: the recorder starts learning it again. The
+            // command line's start state is loaded before this recorder exists: it starts from it anyway.
+            emulator.stateLoadedListener = r::saveLoaded
         }
         createPlayer()
         updateMcpServer()
@@ -131,7 +134,8 @@ class AppController(
         val running = _mcp.value
         if (wanted && running == null) {
             val session = session(game, confirmDelivery = true)
-            val server = GameMcpServer(session, emulator, config.mcpPort, pauseWhileThinking = { _settings.value.pauseWhileThinking })
+            val server = GameMcpServer(session, emulator, config.mcpPort, pauseWhileThinking = { _settings.value.pauseWhileThinking },
+                reasoningRequired = { _settings.value.reasoning })
             server.start()
             _mcp.value = server
         } else if (!wanted && running != null) {

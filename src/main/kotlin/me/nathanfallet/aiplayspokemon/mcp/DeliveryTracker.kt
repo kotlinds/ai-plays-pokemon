@@ -12,8 +12,9 @@ package me.nathanfallet.aiplayspokemon.mcp
  *   last sign of life: a long `go_to` sends progress until its end, and a client that gave up without cancelling (an
  *   HTTP timeout) must still be noticed;
  * - it was answered more than [clientTimeoutMillis] after its last sign of life (the default timeout of MCP clients).
- * A sign of life is the call's start, or a progress notification sent for it (clients may restart their timeout on
- * each one). A call answered late but received (a long chain that ended in `not_done`) is therefore confirmed: the
+ * A sign of life is the call's start, or a progress notification sent for it while the game moved (clients may
+ * restart their timeout on each one); a mere heartbeat ("still running") is not one: sent every few seconds to the
+ * end of every call, it would keep every answer alive and none would ever be taken as lost ([ToolCalls]). A call answered late but received (a long chain that ended in `not_done`) is therefore confirmed: the
  * old rule ("answered more than 50 s after the start = lost") repeated the messages of such calls.
  *
  * Between the two, a call answered more than [clientTimeoutMillis] after its START, kept alive by progress, the next
@@ -63,7 +64,7 @@ class DeliveryTracker(
     @Synchronized
     fun started(): Call = Call(now()).also { pending = it }
 
-    /** A progress notification was sent for [call]: the client may restart its timeout. */
+    /** A progress notification telling the game moved was sent for [call]: the client may restart its timeout. */
     fun alive(call: Call) {
         call.lastSignOfLife = now()
     }

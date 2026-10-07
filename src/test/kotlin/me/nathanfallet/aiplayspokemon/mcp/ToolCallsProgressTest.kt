@@ -65,18 +65,28 @@ class ToolCallsProgressTest {
         assertTrue(messages.all { Regex("go_to Seafoam Islands 1F: \\d+/480 tiles, Route 2[01]").matches(it) }, messages.toString())
     }
 
+    @Test
+    fun aLongCallWithNothingNewOnScreenStillSendsHeartbeats() {
+        // An attack's turn, a cutscene, the Hall of Fame: nothing a reading sees changes for a while (race Claude vs
+        // Codex: "The operation timed out." on `attack`, Ho-Oh's cutscene, `watch_hall_of_fame`).
+        val progress = progressOf(ProgressClock(), label = "attack(move:33)") { delay(700) }
+        val messages = progress.mapNotNull { it["message"]?.jsonPrimitive?.content }
+        assertTrue(messages.size >= 3, "heartbeats: $progress")
+        assertTrue(messages.all { Regex("attack\\(move:33\\): still running, \\d+ s").matches(it) }, messages.toString())
+    }
+
     /**
      * Runs [work] as a tool call with a progress token, over HTTP like a client with its standalone SSE stream, and
      * returns the params of the progress notifications received before the answer (checked: same token, growing).
      */
-    private fun progressOf(clock: ProgressClock, work: suspend () -> Unit): List<kotlinx.serialization.json.JsonObject> {
+    private fun progressOf(clock: ProgressClock, label: String? = null, work: suspend () -> Unit): List<kotlinx.serialization.json.JsonObject> {
         val port = ServerSocket(0).use { it.localPort }
         val calls = ToolCalls(clock, DeliveryTracker(confirm = {}), period = 100.milliseconds)
         val engine = embeddedServer(CIO, port = port, host = "127.0.0.1") {
             mcpStreamableHttp(path = "/mcp") {
                 Server(Implementation("test", "1"), ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false)))) {
                     addTool(name = "slow", description = "a long action") { request ->
-                        calls.run(this, request, System.currentTimeMillis()) {
+                        calls.run(this, request, System.currentTimeMillis(), label) {
                             work()
                             CallToolResult(content = listOf(TextContent("done")))
                         }
@@ -161,6 +171,86 @@ class ToolCallsProgressTest {
             val next = http.send(request("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fast","arguments":{}}}""", session), HttpResponse.BodyHandlers.ofString())
             assertTrue("ok" in next.body(), next.body())
             assertEquals(0, confirmed, "the cancelled call's answer was never delivered")
+        } finally {
+            engine.stop(100, 500)
+        }
+    }
+
+    /**
+     * A call answered long after its last sign of life (here 300 ms, the client's timeout in this test) is taken as
+     * lost when only heartbeats were sent meanwhile: a heartbeat goes out every period to the end of every call, so
+     * counting it kept every answer alive and an answer the client gave up on (an HTTP timeout, no cancel) was never
+     * repeated.
+     */
+    @Test
+    fun heartbeatsAloneDoNotKeepAnAnswerAlive() {
+        val verdicts = verdictsOf(ProgressClock()) { delay(800) }
+        assertEquals(Verdicts(confirmed = 0, uncertain = 0), verdicts, "the answer counts as lost")
+    }
+
+    /** The other side: progress of the game (a go_to's tiles) keeps the call alive, its answer is not lost. */
+    @Test
+    fun progressOfTheGameKeepsAnAnswerAlive() {
+        val clock = ProgressClock()
+        val verdicts = verdictsOf(clock) {
+            repeat(8) { i ->
+                delay(100)
+                clock.progressed("message $i")
+            }
+        }
+        // Answered more than the timeout after its start but alive to the end: uncertain, not lost.
+        assertEquals(Verdicts(confirmed = 0, uncertain = 1), verdicts)
+    }
+
+    private data class Verdicts(val confirmed: Int, val uncertain: Int)
+
+    /**
+     * Runs [work] as a tool call with a progress token (client timeout 300 ms, heartbeat every 100 ms), then a short
+     * call (which gives the verdict on the first one), over HTTP like a client; returns the verdicts given.
+     */
+    private fun verdictsOf(clock: ProgressClock, work: suspend () -> Unit): Verdicts {
+        val port = ServerSocket(0).use { it.localPort }
+        var confirmed = 0
+        var uncertain = 0
+        val delivery = DeliveryTracker(confirm = { confirmed++ }, uncertain = { uncertain++ }, clientTimeoutMillis = 300, minClientTimeoutMillis = 100)
+        val calls = ToolCalls(clock, delivery, period = 100.milliseconds)
+        val engine = embeddedServer(CIO, port = port, host = "127.0.0.1") {
+            mcpStreamableHttp(path = "/mcp") {
+                Server(Implementation("test", "1"), ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false)))) {
+                    addTool(name = "slow", description = "a long action") { request ->
+                        calls.run(this, request, System.currentTimeMillis()) {
+                            work()
+                            CallToolResult(content = listOf(TextContent("done")))
+                        }
+                    }
+                    addTool(name = "fast", description = "a short call") { request ->
+                        calls.run(this, request, System.currentTimeMillis()) { CallToolResult(content = listOf(TextContent("ok"))) }
+                    }
+                }
+            }
+        }.start(wait = false)
+        try {
+            val http = HttpClient.newHttpClient()
+            val url = URI("http://127.0.0.1:$port/mcp")
+            fun post(body: String, session: String?): HttpResponse<String> = http.send(
+                HttpRequest.newBuilder(url).POST(HttpRequest.BodyPublishers.ofString(body))
+                    .header("Content-Type", "application/json").header("Accept", "application/json, text/event-stream")
+                    .apply { session?.let { header("mcp-session-id", it); header("mcp-protocol-version", "2025-06-18") } }.build(),
+                HttpResponse.BodyHandlers.ofString(),
+            )
+            val init = post("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}""", null)
+            val session = init.headers().firstValue("mcp-session-id").orElseThrow()
+            post("""{"jsonrpc":"2.0","method":"notifications/initialized"}""", session)
+            http.sendAsync(
+                HttpRequest.newBuilder(url).GET().header("Accept", "text/event-stream").header("mcp-session-id", session).header("mcp-protocol-version", "2025-06-18").build(),
+                HttpResponse.BodyHandlers.ofLines(),
+            ).thenAccept { response -> response.body().forEach { } }
+            Thread.sleep(300)
+            val slow = post("""{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow","arguments":{},"_meta":{"progressToken":"tok-1"}}}""", session)
+            assertTrue("done" in slow.body(), slow.body())
+            val next = post("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fast","arguments":{}}}""", session)
+            assertTrue("ok" in next.body(), next.body())
+            return Verdicts(confirmed, uncertain)
         } finally {
             engine.stop(100, 500)
         }
