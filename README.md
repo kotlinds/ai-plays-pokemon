@@ -16,39 +16,60 @@ What every AI gets:
   describe it as JSON: no AI sees pixels;
 - **memory**: what each of its actions changed, where it has been, what it read, the map it explored, its own notes;
 - **hands**, depending on the mode you pick:
-  - **Pure**: the controller, nothing more: "which button do I press?" among the 12 DS buttons (+ wait);
-  - **Assisted**: the buttons plus actions carried out by code ("walk to the stairs and take them", "talk to Mom",
-    "choose YES", "go to Route 30", "surf across"): the AI still decides what to do, code does the walking (across
-    floors and maps, with Surf, Cut, Strength, Waterfall... used on the way);
-  - **Hybrid**: assisted actions picked by a fast decision model (Jev), with an LLM planner called when it hesitates,
-    loops, or periodically, whose goal the fast model then follows.
+    - **Pure**: the controller, nothing more: "which button do I press?" among the 12 DS buttons (+ wait);
+    - **Assisted**: the buttons plus actions carried out by code ("walk to the stairs and take them", "talk to Mom",
+      "choose YES", "go to Route 30", "surf across"): the AI still decides what to do, code does the walking (across
+      floors and maps, with Surf, Cut, Strength, Waterfall... used on the way);
+    - **Hybrid**: assisted actions picked by a fast decision model (Jev), with an LLM planner called when it hesitates,
+      loops, or periodically, whose goal the fast model then follows.
 
 Every variant is an option in the app (mode, knowledge level, timing, sequences, reasoning, notes, explored map...),
 and each run records milestones (new places, story progress) with decisions, presses, time, tokens and cost in
 `~/.ai-plays-pokemon/runs/`, so configurations can be compared.
 
-## Running it
+## Quick start
 
-Requirements: JDK 21 and a Pokémon HeartGold (USA) ROM that you dumped yourself. Then an API key for the AI you want
-to try (or [Ollama](https://ollama.com) for a local model, e.g. `ollama pull gemma4:26b`: a mixture-of-experts model, 4B parameters active, so fast enough on a laptop; small local models play poorly, cloud models play much better).
+You need **Java 21** (for example [Temurin 21](https://adoptium.net/temurin/releases/?version=21)) and a **Pokémon
+HeartGold (USA) ROM that you dumped yourself** (no ROM is provided).
+
+1. Download `ai-plays-pokemon-<version>-universal.jar` from the
+   [latest release](https://github.com/kotlinds/ai-plays-pokemon/releases/latest). The same jar runs on macOS, Linux
+   and Windows (x86-64 and Apple Silicon).
+2. Run it, with the path to your ROM (or without it: the app asks for the ROM with a file picker and remembers it):
+
+   ```bash
+   java -jar ai-plays-pokemon-<version>-universal.jar "/path/to/Pokemon - HeartGold Version (USA).nds"
+   ```
+
+   On first launch it downloads the DeSmuME emulator core for your platform (see below).
+3. Let an AI play:
+    - **an agent through MCP** (e.g. Claude Code or Codex): keep the *MCP* tab selected (the server starts on port
+      `3333`), then connect the agent, e.g. for Claude Code
+      `claude mcp add --transport http pokemon http://localhost:3333/mcp`, and ask it to play, for example: *"Play
+      Pokémon HeartGold through the `pokemon` MCP tools. Start a new game and beat the Pokémon League. Keep notes of
+      your progress in NOTES.md."* For any other MCP client, the server's URL is `http://localhost:3333/mcp`
+      (streamable HTTP);
+    - **an LLM or Jev from the app**: choose it in the panel on the right, paste its API key if needed, and click
+      **▶ Let … play**.
+
+## Running from source
+
+Requirements: JDK 21 and the ROM as above. Then an API key for the AI you want to try (or
+[Ollama](https://ollama.com) for a local model, e.g. `ollama pull gemma4:26b`: a mixture-of-experts model, 4B
+parameters active, so fast enough on a laptop; small local models play poorly, cloud models play much better).
 
 ```bash
 ./gradlew run --args="/path/to/Pokemon - HeartGold Version (USA).nds"
 ```
 
-Without an argument, the app asks for the ROM with a file picker and remembers it. On first launch it downloads the
-DeSmuME libretro core for your platform from the libretro buildbot (melonDS is available too; both are pinned and
-checked by SHA-256). In-game saves are converted between the cores' formats automatically.
+Gradle downloads the libraries from Maven Central (libretro-kmp and
+[pokemon-client](https://github.com/kotlinds/pokemon-client) included). While the app depends on a `-SNAPSHOT` of
+pokemon-client (see `gradle/libs.versions.toml`), clone that repository too and run `./gradlew publishToMavenLocal`
+in it first. To build the jar that runs on every platform yourself: `./gradlew packageUberJarForCurrentOS
+-Puniversal`, written to `build/compose/jars/` (the name carries the platform it was built on, but `-Puniversal` adds
+the other platforms' natives).
 
-**On a new computer** (macOS, Linux or Windows, x86-64 or Apple Silicon), either:
-
-- **from source**: JDK 21, `git clone`, then `./gradlew run`. Gradle downloads the libraries from Maven Central
-  (libretro-kmp included). While the app depends on a `-SNAPSHOT` of
-  [pokemon-client](https://github.com/kotlinds/pokemon-client) (see `gradle/libs.versions.toml`), clone that
-  repository too and run `./gradlew publishToMavenLocal` in it first;
-- **from a prebuilt jar**: Java 21 only, then `java -jar "AI Plays Pokemon-….jar"`. To build one jar that runs on
-  every platform: `./gradlew packageUberJarForCurrentOS -Puniversal`, written to `build/compose/jars/` (the name
-  carries the platform it was built on, but `-Puniversal` adds the other platforms' natives).
+## Files and the emulator core
 
 Bring the ROM yourself. Its file name names the save: `heartgold-us.nds` → `heartgold-us.sav`.
 
@@ -56,11 +77,11 @@ The emulator core is the only other file. It is downloaded on first launch from 
 yourself, built for the target platform, into the data directory's `cores/` folder. The data directory is
 `~/.ai-plays-pokemon`, i.e. `%USERPROFILE%\.ai-plays-pokemon` on Windows.
 
-| Platform | Core file (DeSmuME) | Buildbot folder |
-|---|---|---|
+| Platform                      | Core file (DeSmuME)      | Buildbot folder                        |
+|-------------------------------|--------------------------|----------------------------------------|
 | macOS (Apple Silicon / Intel) | `desmume_libretro.dylib` | `apple/osx/arm64` / `apple/osx/x86_64` |
-| Linux x86-64 | `desmume_libretro.so` | `linux/x86_64` |
-| Windows x86-64 | `desmume_libretro.dll` | `windows/x86_64` |
+| Linux x86-64                  | `desmume_libretro.so`    | `linux/x86_64`                         |
+| Windows x86-64                | `desmume_libretro.dll`   | `windows/x86_64`                       |
 
 The URL is `https://buildbot.libretro.com/nightly/<folder>/latest/desmume_libretro.<ext>.zip`. No BIOS or firmware
 is needed.
@@ -68,11 +89,14 @@ is needed.
 The core is checked against a pinned SHA-256 where one is pinned. Today that is only macOS Apple Silicon, the build
 we tested; other platforms take whatever build is "latest". If the buildbot has moved on, the app stops with
 "Unexpected … build". Then either:
+
 - copy the core from a computer where it works;
 - or test the new build and update the hash in `LibretroCoreSpec`.
 
 To carry a game over, copy `saves/<rom name>.sav` from the data directory. It is converted for the core
 automatically.
+
+## Using the app
 
 In the window: the game on the left; on the right, choose the AI (Jev, or an LLM provider + model id), paste its API key
 if needed, pick the mode and options, and **▶ Let … play** starts the autonomous loop. You can see exactly what the AI
@@ -83,8 +107,7 @@ reasoning and note.
 decision runs `claude -p` (a few seconds of overhead) and counts towards your Claude plan's usage.
 
 **An external agent through MCP**: select the *MCP* tab (it starts the server; the port can be changed there), then
-connect the agent, e.g. `claude mcp add --transport http pokemon http://localhost:3333/mcp`, and ask it to play. It
-gets four tools, always the same:
+connect the agent (see the quick start) and ask it to play. It gets four tools, always the same:
 
 - `get_state`: the screen (with the ids of its entries), messages and events since the last call, the team, the
   battle (with the estimated effectiveness of each move at the Pokédex knowledge level), a text map of the
@@ -99,14 +122,14 @@ gets four tools, always the same:
 
 The agent keeps its own context between calls, and the game is frozen while it thinks.
 
-| Keys        | Action                     | Keys   | Action                         |
-|-------------|----------------------------|--------|--------------------------------|
-| Arrows      | D-pad                      | Space  | AI play / pause                |
-| X / Z       | A / B                      | P      | Pause / resume the emulator    |
-| S / A       | X / Y                      | F      | Fast forward                   |
-| Q / W       | L / R                      | M      | Mute                           |
-| Enter / ⌫   | Start / Select             | F1–F4  | Load state (Shift+F1–F4: save) |
-| Mouse       | Touch screen               | F12    | Save a RAM snapshot (debug)    |
+| Keys      | Action         | Keys  | Action                         |
+|-----------|----------------|-------|--------------------------------|
+| Arrows    | D-pad          | Space | AI play / pause                |
+| X / Z     | A / B          | P     | Pause / resume the emulator    |
+| S / A     | X / Y          | F     | Fast forward                   |
+| Q / W     | L / R          | M     | Mute                           |
+| Enter / ⌫ | Start / Select | F1–F4 | Load state (Shift+F1–F4: save) |
+| Mouse     | Touch screen   | F12   | Save a RAM snapshot (debug)    |
 
 You can play at the same time as the AI: the emulator merges both inputs.
 
@@ -115,21 +138,21 @@ You can play at the same time as the AI: the emulator merges both inputs.
 Everything can be set in the app; settings are saved in `~/.ai-plays-pokemon/config.properties` (next to the downloaded
 core, in-game saves and save states). Environment variables take precedence:
 
-| Environment variable                                        | Config key              | Default                                |
-|-------------------------------------------------------------|-------------------------|----------------------------------------|
-| `POKEMON_ROM` (or first argument)                           | `rom`                   | asked with a file picker               |
-| `DECISION_BACKEND` (`mcp` / `llm` / `jev`)                  | `backend`               | `mcp`                                  |
-| `TYPESAFE_API_KEY`                                          | `typesafe.apiKey`       | entered in the app                     |
-| `JEV_MODEL`                                                 | `typesafe.model`        | `jev-latest`                           |
-| `JEV_ENDPOINT`                                              | `typesafe.endpoint`     | `https://api.typesafe.ai/v1/systemone` |
-| `LLM_PROVIDER` (`openai`, `anthropic`, `openrouter`, `ollama`, `claude_code`) | `llm.provider` | `ollama`                  |
-| `LLM_MODEL`                                                 | `llm.<provider>.model`  | a default per provider                 |
-| `LLM_THINKING` (Ollama reasoning models think first)        | `llm.thinking`          | `false`                                |
-| `MCP_PORT`                                                  | `mcp.port`              | `3333`                                 |
-| `EMULATOR_CORE` (`desmume` / `melonds`)                     | `emulator.core`         | `desmume`                              |
-| `START_MUTED`                                               | `start.muted`           | `false`                                |
-| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY` | `llm.<provider>.apiKey` | entered in the app                     |
-| `AI_PLAYS_POKEMON_DATA_DIR`                                 | —                       | `~/.ai-plays-pokemon`                  |
+| Environment variable                                                          | Config key              | Default                                |
+|-------------------------------------------------------------------------------|-------------------------|----------------------------------------|
+| `POKEMON_ROM` (or first argument)                                             | `rom`                   | asked with a file picker               |
+| `DECISION_BACKEND` (`mcp` / `llm` / `jev`)                                    | `backend`               | `mcp`                                  |
+| `TYPESAFE_API_KEY`                                                            | `typesafe.apiKey`       | entered in the app                     |
+| `JEV_MODEL`                                                                   | `typesafe.model`        | `jev-latest`                           |
+| `JEV_ENDPOINT`                                                                | `typesafe.endpoint`     | `https://api.typesafe.ai/v1/systemone` |
+| `LLM_PROVIDER` (`openai`, `anthropic`, `openrouter`, `ollama`, `claude_code`) | `llm.provider`          | `ollama`                               |
+| `LLM_MODEL`                                                                   | `llm.<provider>.model`  | a default per provider                 |
+| `LLM_THINKING` (Ollama reasoning models think first)                          | `llm.thinking`          | `false`                                |
+| `MCP_PORT`                                                                    | `mcp.port`              | `3333`                                 |
+| `EMULATOR_CORE` (`desmume` / `melonds`)                                       | `emulator.core`         | `desmume`                              |
+| `START_MUTED`                                                                 | `start.muted`           | `false`                                |
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`                   | `llm.<provider>.apiKey` | entered in the app                     |
+| `AI_PLAYS_POKEMON_DATA_DIR`                                                   | —                       | `~/.ai-plays-pokemon`                  |
 
 **Jev without the cloud.** Jev itself is only served by TypeSafe (no public weights). `JEV_ENDPOINT` can point to any
 server implementing the same `POST /v1/systemone` protocol, e.g. an open-weight reproduction of Jev served locally.
@@ -147,7 +170,7 @@ server implementing the same `POST /v1/systemone` protocol, e.g. an open-weight 
  ┌───────────────▼──── pokemon-client (dev.kotlinds.pokemonclient) ──────┐
  │ state: GameState, sealed Screen (entries, cursor, topology), events   │
  │ runtime: ActionScope (self-checking taps), Recorder                    │
- │ actions: Navigator (verified cursor moves), typed GameActions, plans, │
+ │ actions: Navigator (verified cursor moves), typed GameActions, recipes│
  │          ActionRegistry (schema, availability, typed errors)           │
  │ world: Area, Pathfinder (levels, ledges, surf, triggers)  view: MapView│
  │ data: GameData, Lookup, KnowledgeLevel                                 │
@@ -162,15 +185,18 @@ Central; a `-SNAPSHOT` from `mavenLocal()` while developing):
 - **`pokemon-client`** (Kotlin Multiplatform, as much as possible in `commonMain`) is the library: it knows Pokémon,
   not emulators. A game reads the RAM into one common, typed model: `GameState` with a sealed `Screen` (every menu
   has its entries with **stable, language-independent ids** like `option:yes`, `mon:8dd175d1.76f3a6fb`, `move:85`,
-  its cursor and the exact D-pad topology). Actions are typed (`GameAction`) and carried out by **plans** that never
-  press blindly: the `Navigator` reads the cursor, moves it one verified tap at a time and confirms only on the
+  its cursor and the exact D-pad topology). Actions are typed (`GameAction`) and carried out by **recipes** (one class
+  hierarchy, a game overrides
+  only the steps that differ) that never press blindly: the `Navigator` reads the cursor, moves it one verified tap at a
+  time and confirms only on the
   target (3 corrections at most, then an explicit error). Movement uses the maps read from the **ROM** (tiles,
   heights, warps, events) with the live people and the game's script variables on top. Nothing is ever written to
   the game's RAM: everything goes through buttons and the touch screen, like a player.
 - **`pokemon-client-libretro`** (JVM, same repository) plugs the library into a libretro core: `LibretroConsole` (the
   `ConsolePort` over libretro-kmp), the cores, save formats, and a headless **bench** that runs commands and actions
   on a ROM without the app. Bringing up a new game happens there.
-- **the app** runs the emulator (through `pokemon-client-libretro` and [libretro-kmp](https://github.com/kotlinds/libretro-kmp), a libretro core loaded in process) on
+- **the app** runs the emulator (through `pokemon-client-libretro`
+  and [libretro-kmp](https://github.com/kotlinds/libretro-kmp), a libretro core loaded in process) on
   a single console thread that drives time (agents get a lease; the human can always take over), and connects the
   deciders: our loop (`PokemonPlayer` with Jev, LLMs through Koog, or `claude -p`) or an external agent through MCP.
 
@@ -189,9 +215,11 @@ unsure. Having the three side by side, with milestones recorded for each run, is
 ## Extending
 
 - **Another game** (Diamond/Pearl, Black/White, a GBA game later...), in pokemon-client, see its
-  [adding-a-game guide](https://github.com/kotlinds/pokemon-client/blob/main/docs/adding-a-game.md): implement `PokemonGame` (RAM → `GameState`, screen
-  decoders, optionally `world` and `data` from the ROM) and register its ROM code in `PokemonGames`; the plans, the
-  navigator, the registry, the MCP server and every decider work unchanged.
+  [adding-a-game guide](https://github.com/kotlinds/pokemon-client/blob/main/docs/adding-a-game.md): implement
+  `PokemonGame` (RAM → `GameState`, screen
+  decoders, optionally `world` and `data` from the ROM) and register its ROM code in `PokemonGames`, and give it its
+  recipes (the common ones, overriding only the steps that
+  differ); the navigator, the registry, the MCP server and every decider work unchanged.
 - **Another emulator**: implement `ConsolePort` (or add a `LibretroCoreSpec` entry for another libretro core).
 - **Another AI**: any model Koog supports is a provider + model id away (`LlmProvider`); anything else implements
   `DecisionModel`.
