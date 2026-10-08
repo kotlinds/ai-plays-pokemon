@@ -52,8 +52,11 @@ class GameSession(
      */
     private val confirmDelivery: Boolean = false,
 ) {
-    /** The actions of this game: the common ones with the game's own recipes ([ActionRegistry.of]). */
-    val registry: ActionRegistry = ActionRegistry.of(game)
+    /**
+     * The actions (the common contract, [ActionRegistry.of]): listed ([enumerate], the view) and executed with [game]'s
+     * own recipes, which decide when each can run.
+     */
+    val registry: ActionRegistry = ActionRegistry.of()
 
     private val _blindUses = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Int>>(emptyMap())
 
@@ -146,6 +149,12 @@ class GameSession(
 
     /** Decodes the current state (on the console thread). */
     suspend fun state(): GameState = host.observe { memory -> game.state(memory) }
+
+    /**
+     * Every concrete action worth offering in [state] (the session's mode), by canonical key, for models that pick from
+     * a list: availability read on [game]'s recipes, the same the execution checks.
+     */
+    fun enumerate(state: GameState): Map<String, GameAction> = registry.enumerate(state, options().mode, game)
 
     /** What the agent reads: events since its last call, the screen and state, the actions possible now. */
     suspend fun describe(detail: AgentView.Detail = AgentView.Detail.STANDARD): JsonObject = describeWithState(detail).second

@@ -73,7 +73,7 @@ class AgentSession(
     }
 
     /** The options of [state] by key, as models pick them (the session's mode). */
-    private fun options(state: GameState): Map<String, GameAction> = gameSession.registry.enumerate(state, gameSession.options().mode)
+    private fun options(state: GameState): Map<String, GameAction> = gameSession.enumerate(state)
 
     fun request(turn: Turn, generative: Boolean, planner: Boolean = false): ChoiceRequest = DecisionPrompt.build(
         objective = objective,
